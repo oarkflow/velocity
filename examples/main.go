@@ -35,11 +35,6 @@ func main() {
 		return
 	}
 
-	// Check if we should run comparison benchmark
-	if len(os.Args) > 1 && os.Args[1] == "--compare" {
-		RunComparisonBenchmark()
-		return
-	} // Initialize database
 	db, err := velocity.New("./velocitydb_data")
 	if err != nil {
 		log.Fatal(err)
@@ -241,6 +236,78 @@ func main() {
 	fmt.Printf("  Memory usage: +5-15%% efficiency (structured layout)\n")
 	fmt.Printf("  Crash recovery: Faster (WAL + SSTables)\n")
 	fmt.Printf("  Concurrent access: Better scaling with goroutines\n\n")
+
+	// Examples for new functions
+	fmt.Printf("🔧 Examples for New Functions\n")
+	fmt.Printf("=============================\n")
+
+	// Test Has
+	fmt.Printf("Testing Has function:\n")
+	testKey := []byte("test_has_key")
+	fmt.Printf("  Has('%s') before put: %v\n", testKey, db.Has(testKey))
+	db.Put(testKey, []byte("some_value"))
+	fmt.Printf("  Has('%s') after put: %v\n", testKey, db.Has(testKey))
+	db.Delete(testKey)
+	fmt.Printf("  Has('%s') after delete: %v\n\n", testKey, db.Has(testKey))
+
+	// Test IncrBy
+	fmt.Printf("Testing Incr function:\n")
+	counterKey := []byte("counter")
+	val, err := db.Incr(counterKey, 5)
+	if err != nil {
+		fmt.Printf("  Incr error: %v\n", err)
+	} else {
+		fmt.Printf("  Incr('%s', 5): %v\n", counterKey, val)
+	}
+	val, err = db.Incr(counterKey, 2.5)
+	if err != nil {
+		fmt.Printf("  Incr error: %v\n", err)
+	} else {
+		fmt.Printf("  Incr('%s', 2.5): %v\n", counterKey, val)
+	}
+	val, err = db.Incr(counterKey) // default step 1
+	if err != nil {
+		fmt.Printf("  Incr error: %v\n", err)
+	} else {
+		fmt.Printf("  Incr('%s') default step: %v\n\n", counterKey, val)
+	}
+
+	// Test DecrBy
+	fmt.Printf("Testing Decr function:\n")
+	val, err = db.Decr(counterKey, 3)
+	if err != nil {
+		fmt.Printf("  Decr error: %v\n", err)
+	} else {
+		fmt.Printf("  Decr('%s', 3): %v\n", counterKey, val)
+	}
+	val, err = db.Decr(counterKey, 1.5)
+	if err != nil {
+		fmt.Printf("  Decr error: %v\n", err)
+	} else {
+		fmt.Printf("  Decr('%s', 1.5): %v\n", counterKey, val)
+	}
+	val, err = db.Decr(counterKey) // default step 1
+	if err != nil {
+		fmt.Printf("  Decr error: %v\n", err)
+	} else {
+		fmt.Printf("  Decr('%s') default step: %v\n\n", counterKey, val)
+	}
+
+	// Test Keys
+	fmt.Printf("Testing Keys function:\n")
+	allKeys := db.Keys()
+	fmt.Printf("  Total keys in database: %d\n", len(allKeys))
+	if len(allKeys) > 0 {
+		fmt.Printf("  Sample keys (hex):\n")
+		for i, key := range allKeys {
+			if i >= 5 { // Show only first 5 keys
+				fmt.Printf("    ... and %d more\n", len(allKeys)-5)
+				break
+			}
+			fmt.Printf("    %x\n", key)
+		}
+	}
+	fmt.Printf("\n")
 
 	fmt.Printf("🎉 VelocityDB benchmark completed successfully!\n")
 	fmt.Printf("   Ready for production workloads requiring extreme performance.\n")

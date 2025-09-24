@@ -29,6 +29,8 @@ github.com/mattn/go-sqlite3 v1.14.32 h1:JD12Ag3oLy1zQA+BNn74xRgaBbdhbNIDYvQUEuuE
 github.com/mattn/go-sqlite3 v1.14.32/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/oarkflow/cas v0.0.3 h1:5kYdPfqW5CL8XyRPWH6YX9MS/FHU/xf5SLYZKRDMyxI=
 github.com/oarkflow/cas v0.0.3/go.mod h1:5eI6aXc51F5CxGHdwNhiyaWJx/1h+RuUl6sfXefmV20=
+github.com/oarkflow/convert v0.0.5 h1:5s5DlnZLSUweB+EDUjynj0Eput7AkGUEQUvs/j4CWmM=
+github.com/oarkflow/convert v0.0.5/go.mod h1:/N8EEJiKUCtYS//+UfS3IX3ej7K1wIPgW/1nBhbeEXs=
 github.com/oarkflow/date v0.0.4 h1:EwY/wiS3CqZNBx7b2x+3kkJwVNuGk+G0dls76kL/fhU=
 github.com/oarkflow/date v0.0.4/go.mod h1:xQTFc6p6O5VX6J75ZrPJbelIFGca1ASmhpgirFqL8vM=
 github.com/oarkflow/expr v0.0.11 h1:H6h+dIUlU+xDlijMXKQCh7TdE6MGVoFPpZU7q/dziRI=

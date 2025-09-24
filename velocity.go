@@ -5,9 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oarkflow/convert"
 )
 
 // Configuration constants
@@ -176,7 +179,7 @@ func (db *DB) flushMemTable() error {
 
 	// Collect all entries
 	var entries []*Entry
-	oldMemTable.entries.Range(func(key, value interface{}) bool {
+	oldMemTable.entries.Range(func(key, value any) bool {
 		entries = append(entries, value.(*Entry))
 		return true
 	})
@@ -213,4 +216,116 @@ func (db *DB) Close() error {
 	}
 
 	return db.wal.Close()
+}
+
+func (db *DB) Has(key []byte) bool {
+	if db.cache != nil {
+		if _, ok := db.cache.Get(string(key)); ok {
+			return true
+		}
+	}
+
+	// Check memtable first
+	if entry := db.memTable.Get(key); entry != nil {
+		return !entry.Deleted
+	}
+
+	// Check SSTables
+	db.mutex.RLock()
+	sstables := make([]*SSTable, len(db.sstables))
+	copy(sstables, db.sstables)
+	db.mutex.RUnlock()
+
+	// Search SSTables in reverse order (newest first)
+	for i := len(sstables) - 1; i >= 0; i-- {
+		if entry := sstables[i].Get(key); entry != nil {
+			return !entry.Deleted
+		}
+	}
+
+	return false
+}
+
+func (db *DB) incr(key []byte, incr float64, action string) (any, error) {
+	// Get current value
+	current, err := db.Get(key)
+	if err != nil {
+		// If not found, assume 0
+		current = []byte("0")
+	}
+
+	currentFloat, err := strconv.ParseFloat(string(current), 64)
+	if err != nil {
+		return nil, fmt.Errorf("current value is not a number")
+	}
+
+	var newVal float64
+	if action == "incr" {
+		newVal = currentFloat + incr
+	} else if action == "decr" {
+		newVal = currentFloat - incr
+	} else {
+		return nil, fmt.Errorf("invalid action")
+	}
+
+	// Store as string
+	newValStr := strconv.FormatFloat(newVal, 'f', -1, 64)
+	err = db.Put(key, []byte(newValStr))
+	if err != nil {
+		return nil, err
+	}
+
+	return newVal, nil
+}
+
+func (db *DB) Incr(key []byte, step ...any) (any, error) {
+	var val float64 = 1
+	if len(step) > 0 {
+		if floatVal, ok := convert.ToFloat64(step[0]); ok {
+			val = floatVal
+		}
+	}
+	return db.incr(key, val, "incr")
+}
+
+func (db *DB) Decr(key []byte, step ...any) (any, error) {
+	var val float64 = 1
+	if len(step) > 0 {
+		if floatVal, ok := convert.ToFloat64(step[0]); ok {
+			val = floatVal
+		}
+	}
+	return db.incr(key, val, "decr")
+}
+
+func (db *DB) Keys() [][]byte {
+	keysMap := make(map[string]bool)
+
+	// From memtable
+	db.memTable.entries.Range(func(key, value any) bool {
+		entry := value.(*Entry)
+		if !entry.Deleted {
+			keysMap[string(entry.Key)] = true
+		}
+		return true
+	})
+
+	// From SSTables
+	db.mutex.RLock()
+	sstables := make([]*SSTable, len(db.sstables))
+	copy(sstables, db.sstables)
+	db.mutex.RUnlock()
+
+	for _, sst := range sstables {
+		for _, idx := range sst.indexData {
+			keysMap[string(idx.Key)] = true
+		}
+	}
+
+	var keys [][]byte
+	for k := range keysMap {
+		keys = append(keys, []byte(k))
+	}
+
+	return keys
 }
