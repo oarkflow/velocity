@@ -109,7 +109,6 @@ func (w *WAL) Close() error {
 	}
 	w.closed = true
 
-	log.Printf("WAL.Close() called - attempting to close stopChan")
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("WAL.Close() panic recovered: %v", r)
@@ -117,7 +116,6 @@ func (w *WAL) Close() error {
 	}()
 
 	close(w.stopChan)
-	log.Printf("WAL.Close() - stopChan closed successfully")
 	w.ticker.Stop()
 
 	w.syncUnsafe()

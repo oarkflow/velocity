@@ -47,20 +47,36 @@ type DB struct {
 	memTableSize int64
 }
 
-func New(path string) (*DB, error) {
-	err := os.MkdirAll(path, 0755)
+var defaultPath = "./data/velocity"
+
+func init() {
+	path, err := os.UserHomeDir()
+	if err == nil {
+		defaultPath = filepath.Join(path, ".velocity")
+	}
+	if _, err := os.Stat(defaultPath); os.IsNotExist(err) {
+		os.MkdirAll(defaultPath, 0755)
+	}
+}
+
+func New(path ...string) (*DB, error) {
+	currentPath := defaultPath
+	if len(path) > 0 && path[0] != "" {
+		currentPath = path[0]
+	}
+	err := os.MkdirAll(currentPath, 0755)
 	if err != nil {
 		return nil, err
 	}
 
-	walPath := filepath.Join(path, "wal.log")
+	walPath := filepath.Join(currentPath, "wal.log")
 	wal, err := NewWAL(walPath)
 	if err != nil {
 		return nil, err
 	}
 
 	db := &DB{
-		path:         path,
+		path:         currentPath,
 		memTable:     NewMemTable(),
 		wal:          wal,
 		sstables:     make([]*SSTable, 0),
@@ -75,6 +91,13 @@ func New(path string) (*DB, error) {
 }
 
 func (db *DB) Put(key, value []byte) error {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+	return db.put(key, value)
+}
+
+// Internal put method without locking - used when already holding a lock
+func (db *DB) put(key, value []byte) error {
 	entry := &Entry{
 		Key:       append([]byte{}, key...),
 		Value:     append([]byte{}, value...),
@@ -105,6 +128,13 @@ func (db *DB) Put(key, value []byte) error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+	return db.get(key)
+}
+
+// Internal get method without locking - used when already holding a lock
+func (db *DB) get(key []byte) ([]byte, error) {
 	keyStr := string(key)
 	if db.cache != nil {
 		if val, ok := db.cache.Get(keyStr); ok {
@@ -125,10 +155,8 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	}
 
 	// Check SSTables
-	db.mutex.RLock()
 	sstables := make([]*SSTable, len(db.sstables))
 	copy(sstables, db.sstables)
-	db.mutex.RUnlock()
 
 	// Search SSTables in reverse order (newest first)
 	for i := len(sstables) - 1; i >= 0; i-- {
@@ -148,6 +176,9 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 }
 
 func (db *DB) Delete(key []byte) error {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
 	entry := &Entry{
 		Key:       append([]byte{}, key...),
 		Value:     nil,
@@ -219,6 +250,9 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) Has(key []byte) bool {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
 	if db.cache != nil {
 		if _, ok := db.cache.Get(string(key)); ok {
 			return true
@@ -231,10 +265,8 @@ func (db *DB) Has(key []byte) bool {
 	}
 
 	// Check SSTables
-	db.mutex.RLock()
 	sstables := make([]*SSTable, len(db.sstables))
 	copy(sstables, db.sstables)
-	db.mutex.RUnlock()
 
 	// Search SSTables in reverse order (newest first)
 	for i := len(sstables) - 1; i >= 0; i-- {
@@ -247,8 +279,12 @@ func (db *DB) Has(key []byte) bool {
 }
 
 func (db *DB) incr(key []byte, incr float64, action string) (any, error) {
+	// Use write lock to ensure atomicity of read-modify-write operation
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
 	// Get current value
-	current, err := db.Get(key)
+	current, err := db.get(key) // Use internal get method to avoid double locking
 	if err != nil {
 		// If not found, assume 0
 		current = []byte("0")
@@ -260,17 +296,18 @@ func (db *DB) incr(key []byte, incr float64, action string) (any, error) {
 	}
 
 	var newVal float64
-	if action == "incr" {
+	switch action {
+	case "incr":
 		newVal = currentFloat + incr
-	} else if action == "decr" {
+	case "decr":
 		newVal = currentFloat - incr
-	} else {
+	default:
 		return nil, fmt.Errorf("invalid action")
 	}
 
-	// Store as string
+	// Store as string using internal put method to avoid double locking
 	newValStr := strconv.FormatFloat(newVal, 'f', -1, 64)
-	err = db.Put(key, []byte(newValStr))
+	err = db.put(key, []byte(newValStr))
 	if err != nil {
 		return nil, err
 	}
@@ -299,6 +336,9 @@ func (db *DB) Decr(key []byte, step ...any) (any, error) {
 }
 
 func (db *DB) Keys() [][]byte {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
 	keysMap := make(map[string]bool)
 
 	// From memtable
@@ -311,10 +351,8 @@ func (db *DB) Keys() [][]byte {
 	})
 
 	// From SSTables
-	db.mutex.RLock()
 	sstables := make([]*SSTable, len(db.sstables))
 	copy(sstables, db.sstables)
-	db.mutex.RUnlock()
 
 	for _, sst := range sstables {
 		for _, idx := range sst.indexData {

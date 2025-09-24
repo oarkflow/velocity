@@ -35,6 +35,12 @@ func main() {
 		return
 	}
 
+	// Check if we should run comparison benchmark
+	if len(os.Args) > 1 && os.Args[1] == "--compare" {
+		RunComparisonBenchmark()
+		return
+	}
+
 	db, err := velocity.New("./velocitydb_data")
 	if err != nil {
 		log.Fatal(err)
