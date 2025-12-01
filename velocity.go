@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +43,7 @@ type DB struct {
 	mutex      sync.RWMutex
 	compacting atomic.Bool
 	cache      *LRUCache
+	crypto     *CryptoProvider
 
 	// Configuration
 	memTableSize int64
@@ -59,18 +61,40 @@ func init() {
 	}
 }
 
+type Config struct {
+	Path          string
+	EncryptionKey []byte
+}
+
 func New(path ...string) (*DB, error) {
-	currentPath := defaultPath
+	cfg := Config{}
 	if len(path) > 0 && path[0] != "" {
-		currentPath = path[0]
+		cfg.Path = path[0]
 	}
-	err := os.MkdirAll(currentPath, 0755)
+	return NewWithConfig(cfg)
+}
+
+func NewWithConfig(cfg Config) (*DB, error) {
+	currentPath := cfg.Path
+	if currentPath == "" {
+		currentPath = defaultPath
+	}
+	if err := os.MkdirAll(currentPath, 0755); err != nil {
+		return nil, err
+	}
+
+	key, err := ensureMasterKey(currentPath, cfg.EncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	cryptoProvider, err := newCryptoProvider(key)
 	if err != nil {
 		return nil, err
 	}
 
 	walPath := filepath.Join(currentPath, "wal.log")
-	wal, err := NewWAL(walPath)
+	wal, err := NewWAL(walPath, cryptoProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +106,7 @@ func New(path ...string) (*DB, error) {
 		sstables:     make([]*SSTable, 0),
 		memTableSize: DefaultMemTableSize,
 		cache:        nil,
+		crypto:       cryptoProvider,
 	}
 
 	// Start background compaction
@@ -160,7 +185,11 @@ func (db *DB) get(key []byte) ([]byte, error) {
 
 	// Search SSTables in reverse order (newest first)
 	for i := len(sstables) - 1; i >= 0; i-- {
-		if entry := sstables[i].Get(key); entry != nil {
+		entry, err := sstables[i].Get(key)
+		if err != nil {
+			return nil, err
+		}
+		if entry != nil {
 			if entry.Deleted {
 				return nil, fmt.Errorf("key not found")
 			}
@@ -226,7 +255,7 @@ func (db *DB) flushMemTable() error {
 
 	// Create new SSTable
 	sstPath := filepath.Join(db.path, fmt.Sprintf("sst_%d.db", time.Now().UnixNano()))
-	sst, err := NewSSTable(sstPath, entries)
+	sst, err := NewSSTable(sstPath, entries, db.crypto)
 	if err != nil {
 		return err
 	}
@@ -270,7 +299,12 @@ func (db *DB) Has(key []byte) bool {
 
 	// Search SSTables in reverse order (newest first)
 	for i := len(sstables) - 1; i >= 0; i-- {
-		if entry := sstables[i].Get(key); entry != nil {
+		entry, err := sstables[i].Get(key)
+		if err != nil {
+			log.Printf("velocity: integrity verification failed for key %x: %v", key, err)
+			continue
+		}
+		if entry != nil {
 			return !entry.Deleted
 		}
 	}

@@ -3,6 +3,7 @@ package velocity
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -17,12 +18,16 @@ type WAL struct {
 	ticker   *time.Ticker
 	stopChan chan struct{}
 	closed   bool
+	crypto   *CryptoProvider
 }
 
-func NewWAL(path string) (*WAL, error) {
+func NewWAL(path string, crypto *CryptoProvider) (*WAL, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
+	}
+	if crypto == nil {
+		return nil, fmt.Errorf("encryption provider is required for WAL")
 	}
 
 	wal := &WAL{
@@ -30,6 +35,7 @@ func NewWAL(path string) (*WAL, error) {
 		buffer:   bytes.NewBuffer(make([]byte, 0, WALBufferSize)),
 		ticker:   time.NewTicker(WALSyncInterval),
 		stopChan: make(chan struct{}),
+		crypto:   crypto,
 	}
 
 	// Background sync goroutine
@@ -42,14 +48,22 @@ func (w *WAL) Write(entry *Entry) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	// Write entry in binary format
+	// Encrypt value using AEAD with entry metadata as AAD
+	nonce, ciphertext, err := w.crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.Deleted))
+	if err != nil {
+		return err
+	}
+
 	keyLen := uint32(len(entry.Key))
-	valueLen := uint32(len(entry.Value))
+	nonceLen := uint16(len(nonce))
+	valueLen := uint32(len(ciphertext))
 
 	binary.Write(w.buffer, binary.LittleEndian, keyLen)
 	w.buffer.Write(entry.Key)
+	binary.Write(w.buffer, binary.LittleEndian, nonceLen)
+	w.buffer.Write(nonce)
 	binary.Write(w.buffer, binary.LittleEndian, valueLen)
-	w.buffer.Write(entry.Value)
+	w.buffer.Write(ciphertext)
 	binary.Write(w.buffer, binary.LittleEndian, entry.Timestamp)
 
 	var deleted uint8

@@ -1,7 +1,12 @@
 package velocity
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"log"
+	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -80,6 +85,12 @@ func (s *HTTPServer) setupRoutes() {
 	api.Post("/put", s.handlePut)
 	api.Get("/get/:key", s.handleGet)
 	api.Delete("/delete/:key", s.handleDelete)
+
+	api.Post("/files", s.handleFileUpload)
+	api.Get("/files", s.handleFileList)
+	api.Get("/files/:key/meta", s.handleFileMetadata)
+	api.Get("/files/:key", s.handleFileDownload)
+	api.Delete("/files/:key", s.handleFileDelete)
 }
 
 // jwtAuthMiddleware validates JWT tokens
@@ -228,6 +239,122 @@ func (s *HTTPServer) handleDelete(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"status": "ok",
+	})
+}
+
+func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "File is required")
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Unable to open uploaded file")
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Unable to read uploaded file")
+	}
+
+	key := c.FormValue("key")
+	overwrite := c.QueryBool("overwrite", false)
+
+	if overwrite && key != "" && s.db.HasFile(key) {
+		if err := s.db.DeleteFile(key); err != nil && !errors.Is(err, ErrFileNotFound) {
+			return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+		}
+	}
+
+	contentType := fileHeader.Header.Get("Content-Type")
+	if contentType == "" && len(data) > 0 {
+		contentType = http.DetectContentType(data)
+	}
+
+	meta, err := s.db.StoreFile(key, fileHeader.Filename, contentType, data)
+	if err != nil {
+		if errors.Is(err, ErrFileExists) {
+			return fiber.NewError(fiber.StatusConflict, "File already exists. Provide overwrite=true to replace it.")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"status": "stored",
+		"file":   meta,
+	})
+}
+
+func (s *HTTPServer) handleFileDownload(c *fiber.Ctx) error {
+	key := c.Params("key")
+	if key == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
+	}
+
+	data, meta, err := s.db.GetFile(key)
+	if err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "File not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	if meta.ContentType != "" {
+		c.Set(fiber.HeaderContentType, meta.ContentType)
+	}
+	c.Set(fiber.HeaderContentLength, strconv.FormatInt(meta.Size, 10))
+	c.Attachment(meta.Filename)
+
+	return c.SendStream(bytes.NewReader(data))
+}
+
+func (s *HTTPServer) handleFileMetadata(c *fiber.Ctx) error {
+	key := c.Params("key")
+	if key == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
+	}
+
+	meta, err := s.db.GetFileMetadata(key)
+	if err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "File not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(fiber.Map{
+		"file": meta,
+	})
+}
+
+func (s *HTTPServer) handleFileList(c *fiber.Ctx) error {
+	files, err := s.db.ListFiles()
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(fiber.Map{
+		"files": files,
+	})
+}
+
+func (s *HTTPServer) handleFileDelete(c *fiber.Ctx) error {
+	key := c.Params("key")
+	if key == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
+	}
+
+	if err := s.db.DeleteFile(key); err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "File not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(fiber.Map{
+		"status": "deleted",
 	})
 }
 

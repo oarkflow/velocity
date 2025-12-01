@@ -3,6 +3,7 @@ package velocity
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -18,6 +19,7 @@ type SSTable struct {
 	bloomFilter *BloomFilter
 	minKey      []byte
 	maxKey      []byte
+	crypto      *CryptoProvider
 }
 
 type IndexEntry struct {
@@ -26,10 +28,13 @@ type IndexEntry struct {
 	Size   uint32
 }
 
-func NewSSTable(path string, entries []*Entry) (*SSTable, error) {
+func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable, error) {
 	file, err := os.Create(path)
 	if err != nil {
 		return nil, err
+	}
+	if crypto == nil {
+		return nil, fmt.Errorf("encryption provider is required for SSTable")
 	}
 
 	// Sort entries by key
@@ -65,15 +70,22 @@ func NewSSTable(path string, entries []*Entry) (*SSTable, error) {
 
 	for _, entry := range entries {
 		keyLen := uint32(len(entry.Key))
-		valueLen := uint32(len(entry.Value))
+		nonce, ciphertext, err := crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.Deleted))
+		if err != nil {
+			return nil, err
+		}
+		valueLen := uint32(len(ciphertext))
+		nonceLen := uint16(len(nonce))
 
 		startOffset := currentOffset
 
 		// Write entry
 		binary.Write(file, binary.LittleEndian, keyLen)
 		file.Write(entry.Key)
+		binary.Write(file, binary.LittleEndian, nonceLen)
+		file.Write(nonce)
 		binary.Write(file, binary.LittleEndian, valueLen)
-		file.Write(entry.Value)
+		file.Write(ciphertext)
 		binary.Write(file, binary.LittleEndian, entry.Timestamp)
 
 		var deleted uint8
@@ -83,7 +95,7 @@ func NewSSTable(path string, entries []*Entry) (*SSTable, error) {
 		binary.Write(file, binary.LittleEndian, deleted)
 		binary.Write(file, binary.LittleEndian, entry.checksum)
 
-		entrySize := 4 + len(entry.Key) + 4 + len(entry.Value) + 8 + 1 + 4
+		entrySize := 4 + len(entry.Key) + 2 + len(nonce) + 4 + len(ciphertext) + 8 + 1 + 4
 		currentOffset += uint64(entrySize)
 
 		indexEntries = append(indexEntries, IndexEntry{
@@ -130,6 +142,7 @@ func NewSSTable(path string, entries []*Entry) (*SSTable, error) {
 		mmap:        mmap,
 		indexData:   indexEntries,
 		bloomFilter: bf,
+		crypto:      crypto,
 	}
 
 	if len(entries) > 0 {
@@ -140,10 +153,10 @@ func NewSSTable(path string, entries []*Entry) (*SSTable, error) {
 	return sst, nil
 }
 
-func (sst *SSTable) Get(key []byte) *Entry {
+func (sst *SSTable) Get(key []byte) (*Entry, error) {
 	// Check bloom filter first
 	if !sst.bloomFilter.Contains(key) {
-		return nil
+		return nil, nil
 	}
 
 	// Binary search in index
@@ -152,7 +165,7 @@ func (sst *SSTable) Get(key []byte) *Entry {
 	})
 
 	if idx >= len(sst.indexData) || compareKeys(sst.indexData[idx].Key, key) != 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Read entry from mmap
@@ -163,6 +176,7 @@ func (sst *SSTable) Get(key []byte) *Entry {
 	var timestamp uint64
 	var deleted uint8
 	var checksum uint32
+	var nonceLen uint16
 
 	reader := bytes.NewReader(data)
 	binary.Read(reader, binary.LittleEndian, &keyLen)
@@ -170,23 +184,32 @@ func (sst *SSTable) Get(key []byte) *Entry {
 	entryKey := make([]byte, keyLen)
 	reader.Read(entryKey)
 
+	binary.Read(reader, binary.LittleEndian, &nonceLen)
+	nonce := make([]byte, nonceLen)
+	reader.Read(nonce)
+
 	binary.Read(reader, binary.LittleEndian, &valueLen)
-	entryValue := make([]byte, valueLen)
-	reader.Read(entryValue)
+	ciphertext := make([]byte, valueLen)
+	reader.Read(ciphertext)
 
 	binary.Read(reader, binary.LittleEndian, &timestamp)
 	binary.Read(reader, binary.LittleEndian, &deleted)
 	binary.Read(reader, binary.LittleEndian, &checksum)
 
+	plaintext, err := sst.crypto.Decrypt(nonce, ciphertext, buildEntryAAD(entryKey, timestamp, deleted == 1))
+	if err != nil {
+		return nil, err
+	}
+
 	entry := &Entry{
 		Key:       entryKey,
-		Value:     entryValue,
+		Value:     plaintext,
 		Timestamp: timestamp,
 		Deleted:   deleted == 1,
 		checksum:  checksum,
 	}
 
-	return entry
+	return entry, nil
 }
 
 func (sst *SSTable) Close() error {

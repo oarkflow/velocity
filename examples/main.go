@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -37,7 +38,7 @@ func main() {
 
 	// Check if we should run comparison benchmark
 	if len(os.Args) > 1 && os.Args[1] == "--compare" {
-		RunComparisonBenchmark()
+		// RunComparisonBenchmark()
 		return
 	}
 
@@ -314,6 +315,68 @@ func main() {
 		}
 	}
 	fmt.Printf("\n")
+
+	fmt.Printf("Testing Secure File Storage:\n")
+	fmt.Printf("================================\n")
+	sampleContent := []byte("Velocity secure file payload @ " + time.Now().Format(time.RFC3339Nano))
+	fileMeta, err := db.StoreFile("", "performance_notes.txt", "text/plain", sampleContent)
+	if err != nil {
+		fmt.Printf("  StoreFile error: %v\n\n", err)
+	} else {
+		defer db.DeleteFile(fileMeta.Key)
+		fmt.Printf("  Stored file key: %s (%d bytes)\n", fileMeta.Key, fileMeta.Size)
+		payload, meta, err := db.GetFile(fileMeta.Key)
+		if err != nil {
+			fmt.Printf("  GetFile error: %v\n", err)
+		} else {
+			fmt.Printf("  Retrieved file %s (%s) uploaded %s\n", meta.Filename, meta.ContentType, meta.UploadedAt.Format(time.RFC3339))
+			fmt.Printf("  Preview: %q\n", string(payload))
+		}
+
+		files, err := db.ListFiles()
+		if err != nil {
+			fmt.Printf("  ListFiles error: %v\n\n", err)
+		} else {
+			fmt.Printf("  Total stored files: %d\n", len(files))
+			for i, f := range files {
+				if i >= 3 {
+					fmt.Printf("    ... and %d more\n", len(files)-3)
+					break
+				}
+				fmt.Printf("    %s -> %s (%d bytes)\n", f.Key, f.Filename, f.Size)
+			}
+			fmt.Printf("\n")
+		}
+	}
+
+	fmt.Printf("Testing File Storage from Disk Path:\n")
+	fmt.Printf("====================================\n")
+	tempFile, err := os.CreateTemp("", "velocity-demo-*.txt")
+	if err != nil {
+		fmt.Printf("  Failed to create temp file: %v\n\n", err)
+	} else {
+		defer os.Remove(tempFile.Name())
+		content := "Velocity external file @ " + time.Now().Format(time.RFC3339)
+		if _, err := tempFile.WriteString(content); err != nil {
+			fmt.Printf("  Temp file write error: %v\n\n", err)
+		} else {
+			tempFile.Close()
+			payload, err := os.ReadFile(tempFile.Name())
+			if err != nil {
+				fmt.Printf("  Temp file read error: %v\n\n", err)
+			} else {
+				fileMeta2, err := db.StoreFile("", filepath.Base(tempFile.Name()), "text/plain", payload)
+				if err != nil {
+					fmt.Printf("  StoreFile error: %v\n\n", err)
+				} else {
+					defer db.DeleteFile(fileMeta2.Key)
+					fmt.Printf("  Stored file from %s as key %s (%d bytes)\n", tempFile.Name(), fileMeta2.Key, fileMeta2.Size)
+					_, meta2, _ := db.GetFile(fileMeta2.Key)
+					fmt.Printf("  Retrieved metadata filename=%s uploaded=%s\n\n", meta2.Filename, meta2.UploadedAt.Format(time.RFC3339))
+				}
+			}
+		}
+	}
 
 	fmt.Printf("🎉 VelocityDB benchmark completed successfully!\n")
 	fmt.Printf("   Ready for production workloads requiring extreme performance.\n")
