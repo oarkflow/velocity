@@ -17,6 +17,7 @@ require (
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/json v0.0.28 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/image v0.34.0 // indirect
 )
 
 require (

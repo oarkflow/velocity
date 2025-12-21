@@ -2,12 +2,14 @@ package velocity
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -89,11 +91,29 @@ func (s *HTTPServer) setupRoutes() {
 	api.Get("/get/:key", s.handleGet)
 	api.Delete("/delete/:key", s.handleDelete)
 
+	api.Post("/put", s.handlePut)
+	api.Get("/get/:key", s.handleGet)
+	api.Delete("/delete/:key", s.handleDelete)
+
+	// Key listing (paginated)
+	api.Get("/keys", s.handleListKeys)
+
 	api.Post("/files", s.handleFileUpload)
 	api.Get("/files", s.handleFileList)
 	api.Get("/files/:key/meta", s.handleFileMetadata)
 	api.Get("/files/:key", s.handleFileDownload)
+	api.Get("/files/:key/thumbnail", s.handleFileThumbnail)
 	api.Delete("/files/:key", s.handleFileDelete)
+
+	// Public static assets for the admin UI
+	s.app.Static("/static", "./static", fiber.Static{})
+
+	// Serve the admin UI at a separate public path to avoid admin API middleware
+	s.app.Static("/admin-ui", "./static", fiber.Static{Index: "index.html"})
+	// Optional redirect from /admin to /admin-ui (placed before admin group)
+	s.app.Get("/admin", func(c *fiber.Ctx) error {
+		return c.Redirect("/admin-ui", fiber.StatusFound)
+	})
 
 	// Admin routes (require admin role)
 	admin := s.app.Group("/admin", s.jwtAuthMiddleware(), s.adminOnly())
@@ -101,6 +121,11 @@ func (s *HTTPServer) setupRoutes() {
 	admin.Post("/wal/rotate", s.handleAdminWalRotate)
 	admin.Get("/wal/archives", s.handleAdminWalArchives)
 	admin.Post("/sstable/repair", s.handleAdminSSTableRepair)
+
+	// Thumbnail management
+	admin.Post("/thumbnails/regenerate", s.handleAdminRegenerateThumbnails)
+	admin.Post("/thumbnails/:key/regenerate", s.handleAdminRegenerateThumbnail)
+	admin.Delete("/thumbnails/:key", s.handleAdminDeleteThumbnail)
 }
 
 // jwtAuthMiddleware validates JWT tokens
@@ -292,6 +317,15 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 
+	// If image, generate thumbnail in background for faster previews
+	if strings.HasPrefix(contentType, "image/") {
+		go func(k string) {
+			if _, _, _, _, err := s.db.GenerateThumbnail(k, 200); err != nil {
+				log.Printf("thumbnail generation failed for %s: %v", k, err)
+			}
+		}(meta.Key)
+	}
+
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"status": "stored",
 		"file":   meta,
@@ -321,6 +355,24 @@ func (s *HTTPServer) handleFileDownload(c *fiber.Ctx) error {
 	return c.SendStream(bytes.NewReader(data))
 }
 
+// handleFileThumbnail returns a generated thumbnail (cached)
+func (s *HTTPServer) handleFileThumbnail(c *fiber.Ctx) error {
+	key := c.Params("key")
+	if key == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
+	}
+	data, contentType, _, _, err := s.db.GetThumbnail(key)
+	if err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "File not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	c.Set(fiber.HeaderContentType, contentType)
+	c.Set(fiber.HeaderContentLength, strconv.Itoa(len(data)))
+	return c.SendStream(bytes.NewReader(data))
+}
+
 func (s *HTTPServer) handleFileMetadata(c *fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
@@ -341,14 +393,56 @@ func (s *HTTPServer) handleFileMetadata(c *fiber.Ctx) error {
 }
 
 func (s *HTTPServer) handleFileList(c *fiber.Ctx) error {
+	// support pagination: ?limit= & ?offset=
+	limit := c.QueryInt("limit", 0)
+	offset := c.QueryInt("offset", 0)
 	files, err := s.db.ListFiles()
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
+	total := len(files)
+	if limit > 0 {
+		end := offset + limit
+		if offset > total {
+			files = []FileMetadata{}
+		} else {
+			if end > total {
+				end = total
+			}
+			files = files[offset:end]
+		}
+	}
 
 	return c.JSON(fiber.Map{
+		"total": total,
 		"files": files,
 	})
+}
+
+// handleListKeys returns paginated keys
+func (s *HTTPServer) handleListKeys(c *fiber.Ctx) error {
+	limit := c.QueryInt("limit", 0)
+	offset := c.QueryInt("offset", 0)
+	keys := s.db.Keys()
+	total := len(keys)
+	// convert to strings and sort for deterministic pagination
+	sKeys := make([]string, 0, len(keys))
+	for _, k := range keys {
+		sKeys = append(sKeys, string(k))
+	}
+	sort.Strings(sKeys)
+	if limit > 0 {
+		end := offset + limit
+		if offset > total {
+			sKeys = []string{}
+		} else {
+			if end > total {
+				end = total
+			}
+			sKeys = sKeys[offset:end]
+		}
+	}
+	return c.JSON(fiber.Map{"total": total, "keys": sKeys})
 }
 
 func (s *HTTPServer) handleFileDelete(c *fiber.Ctx) error {
@@ -448,6 +542,63 @@ func (s *HTTPServer) handleAdminSSTableRepair(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(fiber.Map{"recovered": count, "out": out})
+}
+
+// Admin: regenerate all thumbnails
+func (s *HTTPServer) handleAdminRegenerateThumbnails(c *fiber.Ctx) error {
+	files, err := s.db.ListFiles()
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	count := 0
+	errs := []string{}
+	for _, f := range files {
+		if strings.HasPrefix(f.ContentType, "image/") {
+			if _, _, _, _, err := s.db.GenerateThumbnail(f.Key, 200); err == nil {
+				count++
+				// update meta already done by GenerateThumbnail
+			} else {
+				errs = append(errs, f.Key+":"+err.Error())
+			}
+		}
+	}
+	return c.JSON(fiber.Map{"regenerated": count, "errors": errs})
+}
+
+// Admin: regenerate single thumbnail
+func (s *HTTPServer) handleAdminRegenerateThumbnail(c *fiber.Ctx) error {
+	key := c.Params("key")
+	if key == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "key required")
+	}
+	if _, _, w, h, err := s.db.GenerateThumbnail(key, 200); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	} else {
+		return c.JSON(fiber.Map{"status": "ok", "key": key, "width": w, "height": h})
+	}
+}
+
+// Admin: delete thumbnail for a key
+func (s *HTTPServer) handleAdminDeleteThumbnail(c *fiber.Ctx) error {
+	key := c.Params("key")
+	if key == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "key required")
+	}
+	// delete thumb raw key
+	if err := s.db.Delete([]byte(fileThumbPrefix + key)); err != nil {
+		// if not found, return not found
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	// clear meta fields
+	meta, err := s.db.GetFileMetadata(key)
+	if err == nil {
+		meta.ThumbnailWidth = 0
+		meta.ThumbnailHeight = 0
+		meta.ThumbnailURL = ""
+		mb, _ := json.Marshal(meta)
+		_ = s.db.Put([]byte(fileMetaPrefix+key), mb)
+	}
+	return c.JSON(fiber.Map{"status": "deleted", "key": key})
 }
 
 // Start starts the HTTP server

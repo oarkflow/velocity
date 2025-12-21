@@ -5,9 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"hash/crc32"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +96,188 @@ func TestAdminWalHTTPHandlers(t *testing.T) {
 	}
 }
 
+func TestListKeysHTTP(t *testing.T) {
+	path := t.TempDir()
+	db, err := New(path)
+	if err != nil {
+		t.Fatalf("New db: %v", err)
+	}
+	defer db.Close()
+
+	// put some keys
+	db.Put([]byte("a"), []byte("1"))
+	db.Put([]byte("b"), []byte("2"))
+	db.Put([]byte("c"), []byte("3"))
+
+	srv := NewHTTPServer(db, "0", &mockUserStorage{})
+	req, _ := http.NewRequest("GET", "/api/keys?limit=2&offset=1", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken(t))
+	resp, err := srv.app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	var out struct {
+		Total int      `json:"total"`
+		Keys  []string `json:"keys"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	if out.Total != 3 {
+		t.Fatalf("expected total 3 got %d", out.Total)
+	}
+	if len(out.Keys) != 2 || out.Keys[0] != "b" || out.Keys[1] != "c" {
+		t.Fatalf("unexpected keys: %+v", out.Keys)
+	}
+}
+
+func TestFileThumbnailHTTP(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := New(tmp)
+	if err != nil {
+		t.Fatalf("New db: %v", err)
+	}
+	defer db.Close()
+
+	// create a small 50x50 red PNG in memory
+	img := image.NewRGBA(image.Rect(0, 0, 50, 50))
+	for y := 0; y < 50; y++ {
+		for x := 0; x < 50; x++ {
+			img.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png encode: %v", err)
+	}
+
+	meta, err := db.StoreFile("", "red.png", "image/png", buf.Bytes())
+	if err != nil {
+		t.Fatalf("store file: %v", err)
+	}
+	// request thumbnail
+	srv := NewHTTPServer(db, "0", &mockUserStorage{})
+	req, _ := http.NewRequest("GET", "/api/files/"+meta.Key+"/thumbnail", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken(t))
+	resp, err := srv.app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
+		t.Fatalf("unexpected content-type: %s", resp.Header.Get("Content-Type"))
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if len(b) == 0 {
+		t.Fatalf("empty body")
+	}
+}
+
+func TestAdminRegenerateThumbnail(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := New(tmp)
+	if err != nil {
+		t.Fatalf("New db: %v", err)
+	}
+	defer db.Close()
+
+	// create image
+	img := image.NewRGBA(image.Rect(0, 0, 50, 50))
+	for y := 0; y < 50; y++ {
+		for x := 0; x < 50; x++ {
+			img.Set(x, y, color.RGBA{R: 0, G: 255, B: 0, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png encode: %v", err)
+	}
+
+	meta, err := db.StoreFile("", "green.png", "image/png", buf.Bytes())
+	if err != nil {
+		t.Fatalf("store file: %v", err)
+	}
+
+	// delete the thumbnail raw key if exists
+	_ = db.Delete([]byte(fileThumbPrefix + meta.Key))
+
+	srv := NewHTTPServer(db, "0", &mockUserStorage{})
+	req, _ := http.NewRequest("POST", "/admin/thumbnails/"+meta.Key+"/regenerate", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken(t))
+	resp, err := srv.app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// thumbnail should now exist
+	req2, _ := http.NewRequest("GET", "/api/files/"+meta.Key+"/thumbnail", nil)
+	req2.Header.Set("Authorization", "Bearer "+adminToken(t))
+	resp2, err := srv.app.Test(req2)
+	if err != nil {
+		t.Fatalf("thumbnail fetch failed: %v", err)
+	}
+	if resp2.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp2.StatusCode)
+	}
+}
+
+func TestAdminBulkRegenerateThumbnails(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := New(tmp)
+	if err != nil {
+		t.Fatalf("New db: %v", err)
+	}
+	defer db.Close()
+
+	// create image
+	img := image.NewRGBA(image.Rect(0, 0, 50, 50))
+	for y := 0; y < 50; y++ {
+		for x := 0; x < 50; x++ {
+			img.Set(x, y, color.RGBA{R: 0, G: 0, B: 255, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png encode: %v", err)
+	}
+
+	meta, err := db.StoreFile("", "blue.png", "image/png", buf.Bytes())
+	if err != nil {
+		t.Fatalf("store file: %v", err)
+	}
+
+	// delete
+	_ = db.Delete([]byte(fileThumbPrefix + meta.Key))
+
+	srv := NewHTTPServer(db, "0", &mockUserStorage{})
+	req, _ := http.NewRequest("POST", "/admin/thumbnails/regenerate", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken(t))
+	resp, err := srv.app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// thumbnail should now exist
+	req2, _ := http.NewRequest("GET", "/api/files/"+meta.Key+"/thumbnail", nil)
+	req2.Header.Set("Authorization", "Bearer "+adminToken(t))
+	resp2, err := srv.app.Test(req2)
+	if err != nil {
+		t.Fatalf("thumbnail fetch failed: %v", err)
+	}
+	if resp2.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp2.StatusCode)
+	}
+}
+
 func TestAdminSSTableRepairHTTP(t *testing.T) {
 	tmp := t.TempDir()
 	inPath := filepath.Join(tmp, "sst_corrupt2.db")
@@ -148,5 +335,30 @@ func TestAdminSSTableRepairHTTP(t *testing.T) {
 	}
 	if out.Out == "" {
 		t.Fatalf("expected out path")
+	}
+}
+
+func TestAdminStaticServesUI(t *testing.T) {
+	// create a server and request the admin index
+	path := t.TempDir()
+	db, err := New(path)
+	if err != nil {
+		t.Fatalf("New db: %v", err)
+	}
+	defer db.Close()
+
+	srv := NewHTTPServer(db, "0", &mockUserStorage{})
+	req, _ := http.NewRequest("GET", "/admin-ui", nil)
+	resp, err := srv.app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	s := string(b)
+	if !strings.Contains(s, "VelocityDB Admin") {
+		t.Fatalf("index did not contain expected heading")
 	}
 }

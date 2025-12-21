@@ -106,7 +106,8 @@ func setupUserTables(db *squealx.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant);
 	`
 
-	_, err := db.NamedExec(schema, nil)
+	// Use Exec since there are no named parameters in the schema string
+	_, err := db.Exec(schema)
 	return err
 }
 

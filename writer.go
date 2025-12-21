@@ -1,6 +1,7 @@
 package velocity
 
 import (
+	"hash/crc32"
 	"sync"
 	"time"
 )
@@ -32,6 +33,8 @@ func (bw *BatchWriter) Put(key, value []byte) error {
 		Timestamp: uint64(time.Now().UnixNano()),
 		Deleted:   false,
 	}
+	// compute checksum early so it's present even if flush occurs immediately
+	entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
 
 	bw.entries = append(bw.entries, entry)
 	bw.size++
@@ -54,11 +57,26 @@ func (bw *BatchWriter) flushUnsafe() error {
 		return nil
 	}
 
+	// Ensure checksums are computed for each entry before writing to WAL
+	for _, entry := range bw.entries {
+		if entry.checksum == 0 {
+			if entry.Deleted {
+				entry.checksum = crc32.ChecksumIEEE(entry.Key)
+			} else {
+				entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
+			}
+		}
+	}
+
 	// Batch write to WAL
 	for _, entry := range bw.entries {
 		if err := bw.db.wal.Write(entry); err != nil {
 			return err
 		}
+	}
+	// Ensure WAL buffer is flushed to disk before proceeding
+	if err := bw.db.wal.Sync(); err != nil {
+		return err
 	}
 
 	// Batch write to memtable

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VelocityDB Admin</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>VelocityDB Admin</h1>
+    <div id="auth-ui">
+      <span id="user-info" class="hidden"></span>
+      <button id="logout-btn" class="hidden">Logout</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <section id="login" class="card">
+      <h2>Admin login</h2>
+      <form id="login-form">
+        <label>Username<input name="username" value="admin" /></label>
+        <label>Password<input name="password" type="password" value="password123" /></label>
+        <div class="row">
+          <button type="submit">Login</button>
+        </div>
+        <p class="muted">Uses <code>/auth/login</code>. Tokens stored locally only for demo.</p>
+      </form>
+    </section>
+
+    <nav class="tabs card hidden" id="main-tabs">
+      <button data-tab="data">Data</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="wal">WAL</button>
+      <button data-tab="sstable">SSTable</button>
+    </nav>
+
+    <section id="data" class="card panel hidden">
+      <h2>Key/Value</h2>
+      <form id="put-form" class="row">
+        <label>Key<input name="key" placeholder="key" /></label>
+        <label>Value<input name="value" placeholder="value" /></label>
+        <button type="submit">Put</button>
+      </form>
+
+      <form id="get-form" class="row">
+        <label>Key<input name="key" placeholder="key" /></label>
+        <button type="submit">Get</button>
+        <button id="delete-key" type="button">Delete</button>
+      </form>
+
+      <div class="note" id="keys-panel">
+        <strong>Keys</strong>
+        <div class="row" style="margin-top:8px;">
+          <label>Page size<select id="keys-limit"><option>10</option><option>25</option><option>50</option></select></label>
+          <button id="keys-prev">Prev</button>
+          <button id="keys-next">Next</button>
+        </div>
+        <table id="keys-table" class="list"><thead><tr><th>Key</th><th>Actions</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <pre id="data-output" class="output"></pre>
+    </section>
+
+    <section id="files" class="card panel hidden">
+      <h2>Files</h2>
+      <form id="upload-form" enctype="multipart/form-data" class="row">
+        <label>File<input type="file" name="file" /></label>
+        <label>Key<input name="key" placeholder="(optional) custom key" /></label>
+        <label><input type="checkbox" name="overwrite" /> Overwrite</label>
+        <button type="submit">Upload</button>
+      </form>
+
+      <div class="row">
+        <button id="refresh-files">Refresh List</button>
+        <button id="regen-all-thumbs">Regenerate All Thumbnails</button>
+      </div>
+
+      <table id="files-table" class="list" aria-live="polite">
+        <thead><tr><th>Key</th><th>Filename</th><th>Content Type</th><th>Size</th><th>Uploaded</th><th>Preview</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <!-- Preview modal -->
+      <div id="preview-modal" class="hidden modal">
+        <div class="modal-content">
+          <button id="preview-close">Close</button>
+          <img id="preview-img" src="" alt="preview" />
+        </div>
+      </div>
+
+      <pre id="files-output" class="output"></pre>
+    </section>
+
+    <section id="wal" class="card panel hidden">
+      <h2>Write-Ahead Log (WAL)</h2>
+      <div class="row">
+        <button id="wal-refresh">Refresh WAL Stats</button>
+        <button id="wal-rotate">Force Rotate</button>
+      </div>
+      <pre id="wal-output" class="output"></pre>
+      <h3>Archives</h3>
+      <button id="wal-archives-refresh">Refresh Archives</button>
+      <table id="wal-archives" class="list"><thead><tr><th>Name</th><th>Size</th><th>Modified</th></tr></thead><tbody></tbody></table>
+    </section>
+
+    <section id="sstable" class="card panel hidden">
+      <h2>SSTable Repair</h2>
+      <form id="sstable-form">
+        <label>Path<input name="path" placeholder="/path/to/table.sst" /></label>
+        <button type="submit">Repair</button>
+      </form>
+      <pre id="sstable-output" class="output"></pre>
+    </section>
+  </main>
+
+  <footer class="footer">⚡ VelocityDB Admin UI — minimal demo</footer>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

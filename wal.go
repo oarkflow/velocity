@@ -158,6 +158,13 @@ func (w *WAL) CheckRotation() error {
 	return nil
 }
 
+// Sync forces the WAL buffer to be persisted to disk.
+func (w *WAL) Sync() error {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.syncUnsafe()
+}
+
 func (w *WAL) syncUnsafe() error {
 	if w.buffer.Len() == 0 {
 		return nil
