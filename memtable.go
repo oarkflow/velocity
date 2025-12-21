@@ -75,6 +75,20 @@ func (mt *MemTable) Delete(key []byte) {
 	mt.entries.Store(string(key), entry)
 }
 
+// LoadEntries restores a set of entries into the memtable (used during WAL replay).
+// It updates the internal size accounting correctly if entries with the same key
+// already exist.
+func (mt *MemTable) LoadEntries(entries []*Entry) {
+	for _, e := range entries {
+		oldSize := int64(0)
+		if old, ok := mt.entries.Load(string(e.Key)); ok {
+			oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+		}
+		mt.entries.Store(string(e.Key), e)
+		atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
+	}
+}
+
 func (mt *MemTable) Size() int64 {
 	return atomic.LoadInt64(&mt.size)
 }

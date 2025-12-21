@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"fmt"
+	"hash/crc32"
 	"log"
 	"os"
 	"path/filepath"
@@ -99,6 +100,14 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		return nil, err
 	}
 
+	// Replay WAL to restore memtable state
+	entries, err := wal.Replay()
+	if err != nil {
+		// If the WAL is corrupted, it's safer to surface the error so callers
+		// can decide how to proceed (repair, delete WAL, etc.)
+		return nil, fmt.Errorf("failed to replay WAL: %w", err)
+	}
+
 	db := &DB{
 		path:         currentPath,
 		memTable:     NewMemTable(),
@@ -107,6 +116,33 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		memTableSize: DefaultMemTableSize,
 		cache:        nil,
 		crypto:       cryptoProvider,
+	}
+
+	// Load entries from WAL into memtable
+	if len(entries) > 0 {
+		db.memTable.LoadEntries(entries)
+		log.Printf("velocity: WAL replay restored %d entries", len(entries))
+	}
+
+	// Load existing SSTables from disk
+	files, err := os.ReadDir(currentPath)
+	if err == nil {
+		for _, f := range files {
+			name := f.Name()
+			if !(len(name) > 4 && name[:4] == "sst_") {
+				continue
+			}
+			if filepath.Ext(name) != ".db" {
+				continue
+			}
+			path := filepath.Join(currentPath, name)
+			sst, err := LoadSSTable(path, cryptoProvider)
+			if err != nil {
+				log.Printf("velocity: failed to load sstable %s: %v", name, err)
+				continue
+			}
+			db.sstables = append(db.sstables, sst)
+		}
 	}
 
 	// Start background compaction
@@ -129,6 +165,9 @@ func (db *DB) put(key, value []byte) error {
 		Timestamp: uint64(time.Now().UnixNano()),
 		Deleted:   false,
 	}
+
+	// Compute checksum before writing to WAL so replay can verify integrity
+	entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
 
 	// Write to WAL first for durability
 	err := db.wal.Write(entry)
@@ -215,6 +254,9 @@ func (db *DB) Delete(key []byte) error {
 		Deleted:   true,
 	}
 
+	// Compute checksum for tombstone
+	entry.checksum = crc32.ChecksumIEEE(entry.Key)
+
 	err := db.wal.Write(entry)
 	if err != nil {
 		return err
@@ -261,6 +303,12 @@ func (db *DB) flushMemTable() error {
 	}
 
 	db.sstables = append(db.sstables, sst)
+
+	// Truncate WAL after successfully flushing memtable to SSTable
+	if err := db.wal.Truncate(); err != nil {
+		log.Printf("velocity: WAL truncation failed: %v", err)
+		return err
+	}
 
 	return nil
 }

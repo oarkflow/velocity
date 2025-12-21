@@ -6,7 +6,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -91,6 +94,13 @@ func (s *HTTPServer) setupRoutes() {
 	api.Get("/files/:key/meta", s.handleFileMetadata)
 	api.Get("/files/:key", s.handleFileDownload)
 	api.Delete("/files/:key", s.handleFileDelete)
+
+	// Admin routes (require admin role)
+	admin := s.app.Group("/admin", s.jwtAuthMiddleware(), s.adminOnly())
+	admin.Get("/wal", s.handleAdminWalStats)
+	admin.Post("/wal/rotate", s.handleAdminWalRotate)
+	admin.Get("/wal/archives", s.handleAdminWalArchives)
+	admin.Post("/sstable/repair", s.handleAdminSSTableRepair)
 }
 
 // jwtAuthMiddleware validates JWT tokens
@@ -129,6 +139,7 @@ func (s *HTTPServer) jwtAuthMiddleware() fiber.Handler {
 		// Extract claims
 		if claims, ok := token.Claims.(jwt.MapClaims); ok {
 			c.Locals("username", claims["username"])
+			c.Locals("role", claims["role"])
 		}
 
 		return c.Next()
@@ -356,6 +367,87 @@ func (s *HTTPServer) handleFileDelete(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"status": "deleted",
 	})
+}
+
+// adminOnly middleware ensures the authenticated user is an admin (role claim)
+func (s *HTTPServer) adminOnly() fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		role := c.Locals("role")
+		if roleStr, ok := role.(string); !ok || roleStr != "admin" {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "admin role required"})
+		}
+		return c.Next()
+	}
+}
+
+// handleAdminWalStats returns basic archive stats
+func (s *HTTPServer) handleAdminWalStats(c *fiber.Ctx) error {
+	if s.db == nil || s.db.wal == nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
+	}
+	count, total, names, err := s.db.wal.ArchiveStats()
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(fiber.Map{"count": count, "total_bytes": total, "files": names})
+}
+
+// handleAdminWalRotate triggers immediate WAL rotation
+func (s *HTTPServer) handleAdminWalRotate(c *fiber.Ctx) error {
+	if s.db == nil || s.db.wal == nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
+	}
+	if err := s.db.wal.RotateNow(); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(fiber.Map{"status": "rotated"})
+}
+
+// handleAdminWalArchives returns detailed archive file metadata
+func (s *HTTPServer) handleAdminWalArchives(c *fiber.Ctx) error {
+	if s.db == nil || s.db.wal == nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
+	}
+	orig := s.db.wal.file.Name()
+	archive := s.db.wal.archiveDir
+	if archive == "" {
+		archive = filepath.Join(filepath.Dir(orig), "wal_archive")
+	}
+	files, err := os.ReadDir(archive)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return c.JSON(fiber.Map{"archives": []interface{}{}})
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	var out []fiber.Map
+	for _, f := range files {
+		if f.IsDir() || !strings.HasPrefix(f.Name(), "wal_") {
+			continue
+		}
+		info, _ := f.Info()
+		out = append(out, fiber.Map{"name": f.Name(), "size": info.Size(), "mod_time": info.ModTime().UTC()})
+	}
+	return c.JSON(fiber.Map{"archives": out})
+}
+
+// handleAdminSSTableRepair tries to repair a given sstable path and returns the repaired path
+func (s *HTTPServer) handleAdminSSTableRepair(c *fiber.Ctx) error {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
+	}
+	if req.Path == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "path required")
+	}
+	out := req.Path + ".repaired"
+	count, err := RepairSSTable(req.Path, out, s.db.crypto)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(fiber.Map{"recovered": count, "out": out})
 }
 
 // Start starts the HTTP server
