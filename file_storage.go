@@ -124,25 +124,36 @@ func (db *DB) DeleteFile(key string) error {
 }
 
 func (db *DB) ListFiles() ([]FileMetadata, error) {
-	keys := db.Keys()
 	files := make([]FileMetadata, 0)
-
-	for _, key := range keys {
-		keyStr := string(key)
-		if strings.HasPrefix(keyStr, fileMetaPrefix) {
-			raw, err := db.Get(key)
-			if err != nil {
-				if errors.Is(translateFileError(err), ErrFileNotFound) {
-					continue
-				}
-				return nil, err
-			}
-			var meta FileMetadata
-			if err := json.Unmarshal(raw, &meta); err != nil {
-				return nil, err
-			}
-			files = append(files, meta)
+	// Use paginated key listing to avoid materializing all keys
+	offset := 0
+	limit := 100
+	for {
+		keys, _ := db.KeysPage(offset, limit)
+		if len(keys) == 0 {
+			break
 		}
+		for _, key := range keys {
+			keyStr := string(key)
+			if strings.HasPrefix(keyStr, fileMetaPrefix) {
+				raw, err := db.Get(key)
+				if err != nil {
+					if errors.Is(translateFileError(err), ErrFileNotFound) {
+						continue
+					}
+					return nil, err
+				}
+				var meta FileMetadata
+				if err := json.Unmarshal(raw, &meta); err != nil {
+					return nil, err
+				}
+				files = append(files, meta)
+			}
+		}
+		if len(keys) < limit {
+			break
+		}
+		offset += limit
 	}
 
 	sort.Slice(files, func(i, j int) bool {

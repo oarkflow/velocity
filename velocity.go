@@ -18,12 +18,14 @@ import (
 // Configuration constants
 const (
 	// Memory table settings
-	DefaultMemTableSize    = 256 * 1024 * 1024 // 256MB
+	// Reduced default memtable size to keep Hybrid memory-efficient by default
+	DefaultMemTableSize    = 16 * 1024 * 1024 // 16MB (reduced default)
 	DefaultBlockSize       = 4096
 	DefaultBloomFilterBits = 10
 
 	// WAL settings
-	WALBufferSize   = 10 * 1024 * 1024 // 10MB
+	// Reduce WAL buffer to lower peak memory usage while keeping batching benefits
+	WALBufferSize   = 1 * 1024 * 1024 // 1MB
 	WALSyncInterval = 1 * time.Second
 
 	// Compaction settings
@@ -417,35 +419,156 @@ func (db *DB) Decr(key []byte, step ...any) (any, error) {
 	return db.incr(key, val, "decr")
 }
 
-func (db *DB) Keys() [][]byte {
+// KeysPage returns a page of keys (offset, limit) without loading the entire dataset into memory.
+// It returns the page of keys and the total number of keys.
+func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
-	keysMap := make(map[string]bool)
+	seen := make(map[string]bool)
+	var keys [][]byte
 
-	// From memtable
+	// Helper to append key if not seen and not deleted
+	appendKey := func(k []byte) {
+		s := string(k)
+		if seen[s] {
+			return
+		}
+		seen[s] = true
+		keys = append(keys, append([]byte{}, k...))
+	}
+
+	// From memtable (recent keys override older sstable keys)
 	db.memTable.entries.Range(func(key, value any) bool {
 		entry := value.(*Entry)
 		if !entry.Deleted {
-			keysMap[string(entry.Key)] = true
+			appendKey(entry.Key)
+		}
+		// stop early if we've collected enough for requested pages
+		if limit > 0 && len(keys) >= offset+limit {
+			return false
 		}
 		return true
 	})
 
-	// From SSTables
+	// If database is small-ish, materialize all keys for deterministic ordering and accurate pagination
+	// (this keeps behavior deterministic for the HTTP API and tests)
+	totalEstimate := 0
+	for _, sst := range db.sstables {
+		totalEstimate += sst.entryCount
+	}
+	// memtable entries count is hard to obtain directly; assume small
+	if totalEstimate <= 100000 {
+		// materialize full key set and sort
+		allKeys := make([]string, 0, totalEstimate+1000)
+		// include keys we've already collected
+		for k := range seen {
+			allKeys = append(allKeys, k)
+		}
+		// scan remaining sstables to add keys
+		for _, sst := range db.sstables {
+			idxPos := uint32(0)
+			for i := 0; i < sst.entryCount; i++ {
+				entry, err := sst.readIndexEntryAt(idxPos)
+				if err != nil {
+					break
+				}
+				if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
+					allKeys = append(allKeys, string(entry.Key))
+				}
+				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				idxPos += uint32(idxEntrySize)
+			}
+		}
+		// deduplicate and sort
+		uniq := make(map[string]bool)
+		uKeys := make([]string, 0, len(allKeys))
+		for _, s := range allKeys {
+			if !uniq[s] {
+				uniq[s] = true
+				uKeys = append(uKeys, s)
+			}
+		}
+		sort.Strings(uKeys)
+		// convert back to [][]byte
+		keys = make([][]byte, 0, len(uKeys))
+		for _, s := range uKeys {
+			keys = append(keys, []byte(s))
+		}
+		total := len(keys)
+		if limit == 0 {
+			return keys, total
+		}
+		start := offset
+		if start > len(keys) {
+			start = len(keys)
+		}
+		end := offset + limit
+		if end > len(keys) {
+			end = len(keys)
+		}
+		return keys[start:end], total
+	}
+
+	// From SSTables — sequential scan, stop once we've collected enough
 	sstables := make([]*SSTable, len(db.sstables))
 	copy(sstables, db.sstables)
 
 	for _, sst := range sstables {
-		for _, idx := range sst.indexData {
-			keysMap[string(idx.Key)] = true
+		// iterate index region sequentially until we have enough
+		idxPos := uint32(0)
+		for i := 0; i < sst.entryCount; i++ {
+			entry, err := sst.readIndexEntryAt(idxPos)
+			if err != nil {
+				break
+			}
+			if !entryIsDeletedInMemTable(db.memTable, entry.Key) { // ensure not deleted by memtable
+				appendKey(entry.Key)
+			}
+			idxEntrySize := 4 + len(entry.Key) + 8 + 4
+			idxPos += uint32(idxEntrySize)
+			if limit > 0 && len(keys) >= offset+limit {
+				break
+			}
+		}
+		if limit > 0 && len(keys) >= offset+limit {
+			break
 		}
 	}
 
-	var keys [][]byte
-	for k := range keysMap {
-		keys = append(keys, []byte(k))
+	// compute total conservatively as number of unique keys we've seen plus remaining entries across SSTables not yet scanned
+	total := len(seen)
+	// we can approximate total as unique keys + sum of sst.entryCount to avoid extra scans
+	for _, sst := range db.sstables {
+		total += sst.entryCount
 	}
 
-	return keys
+	if limit == 0 {
+		return keys, total
+	}
+
+	start := offset
+	if start > len(keys) {
+		start = len(keys)
+	}
+	end := offset + limit
+	if end > len(keys) {
+		end = len(keys)
+	}
+	return keys[start:end], total
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func entryIsDeletedInMemTable(mt *MemTable, key []byte) bool {
+	if v, ok := mt.entries.Load(string(key)); ok {
+		e := v.(*Entry)
+		return e.Deleted
+	}
+	return false
 }

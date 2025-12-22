@@ -421,27 +421,15 @@ func (s *HTTPServer) handleFileList(c *fiber.Ctx) error {
 
 // handleListKeys returns paginated keys
 func (s *HTTPServer) handleListKeys(c *fiber.Ctx) error {
-	limit := c.QueryInt("limit", 0)
+	limit := c.QueryInt("limit", 100)
 	offset := c.QueryInt("offset", 0)
-	keys := s.db.Keys()
-	total := len(keys)
-	// convert to strings and sort for deterministic pagination
+	keys, total := s.db.KeysPage(offset, limit)
+	// convert to strings for deterministic JSON
 	sKeys := make([]string, 0, len(keys))
 	for _, k := range keys {
 		sKeys = append(sKeys, string(k))
 	}
 	sort.Strings(sKeys)
-	if limit > 0 {
-		end := offset + limit
-		if offset > total {
-			sKeys = []string{}
-		} else {
-			if end > total {
-				end = total
-			}
-			sKeys = sKeys[offset:end]
-		}
-	}
 	return c.JSON(fiber.Map{"total": total, "keys": sKeys})
 }
 

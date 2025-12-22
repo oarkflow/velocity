@@ -94,8 +94,8 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 	}
 	defer db.Close()
 
-	// default cache (10 MB) to keep memory usage modest
-	db.EnableCache(10 * 1024 * 1024) // 10 MB
+	// default cache mode: balanced for good default memory/perf tradeoff
+	db.SetCacheMode("balanced")
 
 	userDB, err := velocity.NewSQLiteUserStorage(usersDB)
 	if err != nil {

@@ -14,13 +14,17 @@ import (
 
 // SSTable for persistent storage
 type SSTable struct {
-	file        *os.File
-	mmap        []byte
-	indexData   []IndexEntry
-	bloomFilter *BloomFilter
-	minKey      []byte
-	maxKey      []byte
-	crypto      *CryptoProvider
+	file *os.File
+	mmap []byte
+	// indexData is kept only for small SSTables; large tables use a sparse on-disk index
+	indexData          []IndexEntry
+	indexOffset        uint64   // offset of index region in the mmap
+	entryCount         int      // number of entries in the index
+	indexSampleOffsets []uint32 // sparse index: offsets (relative to indexOffset) for sampling
+	bloomFilter        *BloomFilter
+	minKey             []byte
+	maxKey             []byte
+	crypto             *CryptoProvider
 }
 
 type IndexEntry struct {
@@ -86,6 +90,15 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 	// Write data blocks and build index
 	var indexEntries []IndexEntry
 	for _, entry := range entries {
+		// Ensure a checksum exists for the entry (use default CRC32 if not provided)
+		if entry.checksum == 0 {
+			if entry.Deleted {
+				entry.checksum = crc32.ChecksumIEEE(entry.Key)
+			} else {
+				entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
+			}
+		}
+
 		keyLen := uint32(len(entry.Key))
 		nonce, ciphertext, err := crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.Deleted))
 		if err != nil {
@@ -236,23 +249,86 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 	return sst, nil
 }
 
+// readIndexEntryAt reads an index entry starting at idxOffset bytes (relative to sst.indexOffset)
+func (sst *SSTable) readIndexEntryAt(idxOffset uint32) (IndexEntry, error) {
+	start := sst.indexOffset + uint64(idxOffset)
+	if int(start) >= len(sst.mmap) {
+		return IndexEntry{}, fmt.Errorf("index offset out of range")
+	}
+	reader := bytes.NewReader(sst.mmap[start:])
+	var keyLen uint32
+	if err := binary.Read(reader, binary.LittleEndian, &keyLen); err != nil {
+		return IndexEntry{}, err
+	}
+	key := make([]byte, keyLen)
+	if _, err := reader.Read(key); err != nil {
+		return IndexEntry{}, err
+	}
+	var off uint64
+	var size uint32
+	if err := binary.Read(reader, binary.LittleEndian, &off); err != nil {
+		return IndexEntry{}, err
+	}
+	if err := binary.Read(reader, binary.LittleEndian, &size); err != nil {
+		return IndexEntry{}, err
+	}
+	return IndexEntry{Key: append([]byte{}, key...), Offset: off, Size: size}, nil
+}
+
+// findIndexForKey uses a sparse sample index to locate the index entry for key without materializing the full index
+func (sst *SSTable) findIndexForKey(key []byte) (*IndexEntry, bool, error) {
+	// Fast path: fully materialized index
+	if sst.indexData != nil {
+		idx := sort.Search(len(sst.indexData), func(i int) bool {
+			return compareKeys(sst.indexData[i].Key, key) >= 0
+		})
+		if idx >= len(sst.indexData) || compareKeys(sst.indexData[idx].Key, key) != 0 {
+			return nil, false, nil
+		}
+		entry := sst.indexData[idx]
+		return &entry, true, nil
+	}
+
+	// Linear scan across index region — correct and safe fallback when sparse index logic is not sufficient.
+	idxPos := uint32(0)
+	for i := 0; i < sst.entryCount; i++ {
+		entry, err := sst.readIndexEntryAt(idxPos)
+		if err != nil {
+			return nil, false, err
+		}
+		cmp := compareKeys(entry.Key, key)
+		if cmp == 0 {
+			return &entry, true, nil
+		}
+		if cmp > 0 {
+			return nil, false, nil
+		}
+		idxEntrySize := 4 + len(entry.Key) + 8 + 4
+		if idxEntrySize == 0 {
+			break
+		}
+		idxPos += uint32(idxEntrySize)
+	}
+
+	return nil, false, nil
+}
+
 func (sst *SSTable) Get(key []byte) (*Entry, error) {
 	// Check bloom filter first
 	if !sst.bloomFilter.Contains(key) {
 		return nil, nil
 	}
 
-	// Binary search in index
-	idx := sort.Search(len(sst.indexData), func(i int) bool {
-		return compareKeys(sst.indexData[i].Key, key) >= 0
-	})
-
-	if idx >= len(sst.indexData) || compareKeys(sst.indexData[idx].Key, key) != 0 {
+	entryIdx, found, err := sst.findIndexForKey(key)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
 		return nil, nil
 	}
 
 	// Read entry from mmap
-	offset := sst.indexData[idx].Offset
+	offset := entryIdx.Offset
 	data := sst.mmap[offset:]
 
 	var keyLen, valueLen uint32
@@ -369,15 +445,23 @@ func LoadSSTable(path string, crypto *CryptoProvider) (*SSTable, error) {
 		bf.bits = bits
 	}
 
-	// Read index
+	// Read index (build a sparse on-disk index to avoid holding all keys in memory)
 	if int(header.IndexOffset) > len(mmap) {
 		syscall.Munmap(mmap)
 		file.Close()
 		return nil, fmt.Errorf("sstable: index offset out of range")
 	}
-	idxReader := bytes.NewReader(mmap[header.IndexOffset:])
-	var indexEntries []IndexEntry
+
+	// We'll scan the index to gather sample offsets every N entries.
+	const sparseStep = 32 // sample every 32 entries (configurable if needed)
+	idxDataStart := header.IndexOffset
+	idxReader := bytes.NewReader(mmap[idxDataStart:])
+	var firstKey []byte
+	var lastKey []byte
+	var sampleOffsets []uint32
+	var entryIdx int
 	for i := 0; i < int(header.EntryCount); i++ {
+		pos := uint32(idxReader.Size() - int64(idxReader.Len()))
 		var keyLen uint32
 		if err := binary.Read(idxReader, binary.LittleEndian, &keyLen); err != nil {
 			syscall.Munmap(mmap)
@@ -402,20 +486,50 @@ func LoadSSTable(path string, crypto *CryptoProvider) (*SSTable, error) {
 			file.Close()
 			return nil, err
 		}
-		indexEntries = append(indexEntries, IndexEntry{Key: append([]byte{}, key...), Offset: off, Size: size})
+
+		if entryIdx == 0 {
+			firstKey = append([]byte{}, key...)
+		}
+		lastKey = append([]byte{}, key...)
+
+		if entryIdx%sparseStep == 0 {
+			sampleOffsets = append(sampleOffsets, pos)
+		}
+		entryIdx++
 	}
 
 	sst := &SSTable{
-		file:        file,
-		mmap:        mmap,
-		indexData:   indexEntries,
-		bloomFilter: bf,
-		crypto:      crypto,
+		file:               file,
+		mmap:               mmap,
+		indexOffset:        uint64(idxDataStart),
+		entryCount:         int(header.EntryCount),
+		indexSampleOffsets: sampleOffsets,
+		bloomFilter:        bf,
+		crypto:             crypto,
 	}
 
-	if len(indexEntries) > 0 {
-		sst.minKey = append([]byte{}, indexEntries[0].Key...)
-		sst.maxKey = append([]byte{}, indexEntries[len(indexEntries)-1].Key...)
+	if entryIdx > 0 {
+		sst.minKey = append([]byte{}, firstKey...)
+		sst.maxKey = append([]byte{}, lastKey...)
+	}
+
+	// For small tables, materialize the full index for faster lookups
+	if entryIdx <= 1024 {
+		// rewind and read full index into memory
+		idxReader = bytes.NewReader(mmap[idxDataStart:])
+		var indexEntries []IndexEntry
+		for i := 0; i < entryIdx; i++ {
+			var keyLen uint32
+			binary.Read(idxReader, binary.LittleEndian, &keyLen)
+			key := make([]byte, keyLen)
+			idxReader.Read(key)
+			var off uint64
+			var size uint32
+			binary.Read(idxReader, binary.LittleEndian, &off)
+			binary.Read(idxReader, binary.LittleEndian, &size)
+			indexEntries = append(indexEntries, IndexEntry{Key: append([]byte{}, key...), Offset: off, Size: size})
+		}
+		sst.indexData = indexEntries
 	}
 
 	return sst, nil

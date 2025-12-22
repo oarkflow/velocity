@@ -1,6 +1,12 @@
 package velocity
 
 import (
+	"bufio"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -95,13 +101,65 @@ func (l *list) removeLast() *listNode {
 	return last
 }
 
-// NewLRUCache creates a new byte-capacity LRU cache. capacityBytes is total bytes allowed.
+// detectTotalMemory tries to detect system memory in bytes. Falls back to 1GB on failure.
+func detectTotalMemory() int64 {
+	// macOS: use sysctl hw.memsize
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		if err == nil {
+			s := strings.TrimSpace(string(out))
+			if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return v
+			}
+		}
+	}
+
+	// Linux: parse /proc/meminfo
+	f, err := os.Open("/proc/meminfo")
+	if err == nil {
+		defer f.Close()
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			line := s.Text()
+			if strings.HasPrefix(line, "MemTotal:") {
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					if v, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+						return v * 1024 // kB -> bytes
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback
+	return 1 * 1024 * 1024 * 1024
+}
+
+// NewLRUCache creates a new byte-capacity LRU cache. If capacityBytes == 0 cache size is chosen adaptively.
 func NewLRUCache(capacityBytes int) *LRUCache {
 	c := &LRUCache{
-		capacityBytes: int64(capacityBytes),
-		items:         make(map[string]*cacheItem),
-		evictList:     newList(),
+		items:     make(map[string]*cacheItem),
+		evictList: newList(),
 	}
+
+	// Adaptive sizing when 0 is passed
+	if capacityBytes == 0 {
+		total := detectTotalMemory()
+		// Target ~2% of system memory with reasonable bounds
+		suggest := int64(float64(total) * 0.02)
+		if suggest < 4*1024*1024 {
+			suggest = 4 * 1024 * 1024
+		}
+		// Lower adaptive cap to 32MB by default to keep hybrid lightweight
+		if suggest > 32*1024*1024 {
+			suggest = 32 * 1024 * 1024
+		}
+		c.capacityBytes = suggest
+	} else {
+		c.capacityBytes = int64(capacityBytes)
+	}
+
 	c.bufPool = newBufferPool(1024) // bounded to avoid holding unlimited buffers
 	return c
 }
@@ -197,8 +255,32 @@ func (c *LRUCache) Remove(key string) {
 
 // Enhanced VelocityDB with caching
 func (db *DB) EnableCache(cacheSize int) {
-	// cacheSize is interpreted as bytes (e.g., 50 * 1024 * 1024 for 50MB)
+	// cacheSize is interpreted as bytes (e.g., 50 * 1024 * 1024 for 50MB).
+	// If cacheSize == 0, the cache will be sized adaptively (now capped to 32MB by default).
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	db.cache = NewLRUCache(cacheSize)
+}
+
+// SetCacheMode sets a high-level cache sizing policy.
+// Modes:
+//  - "aggressive": tiny memory footprint (<= 16MB)
+//  - "balanced": reasonable memory/perf tradeoff (<= 32MB)
+//  - "performance": prioritize performance (<= 128MB)
+func (db *DB) SetCacheMode(mode string) {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+	var capBytes int
+	switch mode {
+	case "aggressive":
+		capBytes = 16 * 1024 * 1024
+	case "balanced":
+		capBytes = 32 * 1024 * 1024
+	case "performance":
+		capBytes = 128 * 1024 * 1024
+	default:
+		// default to balanced
+		capBytes = 32 * 1024 * 1024
+	}
+	db.cache = NewLRUCache(capBytes)
 }

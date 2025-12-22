@@ -58,8 +58,8 @@ func runSimpleBenchmark() {
 	defer db.Close()
 	defer os.RemoveAll("./velocitydb_data")
 
-	// Lightweight cache for simple benchmark (20 MB)
-	db.EnableCache(20 * 1024 * 1024) // 20 MB
+	// Use balanced cache mode for simple benchmark
+	db.SetCacheMode("balanced")
 
 	// Write Test
 	start := time.Now()

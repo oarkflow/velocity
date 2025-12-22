@@ -48,14 +48,14 @@ func main() {
 	}
 	defer db.Close()
 
-	// Enable a moderate, byte-limited cache (50 MB) to keep memory usage light while improving performance
-	db.EnableCache(50 * 1024 * 1024) // 50 MB
+	// Use balanced cache mode for normal runs (capped to 32MB)
+	db.SetCacheMode("balanced")
 
-	// Performance configurations
-	numOps := 1000000 // 1M operations for serious benchmarking
+	// Performance configurations (reduced for CI-friendly runs)
+	numOps := 100000 // 100K operations
 	keySize := 16
 	valueSize := 100
-	batchSize := 1000
+	batchSize := 100
 	numGoroutines := runtime.NumCPU()
 
 	fmt.Printf("🚀 VelocityDB Advanced Performance Test\n")
@@ -301,15 +301,15 @@ func main() {
 		fmt.Printf("  Decr('%s') default step: %v\n\n", counterKey, val)
 	}
 
-	// Test Keys
-	fmt.Printf("Testing Keys function:\n")
-	allKeys := db.Keys()
-	fmt.Printf("  Total keys in database: %d\n", len(allKeys))
-	if len(allKeys) > 0 {
+	// Test Keys (paginated)
+	fmt.Printf("Testing Keys function (paginated):\n")
+	pageKeys, total := db.KeysPage(0, 10)
+	fmt.Printf("  Total (approx): %d\n", total)
+	if len(pageKeys) > 0 {
 		fmt.Printf("  Sample keys (hex):\n")
-		for i, key := range allKeys {
+		for i, key := range pageKeys {
 			if i >= 5 { // Show only first 5 keys
-				fmt.Printf("    ... and %d more\n", len(allKeys)-5)
+				fmt.Printf("    ... and %d more\n", len(pageKeys)-5)
 				break
 			}
 			fmt.Printf("    %x\n", key)
