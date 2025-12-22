@@ -278,6 +278,8 @@ func (s *HTTPServer) handleDelete(c *fiber.Ctx) error {
 	})
 }
 
+const maxUploadSize = 100 * 1024 * 1024 // 100 MB
+
 func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -290,9 +292,36 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 	}
 	defer file.Close()
 
-	data, err := io.ReadAll(file)
+	// Stream upload to a temporary file to avoid reading the entire request body into memory
+	tmp, err := os.CreateTemp("", "velocity-upload-*.tmp")
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to create temp file")
+	}
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+
+	max := s.db.maxUploadSize
+	written, err := io.Copy(tmp, io.LimitReader(file, max+1))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Unable to read uploaded file")
+	}
+	if written > max {
+		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "Uploaded file is too large")
+	}
+
+	// Determine content type if not provided by client
+	contentType := fileHeader.Header.Get("Content-Type")
+	if contentType == "" {
+		peek := make([]byte, 512)
+		n, _ := tmp.ReadAt(peek, 0)
+		contentType = http.DetectContentType(peek[:n])
+	}
+
+	// Rewind temp file and stream to DB StoreFileStream to avoid holding file in memory
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to read uploaded file")
 	}
 
 	key := c.FormValue("key")
@@ -304,12 +333,7 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 		}
 	}
 
-	contentType := fileHeader.Header.Get("Content-Type")
-	if contentType == "" && len(data) > 0 {
-		contentType = http.DetectContentType(data)
-	}
-
-	meta, err := s.db.StoreFile(key, fileHeader.Filename, contentType, data)
+	meta, err := s.db.StoreFileStream(key, fileHeader.Filename, contentType, tmp, -1)
 	if err != nil {
 		if errors.Is(err, ErrFileExists) {
 			return fiber.NewError(fiber.StatusConflict, "File already exists. Provide overwrite=true to replace it.")

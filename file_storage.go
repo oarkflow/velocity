@@ -9,6 +9,10 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +43,13 @@ type FileMetadata struct {
 }
 
 func (db *DB) StoreFile(key, filename, contentType string, data []byte) (*FileMetadata, error) {
+	// default to streaming storage when configured
+	return db.StoreFileStream(key, filename, contentType, bytes.NewReader(data), int64(len(data)))
+}
+
+// StoreFileStream stores the provided reader's content in a stream-safe manner without loading all of it into memory.
+// When DB is configured with UseFileStorage=true, file bytes are stored on disk under db.filesDir and metadata stored in DB.
+func (db *DB) StoreFileStream(key, filename, contentType string, r io.Reader, size int64) (*FileMetadata, error) {
 	if filename == "" {
 		return nil, fmt.Errorf("filename is required")
 	}
@@ -52,58 +63,96 @@ func (db *DB) StoreFile(key, filename, contentType string, data []byte) (*FileMe
 		return nil, ErrFileExists
 	}
 
+	// Ensure filesDir exists
+	if db.filesDir == "" {
+		db.filesDir = filepath.Join(db.path, "files")
+		os.MkdirAll(db.filesDir, 0755)
+	}
+
+	tmp, err := os.CreateTemp(db.filesDir, "upload-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tmp.Close(); _ = os.Remove(tmp.Name()) }()
+
+	// copy from reader into tmp (size may be -1 if unknown)
+	written, err := io.Copy(tmp, io.LimitReader(r, db.maxUploadSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if written > db.maxUploadSize {
+		return nil, fmt.Errorf("uploaded file too large")
+	}
+
+	// Compute checksum and finalize
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	// For backward compatibility, store metadata in DB and file on disk
 	meta := &FileMetadata{
 		Key:         key,
 		Filename:    filename,
 		ContentType: contentType,
-		Size:        int64(len(data)),
+		Size:        written,
 		UploadedAt:  time.Now().UTC(),
 	}
 
+	// Move tmp to final path
+	finalPath := filepath.Join(db.filesDir, key)
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmp.Name(), finalPath); err != nil {
+		return nil, err
+	}
+
+	// Store metadata in DB
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {
 		return nil, err
 	}
-
-	dataKey := []byte(fileDataPrefix + key)
 	metaKey := []byte(fileMetaPrefix + key)
-
-	if err := db.Put(dataKey, data); err != nil {
-		return nil, err
-	}
-
 	if err := db.Put(metaKey, metaBytes); err != nil {
-		db.Delete(dataKey)
+		// rollback file
+		_ = os.Remove(finalPath)
 		return nil, err
 	}
 
-	// If image, synchronously generate thumbnail and update metadata
+	// If image, kick off thumbnail generation asynchronously to avoid blocking
 	if strings.HasPrefix(contentType, "image/") {
-		if thumbBytes, _, w, h, err := db.GenerateThumbnail(key, 200); err == nil && len(thumbBytes) > 0 {
-			meta.ThumbnailWidth = w
-			meta.ThumbnailHeight = h
-			meta.ThumbnailURL = "/api/files/" + key + "/thumbnail"
-			metaBytes, _ = json.Marshal(meta)
-			_ = db.Put(metaKey, metaBytes) // best-effort update
-		}
+		go func(k string) {
+			if _, _, _, _, err := db.GenerateThumbnail(k, 200); err != nil {
+				log.Printf("thumbnail generation failed for %s: %v", k, err)
+			}
+		}(key)
 	}
 
+	// Read metadata back for return
 	return meta, nil
 }
 
 func (db *DB) GetFile(key string) ([]byte, *FileMetadata, error) {
-	dataKey := []byte(fileDataPrefix + key)
-
-	data, err := db.Get(dataKey)
-	if err != nil {
-		return nil, nil, translateFileError(err)
-	}
-
+	// Prefer filesystem storage if present
 	meta, err := db.GetFileMetadata(key)
 	if err != nil {
 		return nil, nil, err
 	}
+	if db.filesDir != "" {
+		path := filepath.Join(db.filesDir, key)
+		if _, err := os.Stat(path); err == nil {
+			b, err := os.ReadFile(path)
+			if err == nil {
+				return b, meta, nil
+			}
+		}
+	}
 
+	// Fallback to legacy in-DB storage
+	dataKey := []byte(fileDataPrefix + key)
+	data, err := db.Get(dataKey)
+	if err != nil {
+		return nil, nil, translateFileError(err)
+	}
 	return data, meta, nil
 }
 
@@ -112,11 +161,15 @@ func (db *DB) DeleteFile(key string) error {
 		return err
 	}
 
+	// remove on-disk file if present
+	if db.filesDir != "" {
+		p := filepath.Join(db.filesDir, key)
+		_ = os.Remove(p)
+	}
+
 	metaKey := []byte(fileMetaPrefix + key)
 	dataKey := []byte(fileDataPrefix + key)
-	if err := db.Delete(dataKey); err != nil {
-		return err
-	}
+	_ = db.Delete(dataKey) // best-effort, ignore error if legacy blob missing
 	if err := db.Delete(metaKey); err != nil {
 		return err
 	}

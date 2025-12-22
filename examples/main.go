@@ -51,6 +51,13 @@ func main() {
 	// Use balanced cache mode for normal runs (capped to 32MB)
 	db.SetCacheMode("balanced")
 
+	// Optional: enable high-level performance profile via env var VELOCITY_PERF_MODE
+	// e.g., VELOCITY_PERF_MODE=performance
+	if mode := os.Getenv("VELOCITY_PERF_MODE"); mode != "" {
+		db.SetPerformanceMode(mode)
+		fmt.Printf("Performance mode enabled: %s\n", mode)
+	}
+
 	// Performance configurations (reduced for CI-friendly runs)
 	numOps := 100000 // 100K operations
 	keySize := 16

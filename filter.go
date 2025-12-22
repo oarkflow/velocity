@@ -13,7 +13,13 @@ type BloomFilter struct {
 }
 
 func NewBloomFilter(expectedItems int, bitsPerItem int) *BloomFilter {
+	if expectedItems < 1 {
+		expectedItems = 1
+	}
 	size := uint64(expectedItems * bitsPerItem)
+	if size == 0 {
+		size = 64 // minimum size (bits)
+	}
 	return &BloomFilter{
 		bits: make([]uint64, (size+63)/64),
 		size: size,

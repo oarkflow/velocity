@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -176,6 +177,65 @@ func TestFileThumbnailHTTP(t *testing.T) {
 	}
 }
 
+func TestHandleFileUploadStreams(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := New(tmp)
+	if err != nil {
+		t.Fatalf("New db: %v", err)
+	}
+	defer db.Close()
+
+	srv := NewHTTPServer(db, "0", &mockUserStorage{})
+
+	// build a 1MB payload
+	payload := bytes.Repeat([]byte("A"), 1<<20)
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, err := w.CreateFormFile("file", "big.txt")
+	if err != nil {
+		t.Fatalf("multipart create: %v", err)
+	}
+	if _, err := part.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	w.Close()
+
+	req, _ := http.NewRequest("POST", "/api/files", &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+adminToken(t))
+
+	resp, err := srv.app.Test(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	// read response body to get returned meta
+	var out struct {
+		Status string       `json:"status"`
+		File   FileMetadata `json:"file"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	if out.File.Key == "" {
+		t.Fatalf("expected key in response file metadata")
+	}
+	// verify file exists on disk
+	if db.filesDir == "" {
+		t.Fatalf("expected db.filesDir to be set")
+	}
+	path := filepath.Join(db.filesDir, out.File.Key)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file on disk: %v", err)
+	}
+	_, meta, err := db.GetFile(out.File.Key)
+	if err != nil {
+		t.Fatalf("expected file stored: %v", err)
+	}
+	if meta.Filename != "big.txt" {
+		t.Fatalf("unexpected filename: %s", meta.Filename)
+	}
+}
 func TestAdminRegenerateThumbnail(t *testing.T) {
 	tmp := t.TempDir()
 	db, err := New(tmp)

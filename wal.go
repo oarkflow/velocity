@@ -25,6 +25,10 @@ type WAL struct {
 	closed   bool
 	crypto   *CryptoProvider
 
+	// Async flush channel
+	flushChan chan *bytes.Buffer
+	flushWg   sync.WaitGroup
+
 	// Rotation policy
 	rotationThreshold int64  // bytes; rotate when file >= this size (0 disables)
 	archiveDir        string // where to move rotated WALs (must be same FS for atomic rename)
@@ -46,11 +50,12 @@ func NewWAL(path string, crypto *CryptoProvider) (*WAL, error) {
 	}
 
 	wal := &WAL{
-		file:     file,
-		buffer:   bytes.NewBuffer(make([]byte, 0, WALBufferSize)),
-		ticker:   time.NewTicker(WALSyncInterval),
-		stopChan: make(chan struct{}),
-		crypto:   crypto,
+		file:      file,
+		buffer:    bytes.NewBuffer(make([]byte, 0, WALBufferSize)),
+		ticker:    time.NewTicker(WALSyncInterval),
+		stopChan:  make(chan struct{}),
+		crypto:    crypto,
+		flushChan: make(chan *bytes.Buffer, 2),
 		// defaults: rotation disabled
 		rotationThreshold: 0,
 		archiveDir:        "",
@@ -63,16 +68,28 @@ func NewWAL(path string, crypto *CryptoProvider) (*WAL, error) {
 	// Background sync + rotation goroutine
 	go wal.syncLoop()
 
+	// Background flushing goroutine
+	wal.flushWg.Add(1)
+	go func() {
+		defer wal.flushWg.Done()
+		for b := range wal.flushChan {
+			// best-effort write and sync
+			if b == nil {
+				continue
+			}
+			_ = wal.writeBufferToFile(b)
+		}
+	}()
 	return wal, nil
 }
 
 func (w *WAL) Write(entry *Entry) error {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
 
 	// Encrypt value using AEAD with entry metadata as AAD
 	nonce, ciphertext, err := w.crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.Deleted))
 	if err != nil {
+		w.mutex.Unlock()
 		return err
 	}
 
@@ -95,9 +112,22 @@ func (w *WAL) Write(entry *Entry) error {
 	binary.Write(w.buffer, binary.LittleEndian, deleted)
 	binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
 
-	// Sync if buffer is full
-	if w.buffer.Len() >= WALBufferSize {
-		return w.syncUnsafe()
+	needSync := w.buffer.Len() >= WALBufferSize
+	if needSync {
+		// swap buffer with fresh buffer and send old buffer to flush channel without holding lock
+		old := w.buffer
+		w.buffer = bytes.NewBuffer(make([]byte, 0, WALBufferSize))
+		w.mutex.Unlock()
+
+		select {
+		case w.flushChan <- old:
+			// dispatched to background flusher
+		default:
+			// flush channel full; fallback to synchronous write to preserve durability
+			_ = w.writeBufferToFile(old)
+		}
+	} else {
+		w.mutex.Unlock()
 	}
 
 	return nil
@@ -165,34 +195,48 @@ func (w *WAL) Sync() error {
 	return w.syncUnsafe()
 }
 
+// writeBufferToFile writes the given buffer to the file and fsyncs it.
+func (w *WAL) writeBufferToFile(b *bytes.Buffer) error {
+	if b == nil || b.Len() == 0 {
+		return nil
+	}
+	if _, err := w.file.Write(b.Bytes()); err != nil {
+		return err
+	}
+	if err := w.file.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// syncUnsafe writes the current buffer to disk while holding caller lock.
 func (w *WAL) syncUnsafe() error {
 	if w.buffer.Len() == 0 {
 		return nil
 	}
-
-	_, err := w.file.Write(w.buffer.Bytes())
-	if err != nil {
+	// Take buffer contents by swapping to a fresh buffer to minimize time holding the lock
+	old := w.buffer
+	w.buffer = bytes.NewBuffer(make([]byte, 0, WALBufferSize))
+	// Write old buffer directly (caller holds lock)
+	if _, err := w.file.Write(old.Bytes()); err != nil {
 		return err
 	}
-
-	err = w.file.Sync()
-	if err != nil {
+	if err := w.file.Sync(); err != nil {
 		return err
 	}
-
-	w.buffer.Reset()
+	old.Reset()
 	return nil
 }
 
 func (w *WAL) Close() error {
 	w.mutex.Lock()
-	defer w.mutex.Unlock()
-
 	// Prevent double-closing
 	if w.closed {
+		w.mutex.Unlock()
 		return nil
 	}
 	w.closed = true
+	w.mutex.Unlock()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -201,10 +245,51 @@ func (w *WAL) Close() error {
 	}()
 
 	close(w.stopChan)
-	w.ticker.Stop()
+	if w.ticker != nil {
+		w.ticker.Stop()
+	}
 
-	w.syncUnsafe()
+	// Swap and flush any pending buffer synchronously to ensure durability
+	w.mutex.Lock()
+	old := w.buffer
+	w.buffer = bytes.NewBuffer(make([]byte, 0, WALBufferSize))
+	w.mutex.Unlock()
+
+	// write remaining buffer before closing
+	_ = w.writeBufferToFile(old)
+
+	// Close flush channel and wait for background flusher to finish
+	close(w.flushChan)
+	w.flushWg.Wait()
+
 	return w.file.Close()
+}
+
+// SetBufferSize adjusts the WAL in-memory buffer capacity while preserving existing contents.
+// This is useful to increase buffer for high-throughput modes.
+func (w *WAL) SetBufferSize(size int) {
+	if size <= 0 {
+		return
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	data := w.buffer.Bytes()
+	newBuf := bytes.NewBuffer(make([]byte, 0, size))
+	newBuf.Write(data)
+	w.buffer = newBuf
+}
+
+// SetSyncInterval changes the periodic sync interval for the WAL background loop.
+func (w *WAL) SetSyncInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if w.ticker != nil {
+		w.ticker.Stop()
+	}
+	w.ticker = time.NewTicker(d)
 }
 
 // Truncate truncates the WAL file to zero length after ensuring data has been flushed.

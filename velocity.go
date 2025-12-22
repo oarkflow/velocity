@@ -50,6 +50,10 @@ type DB struct {
 
 	// Configuration
 	memTableSize int64
+	// Files storage
+	filesDir       string
+	maxUploadSize  int64
+	useFileStorage bool
 }
 
 var defaultPath = "./data/velocity"
@@ -65,9 +69,15 @@ func init() {
 }
 
 type Config struct {
-	Path          string
-	EncryptionKey []byte
+	Path           string
+	EncryptionKey  []byte
+	MaxUploadSize  int64 // bytes; 0 means use default
+	UseFileStorage bool  // store files on filesystem instead of in-DB blobs
 }
+
+const (
+	DefaultMaxUploadSize = 100 * 1024 * 1024 // 100 MB
+)
 
 func New(path ...string) (*DB, error) {
 	cfg := Config{}
@@ -84,6 +94,10 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 	if err := os.MkdirAll(currentPath, 0755); err != nil {
 		return nil, err
+	}
+
+	if cfg.MaxUploadSize == 0 {
+		cfg.MaxUploadSize = DefaultMaxUploadSize
 	}
 
 	key, err := ensureMasterKey(currentPath, cfg.EncryptionKey)
@@ -111,13 +125,19 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		path:         currentPath,
-		memTable:     NewMemTable(),
-		wal:          wal,
-		sstables:     make([]*SSTable, 0),
-		memTableSize: DefaultMemTableSize,
-		cache:        nil,
-		crypto:       cryptoProvider,
+		path:           currentPath,
+		memTable:       NewMemTable(),
+		wal:            wal,
+		sstables:       make([]*SSTable, 0),
+		memTableSize:   DefaultMemTableSize,
+		cache:          nil,
+		crypto:         cryptoProvider,
+		maxUploadSize:  cfg.MaxUploadSize,
+		useFileStorage: cfg.UseFileStorage,
+	}
+	if db.useFileStorage {
+		db.filesDir = filepath.Join(db.path, "files")
+		os.MkdirAll(db.filesDir, 0755)
 	}
 
 	// Load entries from WAL into memtable
@@ -153,6 +173,56 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	return db, nil
 }
 
+// SetPerformanceMode toggles high-level performance profiles for the DB.
+// "performance": maximize throughput (larger memtable, larger cache, larger WAL buffer)
+// "balanced": reasonable tradeoff
+// "aggressive": minimal memory footprint
+func (db *DB) SetPerformanceMode(mode string) {
+	// Compute desired parameters without holding the DB lock to avoid nested locking
+	var memSize int64
+	var cacheMode string
+	var walBuf int
+	var walInterval time.Duration
+
+	switch mode {
+	case "performance":
+		memSize = 128 * 1024 * 1024 // 128MB
+		cacheMode = "performance"
+		walBuf = 8 * 1024 * 1024
+		walInterval = 200 * time.Millisecond
+	case "balanced":
+		memSize = 32 * 1024 * 1024 // 32MB
+		cacheMode = "balanced"
+		walBuf = 1 * 1024 * 1024
+		walInterval = 1 * time.Second
+	case "aggressive":
+		memSize = 16 * 1024 * 1024 // 16MB
+		cacheMode = "aggressive"
+		walBuf = 512 * 1024
+		walInterval = 2 * time.Second
+	default:
+		// fall back to balanced
+		memSize = 32 * 1024 * 1024
+		cacheMode = "balanced"
+		walBuf = 1 * 1024 * 1024
+		walInterval = 1 * time.Second
+	}
+
+	// Apply the memtable sizing under lock
+	db.mutex.Lock()
+	db.memTableSize = memSize
+	db.mutex.Unlock()
+
+	// Use the existing SetCacheMode (it handles its own locking)
+	db.SetCacheMode(cacheMode)
+
+	// Configure WAL without holding the DB lock
+	if db.wal != nil {
+		db.wal.SetBufferSize(walBuf)
+		db.wal.SetSyncInterval(walInterval)
+	}
+}
+
 func (db *DB) Put(key, value []byte) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -161,23 +231,26 @@ func (db *DB) Put(key, value []byte) error {
 
 // Internal put method without locking - used when already holding a lock
 func (db *DB) put(key, value []byte) error {
-	entry := &Entry{
-		Key:       append([]byte{}, key...),
-		Value:     append([]byte{}, value...),
-		Timestamp: uint64(time.Now().UnixNano()),
-		Deleted:   false,
-	}
-
-	// Compute checksum before writing to WAL so replay can verify integrity
-	entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
+	// Get an entry from pool to reduce allocations
+	e := entryPool.Get().(*Entry)
+	e.Key = append(e.Key[:0], key...)
+	e.Value = append(e.Value[:0], value...)
+	e.Timestamp = uint64(time.Now().UnixNano())
+	e.Deleted = false
+	// Compute checksum using streaming to avoid temporary concatenation
+	h := crc32.NewIEEE()
+	h.Write(e.Key)
+	h.Write(e.Value)
+	e.checksum = h.Sum32()
 
 	// Write to WAL first for durability
-	err := db.wal.Write(entry)
+	err := db.wal.Write(e)
 	if err != nil {
+		entryPool.Put(e)
 		return err
 	}
 
-	// Write to memtable
+	// Write to memtable (memtable will use its own pool)
 	db.memTable.Put(key, value)
 
 	// Update cache
@@ -185,7 +258,8 @@ func (db *DB) put(key, value []byte) error {
 		db.cache.Put(string(key), append([]byte{}, value...))
 	}
 
-	// Check if memtable needs to be flushed
+	// Return entry buffer to pool
+	entryPool.Put(e)
 	if db.memTable.Size() > db.memTableSize {
 		go db.flushMemTable()
 	}

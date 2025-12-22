@@ -289,7 +289,59 @@ func (sst *SSTable) findIndexForKey(key []byte) (*IndexEntry, bool, error) {
 		return &entry, true, nil
 	}
 
-	// Linear scan across index region — correct and safe fallback when sparse index logic is not sufficient.
+	// If we have sample offsets, do a binary search on samples to narrow the scan range
+	if len(sst.indexSampleOffsets) > 0 {
+		low := 0
+		high := len(sst.indexSampleOffsets) - 1
+		var samplePos int
+		for low <= high {
+			mid := (low + high) / 2
+			off := sst.indexSampleOffsets[mid]
+			sampleEntry, err := sst.readIndexEntryAt(off)
+			if err != nil {
+				return nil, false, err
+			}
+			cmp := compareKeys(sampleEntry.Key, key)
+			if cmp == 0 {
+				return &sampleEntry, true, nil
+			}
+			if cmp < 0 {
+				samplePos = mid
+				low = mid + 1
+			} else {
+				high = mid - 1
+			}
+		}
+
+		// Start scanning from the chosen sample offset (or beginning if samplePos == 0)
+		startOff := uint32(0)
+		if samplePos < len(sst.indexSampleOffsets) {
+			startOff = sst.indexSampleOffsets[samplePos]
+		}
+		// Scan forward until we find the key or pass it
+		idxPos := startOff
+		scanned := 0
+		for scanned < sst.entryCount { // conservative bound
+			entry, err := sst.readIndexEntryAt(idxPos)
+			if err != nil {
+				return nil, false, err
+			}
+			cmp := compareKeys(entry.Key, key)
+			if cmp == 0 {
+				return &entry, true, nil
+			}
+			if cmp > 0 {
+				return nil, false, nil
+			}
+			idxEntrySize := 4 + len(entry.Key) + 8 + 4
+			idxPos += uint32(idxEntrySize)
+			scanned++
+		}
+
+		return nil, false, nil
+	}
+
+	// Linear scan across index region — correct and safe fallback when sparse index logic is not available.
 	idxPos := uint32(0)
 	for i := 0; i < sst.entryCount; i++ {
 		entry, err := sst.readIndexEntryAt(idxPos)
