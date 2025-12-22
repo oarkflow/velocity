@@ -58,7 +58,8 @@ func RunHybridBenchmark() {
 	defer db.Close()
 	defer os.RemoveAll("./velocitydb_data")
 
-	db.EnableCache(100000)
+	// Lightweight cache for hybrid test (20 MB)
+	db.EnableCache(20 * 1024 * 1024) // 20 MB
 
 	// Write Test
 	start := time.Now()

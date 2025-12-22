@@ -181,7 +181,8 @@ func runComparisonBenchmark() {
 	defer hybridDB.Close()
 	defer os.RemoveAll("./hybrid_test")
 
-	hybridDB.EnableCache(100000)
+	// Keep hybrid cache lightweight for fair comparison (20 MB)
+	hybridDB.EnableCache(20 * 1024 * 1024) // 20 MB
 
 	// Hybrid Write Test
 	start := time.Now()

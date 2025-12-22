@@ -1,13 +1,49 @@
 package velocity
 
-import "sync"
+import (
+	"sync"
+)
 
-// Cache layer for hot data
+// LRUCache is a byte-limited LRU cache with a simple buffer pool to reduce allocations.
+// capacity is the total byte capacity (not item count).
 type LRUCache struct {
-	capacity  int
-	items     map[string]*cacheItem
-	evictList *list
-	mutex     sync.RWMutex
+	capacityBytes int64
+	totalBytes    int64
+	items         map[string]*cacheItem
+	evictList     *list
+	mutex         sync.Mutex
+	bufPool       *bufferPool
+}
+
+// bounded buffer pool to avoid unbounded memory retention
+type bufferPool struct {
+	ch chan []byte
+}
+
+func newBufferPool(max int) *bufferPool {
+	return &bufferPool{ch: make(chan []byte, max)}
+}
+
+func (p *bufferPool) Get(minSize int) []byte {
+	select {
+	case b := <-p.ch:
+		if cap(b) >= minSize {
+			return b[:minSize]
+		}
+		// not big enough, drop it
+		return make([]byte, minSize)
+	default:
+		return make([]byte, minSize)
+	}
+}
+
+func (p *bufferPool) Put(b []byte) {
+	select {
+	case p.ch <- b[:0]:
+		// stored
+	default:
+		// pool full, drop
+	}
 }
 
 type cacheItem struct {
@@ -59,12 +95,15 @@ func (l *list) removeLast() *listNode {
 	return last
 }
 
-func NewLRUCache(capacity int) *LRUCache {
-	return &LRUCache{
-		capacity:  capacity,
-		items:     make(map[string]*cacheItem),
-		evictList: newList(),
+// NewLRUCache creates a new byte-capacity LRU cache. capacityBytes is total bytes allowed.
+func NewLRUCache(capacityBytes int) *LRUCache {
+	c := &LRUCache{
+		capacityBytes: int64(capacityBytes),
+		items:         make(map[string]*cacheItem),
+		evictList:     newList(),
 	}
+	c.bufPool = newBufferPool(1024) // bounded to avoid holding unlimited buffers
+	return c
 }
 
 func (c *LRUCache) Get(key string) ([]byte, bool) {
@@ -73,36 +112,72 @@ func (c *LRUCache) Get(key string) ([]byte, bool) {
 
 	if item, exists := c.items[key]; exists {
 		c.evictList.moveToFront(item.node)
-		return item.value, true
+		// Return a copy to avoid callers mutating internal buffer
+		out := make([]byte, len(item.value))
+		copy(out, item.value)
+		return out, true
 	}
 	return nil, false
 }
 
 func (c *LRUCache) Put(key string, value []byte) {
+	if c.capacityBytes == 0 {
+		return
+	}
+
+	sz := int64(len(value))
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	if item, exists := c.items[key]; exists {
-		item.value = value
+		// replace value and adjust size
+		c.totalBytes -= int64(len(item.value))
+		buf := make([]byte, len(value))
+		copy(buf, value)
+		item.value = buf
+		c.totalBytes += int64(len(item.value))
 		c.evictList.moveToFront(item.node)
+		// evict if over capacity
+		for c.totalBytes > c.capacityBytes {
+			if oldest := c.evictList.removeLast(); oldest != nil {
+				c.totalBytes -= int64(len(oldest.item.value))
+				delete(c.items, oldest.item.key)
+				// recycle small buffers
+				if cap(oldest.item.value) <= 64*1024 {
+					c.bufPool.Put(oldest.item.value[:0])
+				}
+			}
+		}
 		return
 	}
 
-	// Add new item
+	// allocate buffer (try pool)
+	var buf []byte
+	buf = c.bufPool.Get(len(value))
+	copy(buf, value)
+
 	item := &cacheItem{
 		key:   key,
-		value: append([]byte{}, value...),
+		value: buf,
 	}
 	node := &listNode{item: item}
 	item.node = node
 
 	c.items[key] = item
 	c.evictList.pushFront(node)
+	c.totalBytes += sz
 
-	// Evict if necessary
-	if len(c.items) > c.capacity {
+	// Evict until under capacity
+	for c.totalBytes > c.capacityBytes {
 		if oldest := c.evictList.removeLast(); oldest != nil {
+			c.totalBytes -= int64(len(oldest.item.value))
 			delete(c.items, oldest.item.key)
+			if cap(oldest.item.value) <= 64*1024 {
+				c.bufPool.Put(oldest.item.value[:0])
+			}
+		} else {
+			break
 		}
 	}
 }
@@ -112,12 +187,17 @@ func (c *LRUCache) Remove(key string) {
 	defer c.mutex.Unlock()
 	if item, exists := c.items[key]; exists {
 		c.evictList.remove(item.node)
+		c.totalBytes -= int64(len(item.value))
 		delete(c.items, key)
+		if cap(item.value) <= 64*1024 {
+			c.bufPool.Put(item.value[:0])
+		}
 	}
 }
 
 // Enhanced VelocityDB with caching
 func (db *DB) EnableCache(cacheSize int) {
+	// cacheSize is interpreted as bytes (e.g., 50 * 1024 * 1024 for 50MB)
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	db.cache = NewLRUCache(cacheSize)

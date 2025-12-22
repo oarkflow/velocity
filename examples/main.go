@@ -48,7 +48,8 @@ func main() {
 	}
 	defer db.Close()
 
-	db.EnableCache(500000)
+	// Enable a moderate, byte-limited cache (50 MB) to keep memory usage light while improving performance
+	db.EnableCache(50 * 1024 * 1024) // 50 MB
 
 	// Performance configurations
 	numOps := 1000000 // 1M operations for serious benchmarking
@@ -390,8 +391,8 @@ func runServer() {
 	}
 	defer db.Close()
 
-	// Enable cache for better performance
-	db.EnableCache(1000000)
+	// Enable a server cache sized for production-like loads (100 MB)
+	db.EnableCache(100 * 1024 * 1024) // 100 MB
 
 	// Initialize user storage
 	userDB, err := velocity.NewSQLiteUserStorage("./users.db")
@@ -460,8 +461,8 @@ func testTCPAuth() {
 	defer db.Close()
 	defer os.RemoveAll("./velocitydb_test") // Clean up after test
 
-	// Enable cache for better performance
-	db.EnableCache(10000)
+	// Small cache for tests to keep memory low
+	db.EnableCache(1 * 1024 * 1024) // 1 MB
 
 	// Initialize user storage
 	userDB, err := velocity.NewSQLiteUserStorage("./users_test.db")
