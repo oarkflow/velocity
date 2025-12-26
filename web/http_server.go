@@ -1,4 +1,4 @@
-package velocity
+package web
 
 import (
 	"bytes"
@@ -21,18 +21,19 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/oarkflow/velocity"
 )
 
 // HTTPServer represents an HTTP server for the Velocity database
 type HTTPServer struct {
-	db     *DB
+	db     *velocity.DB
 	app    *fiber.App
 	port   string
 	userDB UserStorage
 }
 
 // NewHTTPServer creates a new HTTP server
-func NewHTTPServer(db *DB, port string, userDB UserStorage) *HTTPServer {
+func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer {
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
@@ -278,7 +279,7 @@ func (s *HTTPServer) handleDelete(c *fiber.Ctx) error {
 	})
 }
 
-const maxUploadSize = 100 * 1024 * 1024 // 100 MB
+const MaxUploadSize = 100 * 1024 * 1024 // 100 MB
 
 func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 	fileHeader, err := c.FormFile("file")
@@ -302,7 +303,7 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 		_ = os.Remove(tmp.Name())
 	}()
 
-	max := s.db.maxUploadSize
+	max := s.db.MaxUploadSize
 	written, err := io.Copy(tmp, io.LimitReader(file, max+1))
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Unable to read uploaded file")
@@ -328,14 +329,14 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 	overwrite := c.QueryBool("overwrite", false)
 
 	if overwrite && key != "" && s.db.HasFile(key) {
-		if err := s.db.DeleteFile(key); err != nil && !errors.Is(err, ErrFileNotFound) {
+		if err := s.db.DeleteFile(key); err != nil && !errors.Is(err, velocity.ErrFileNotFound) {
 			return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 		}
 	}
 
 	meta, err := s.db.StoreFileStream(key, fileHeader.Filename, contentType, tmp, -1)
 	if err != nil {
-		if errors.Is(err, ErrFileExists) {
+		if errors.Is(err, velocity.ErrFileExists) {
 			return fiber.NewError(fiber.StatusConflict, "File already exists. Provide overwrite=true to replace it.")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -364,7 +365,7 @@ func (s *HTTPServer) handleFileDownload(c *fiber.Ctx) error {
 
 	data, meta, err := s.db.GetFile(key)
 	if err != nil {
-		if errors.Is(err, ErrFileNotFound) {
+		if errors.Is(err, velocity.ErrFileNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "File not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -387,7 +388,7 @@ func (s *HTTPServer) handleFileThumbnail(c *fiber.Ctx) error {
 	}
 	data, contentType, _, _, err := s.db.GetThumbnail(key)
 	if err != nil {
-		if errors.Is(err, ErrFileNotFound) {
+		if errors.Is(err, velocity.ErrFileNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "File not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -405,7 +406,7 @@ func (s *HTTPServer) handleFileMetadata(c *fiber.Ctx) error {
 
 	meta, err := s.db.GetFileMetadata(key)
 	if err != nil {
-		if errors.Is(err, ErrFileNotFound) {
+		if errors.Is(err, velocity.ErrFileNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "File not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -428,7 +429,7 @@ func (s *HTTPServer) handleFileList(c *fiber.Ctx) error {
 	if limit > 0 {
 		end := offset + limit
 		if offset > total {
-			files = []FileMetadata{}
+			files = []velocity.FileMetadata{}
 		} else {
 			if end > total {
 				end = total
@@ -464,7 +465,7 @@ func (s *HTTPServer) handleFileDelete(c *fiber.Ctx) error {
 	}
 
 	if err := s.db.DeleteFile(key); err != nil {
-		if errors.Is(err, ErrFileNotFound) {
+		if errors.Is(err, velocity.ErrFileNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "File not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -488,10 +489,10 @@ func (s *HTTPServer) adminOnly() fiber.Handler {
 
 // handleAdminWalStats returns basic archive stats
 func (s *HTTPServer) handleAdminWalStats(c *fiber.Ctx) error {
-	if s.db == nil || s.db.wal == nil {
+	if s.db == nil || s.db.GetWAL() == nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
 	}
-	count, total, names, err := s.db.wal.ArchiveStats()
+	count, total, names, err := s.db.GetWAL().ArchiveStats()
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -500,10 +501,10 @@ func (s *HTTPServer) handleAdminWalStats(c *fiber.Ctx) error {
 
 // handleAdminWalRotate triggers immediate WAL rotation
 func (s *HTTPServer) handleAdminWalRotate(c *fiber.Ctx) error {
-	if s.db == nil || s.db.wal == nil {
+	if s.db == nil || s.db.GetWAL() == nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
 	}
-	if err := s.db.wal.RotateNow(); err != nil {
+	if err := s.db.GetWAL().RotateNow(); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
 	return c.JSON(fiber.Map{"status": "rotated"})
@@ -511,11 +512,11 @@ func (s *HTTPServer) handleAdminWalRotate(c *fiber.Ctx) error {
 
 // handleAdminWalArchives returns detailed archive file metadata
 func (s *HTTPServer) handleAdminWalArchives(c *fiber.Ctx) error {
-	if s.db == nil || s.db.wal == nil {
+	if s.db == nil || s.db.GetWAL() == nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
 	}
-	orig := s.db.wal.file.Name()
-	archive := s.db.wal.archiveDir
+	orig := s.db.GetWAL().File().Name()
+	archive := s.db.GetWAL().ArchiveDir()
 	if archive == "" {
 		archive = filepath.Join(filepath.Dir(orig), "wal_archive")
 	}
@@ -549,7 +550,7 @@ func (s *HTTPServer) handleAdminSSTableRepair(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "path required")
 	}
 	out := req.Path + ".repaired"
-	count, err := RepairSSTable(req.Path, out, s.db.crypto)
+	count, err := velocity.RepairSSTable(req.Path, out, s.db.Crypto())
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -597,7 +598,7 @@ func (s *HTTPServer) handleAdminDeleteThumbnail(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "key required")
 	}
 	// delete thumb raw key
-	if err := s.db.Delete([]byte(fileThumbPrefix + key)); err != nil {
+	if err := s.db.Delete([]byte(velocity.FileThumbPrefix + key)); err != nil {
 		// if not found, return not found
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
 	}
@@ -608,7 +609,7 @@ func (s *HTTPServer) handleAdminDeleteThumbnail(c *fiber.Ctx) error {
 		meta.ThumbnailHeight = 0
 		meta.ThumbnailURL = ""
 		mb, _ := json.Marshal(meta)
-		_ = s.db.Put([]byte(fileMetaPrefix+key), mb)
+		_ = s.db.Put([]byte(velocity.FileMetaPrefix+key), mb)
 	}
 	return c.JSON(fiber.Map{"status": "deleted", "key": key})
 }

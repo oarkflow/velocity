@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/web"
 )
 
 func usage() {
@@ -97,7 +98,7 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 	// default cache mode: balanced for good default memory/perf tradeoff
 	db.SetCacheMode("balanced")
 
-	userDB, err := velocity.NewSQLiteUserStorage(usersDB)
+	userDB, err := web.NewSQLiteUserStorage(usersDB)
 	if err != nil {
 		log.Fatalf("failed to initialize user storage: %v", err)
 	}
@@ -106,7 +107,7 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 	// create default admin if not exists
 	ctx := context.Background()
 	if _, err := userDB.GetUserByUsername(ctx, "admin"); err != nil {
-		adminUser := &velocity.User{Username: "admin", Email: "admin@example.com", Password: "password123", Role: "admin"}
+		adminUser := &web.User{Username: "admin", Email: "admin@example.com", Password: "password123", Role: "admin"}
 		if err := userDB.CreateUser(ctx, adminUser); err != nil {
 			log.Fatalf("failed to create admin user: %v", err)
 		}
@@ -119,7 +120,7 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 	}
 	defer tcpServer.Stop()
 
-	httpServer := velocity.NewHTTPServer(db, httpPort, userDB)
+	httpServer := web.NewHTTPServer(db, httpPort, userDB)
 	go func() {
 		if err := httpServer.Start(); err != nil {
 			log.Fatalf("failed to start http server: %v", err)

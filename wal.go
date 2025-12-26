@@ -83,6 +83,18 @@ func NewWAL(path string, crypto *CryptoProvider) (*WAL, error) {
 	return wal, nil
 }
 
+func (w *WAL) File() *os.File {
+	return w.file
+}
+
+func (w *WAL) ArchiveDir() string {
+	return w.archiveDir
+}
+
+func (w *DB) Crypto() *CryptoProvider {
+	return w.crypto
+}
+
 func (w *WAL) Write(entry *Entry) error {
 	w.mutex.Lock()
 

@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	fileDataPrefix  = "file:data:"
-	fileMetaPrefix  = "file:meta:"
-	fileThumbPrefix = "file:thumb:"
+	FileDataPrefix  = "file:data:"
+	FileMetaPrefix  = "file:meta:"
+	FileThumbPrefix = "file:thumb:"
 )
 
 var (
@@ -76,11 +76,11 @@ func (db *DB) StoreFileStream(key, filename, contentType string, r io.Reader, si
 	defer func() { _ = tmp.Close(); _ = os.Remove(tmp.Name()) }()
 
 	// copy from reader into tmp (size may be -1 if unknown)
-	written, err := io.Copy(tmp, io.LimitReader(r, db.maxUploadSize+1))
+	written, err := io.Copy(tmp, io.LimitReader(r, db.MaxUploadSize+1))
 	if err != nil {
 		return nil, err
 	}
-	if written > db.maxUploadSize {
+	if written > db.MaxUploadSize {
 		return nil, fmt.Errorf("uploaded file too large")
 	}
 
@@ -111,7 +111,7 @@ func (db *DB) StoreFileStream(key, filename, contentType string, r io.Reader, si
 	if err != nil {
 		return nil, err
 	}
-	metaKey := []byte(fileMetaPrefix + key)
+	metaKey := []byte(FileMetaPrefix + key)
 	if err := db.Put(metaKey, metaBytes); err != nil {
 		// rollback file
 		_ = os.Remove(finalPath)
@@ -148,7 +148,7 @@ func (db *DB) GetFile(key string) ([]byte, *FileMetadata, error) {
 	}
 
 	// Fallback to legacy in-DB storage
-	dataKey := []byte(fileDataPrefix + key)
+	dataKey := []byte(FileDataPrefix + key)
 	data, err := db.Get(dataKey)
 	if err != nil {
 		return nil, nil, translateFileError(err)
@@ -167,8 +167,8 @@ func (db *DB) DeleteFile(key string) error {
 		_ = os.Remove(p)
 	}
 
-	metaKey := []byte(fileMetaPrefix + key)
-	dataKey := []byte(fileDataPrefix + key)
+	metaKey := []byte(FileMetaPrefix + key)
+	dataKey := []byte(FileDataPrefix + key)
 	_ = db.Delete(dataKey) // best-effort, ignore error if legacy blob missing
 	if err := db.Delete(metaKey); err != nil {
 		return err
@@ -188,7 +188,7 @@ func (db *DB) ListFiles() ([]FileMetadata, error) {
 		}
 		for _, key := range keys {
 			keyStr := string(key)
-			if strings.HasPrefix(keyStr, fileMetaPrefix) {
+			if strings.HasPrefix(keyStr, FileMetaPrefix) {
 				raw, err := db.Get(key)
 				if err != nil {
 					if errors.Is(translateFileError(err), ErrFileNotFound) {
@@ -217,7 +217,7 @@ func (db *DB) ListFiles() ([]FileMetadata, error) {
 }
 
 func (db *DB) HasFile(key string) bool {
-	return db.Has([]byte(fileMetaPrefix + key))
+	return db.Has([]byte(FileMetaPrefix + key))
 }
 
 // GetThumbnail returns the cached thumbnail for a file (generates it if missing)
@@ -225,7 +225,7 @@ func (db *DB) GetThumbnail(key string) ([]byte, string, int, int, error) {
 	if !db.HasFile(key) {
 		return nil, "", 0, 0, ErrFileNotFound
 	}
-	thumbKey := []byte(fileThumbPrefix + key)
+	thumbKey := []byte(FileThumbPrefix + key)
 	if db.Has(thumbKey) {
 		b, err := db.Get(thumbKey)
 		if err != nil {
@@ -290,7 +290,7 @@ func (db *DB) GenerateThumbnail(key string, maxDim int) ([]byte, string, int, in
 	}
 	thumbBytes := buf.Bytes()
 	// store thumb
-	if err := db.Put([]byte(fileThumbPrefix+key), thumbBytes); err != nil {
+	if err := db.Put([]byte(FileThumbPrefix+key), thumbBytes); err != nil {
 		return nil, "", 0, 0, err
 	}
 	// update metadata with dimensions and thumbnail url
@@ -298,12 +298,12 @@ func (db *DB) GenerateThumbnail(key string, maxDim int) ([]byte, string, int, in
 	meta.ThumbnailHeight = nh
 	meta.ThumbnailURL = "/api/files/" + key + "/thumbnail"
 	metaBytes, _ := json.Marshal(meta)
-	_ = db.Put([]byte(fileMetaPrefix+key), metaBytes)
+	_ = db.Put([]byte(FileMetaPrefix+key), metaBytes)
 	return thumbBytes, "image/jpeg", nw, nh, nil
 }
 
 func (db *DB) GetFileMetadata(key string) (*FileMetadata, error) {
-	metaKey := []byte(fileMetaPrefix + key)
+	metaKey := []byte(FileMetaPrefix + key)
 	metaBytes, err := db.Get(metaKey)
 	if err != nil {
 		return nil, translateFileError(err)

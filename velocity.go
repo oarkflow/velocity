@@ -52,7 +52,7 @@ type DB struct {
 	memTableSize int64
 	// Files storage
 	filesDir       string
-	maxUploadSize  int64
+	MaxUploadSize  int64
 	useFileStorage bool
 }
 
@@ -85,6 +85,10 @@ func New(path ...string) (*DB, error) {
 		cfg.Path = path[0]
 	}
 	return NewWithConfig(cfg)
+}
+
+func (db *DB) GetWAL() *WAL {
+	return db.wal
 }
 
 func NewWithConfig(cfg Config) (*DB, error) {
@@ -132,7 +136,7 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		memTableSize:   DefaultMemTableSize,
 		cache:          nil,
 		crypto:         cryptoProvider,
-		maxUploadSize:  cfg.MaxUploadSize,
+		MaxUploadSize:  cfg.MaxUploadSize,
 		useFileStorage: cfg.UseFileStorage,
 	}
 	if db.useFileStorage {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/web"
 )
 
 // Benchmark and example usage with advanced features
@@ -402,7 +403,7 @@ func runServer() {
 	db.EnableCache(100 * 1024 * 1024) // 100 MB
 
 	// Initialize user storage
-	userDB, err := velocity.NewSQLiteUserStorage("./users.db")
+	userDB, err := web.NewSQLiteUserStorage("./users.db")
 	if err != nil {
 		log.Fatal("Failed to initialize user storage:", err)
 	}
@@ -412,7 +413,7 @@ func runServer() {
 	ctx := context.Background()
 	_, err = userDB.GetUserByUsername(ctx, "admin")
 	if err != nil { // User doesn't exist, create it
-		adminUser := &velocity.User{
+		adminUser := &web.User{
 			Username: "admin",
 			Email:    "admin@example.com",
 			Password: "password123", // In production, hash this!
@@ -434,7 +435,7 @@ func runServer() {
 	defer tcpServer.Stop()
 
 	// Start HTTP server on port 8081
-	httpServer := velocity.NewHTTPServer(db, "8081", userDB)
+	httpServer := web.NewHTTPServer(db, "8081", userDB)
 	go func() {
 		if err := httpServer.Start(); err != nil {
 			log.Fatal("Failed to start HTTP server:", err)
@@ -472,7 +473,7 @@ func testTCPAuth() {
 	db.EnableCache(1 * 1024 * 1024) // 1 MB
 
 	// Initialize user storage
-	userDB, err := velocity.NewSQLiteUserStorage("./users_test.db")
+	userDB, err := web.NewSQLiteUserStorage("./users_test.db")
 	if err != nil {
 		log.Fatal("Failed to initialize user storage:", err)
 	}
@@ -483,7 +484,7 @@ func testTCPAuth() {
 	ctx := context.Background()
 	_, err = userDB.GetUserByUsername(ctx, "admin")
 	if err != nil { // User doesn't exist, create it
-		adminUser := &velocity.User{
+		adminUser := &web.User{
 			Username: "admin",
 			Email:    "admin@example.com",
 			Password: "password123", // Test password
