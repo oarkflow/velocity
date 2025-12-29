@@ -1,4 +1,4 @@
-package velocity
+package web
 
 import (
 	"bufio"
@@ -8,11 +8,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/velocity"
 )
 
 // TCPServer represents a TCP server for the Velocity database
 type TCPServer struct {
-	db          *DB
+	db          *velocity.DB
 	port        string
 	server      *net.TCPListener
 	wg          sync.WaitGroup
@@ -30,7 +32,7 @@ type tcpConnection struct {
 }
 
 // NewTCPServer creates a new TCP server
-func NewTCPServer(db *DB, port string, userDB UserStorage) *TCPServer {
+func NewTCPServer(db *velocity.DB, port string, userDB UserStorage) *TCPServer {
 	return &TCPServer{
 		db:          db,
 		port:        port,

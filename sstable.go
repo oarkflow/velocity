@@ -100,7 +100,7 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 		}
 
 		keyLen := uint32(len(entry.Key))
-		nonce, ciphertext, err := crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.Deleted))
+		nonce, ciphertext, err := crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.ExpiresAt, entry.Deleted))
 		if err != nil {
 			tmpFile.Close()
 			return nil, err
@@ -139,6 +139,10 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 			tmpFile.Close()
 			return nil, err
 		}
+		if err := binary.Write(tmpFile, binary.LittleEndian, entry.ExpiresAt); err != nil {
+			tmpFile.Close()
+			return nil, err
+		}
 
 		var deleted uint8
 		if entry.Deleted {
@@ -153,7 +157,7 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 			return nil, err
 		}
 
-		entrySize := 4 + len(entry.Key) + 2 + len(nonce) + 4 + len(ciphertext) + 8 + 1 + 4
+		entrySize := 4 + len(entry.Key) + 2 + len(nonce) + 4 + len(ciphertext) + 8 + 8 + 1 + 4
 		currentOffset += uint64(entrySize)
 
 		indexEntries = append(indexEntries, IndexEntry{
@@ -404,10 +408,12 @@ func (sst *SSTable) Get(key []byte) (*Entry, error) {
 	reader.Read(ciphertext)
 
 	binary.Read(reader, binary.LittleEndian, &timestamp)
+	var expiresAt uint64
+	binary.Read(reader, binary.LittleEndian, &expiresAt)
 	binary.Read(reader, binary.LittleEndian, &deleted)
 	binary.Read(reader, binary.LittleEndian, &checksum)
 
-	plaintext, err := sst.crypto.Decrypt(nonce, ciphertext, buildEntryAAD(entryKey, timestamp, deleted == 1))
+	plaintext, err := sst.crypto.Decrypt(nonce, ciphertext, buildEntryAAD(entryKey, timestamp, expiresAt, deleted == 1))
 	if err != nil {
 		return nil, err
 	}
@@ -416,6 +422,7 @@ func (sst *SSTable) Get(key []byte) (*Entry, error) {
 		Key:       entryKey,
 		Value:     plaintext,
 		Timestamp: timestamp,
+		ExpiresAt: expiresAt,
 		Deleted:   deleted == 1,
 		checksum:  checksum,
 	}

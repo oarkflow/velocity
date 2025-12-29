@@ -55,9 +55,9 @@ func (cp *CryptoProvider) Decrypt(nonce, ciphertext, aad []byte) ([]byte, error)
 	return cp.aead.Open(nil, nonce, ciphertext, aad)
 }
 
-func buildEntryAAD(key []byte, timestamp uint64, deleted bool) []byte {
+func buildEntryAAD(key []byte, timestamp uint64, expiresAt uint64, deleted bool) []byte {
 	var (
-		aad        = make([]byte, 0, len(key)+13)
+		aad        = make([]byte, 0, len(key)+21)
 		tmp32      [4]byte
 		tmp64      [8]byte
 		deleteByte byte
@@ -66,6 +66,8 @@ func buildEntryAAD(key []byte, timestamp uint64, deleted bool) []byte {
 	aad = append(aad, tmp32[:]...)
 	aad = append(aad, key...)
 	binary.LittleEndian.PutUint64(tmp64[:], timestamp)
+	aad = append(aad, tmp64[:]...)
+	binary.LittleEndian.PutUint64(tmp64[:], expiresAt)
 	aad = append(aad, tmp64[:]...)
 	if deleted {
 		deleteByte = 1

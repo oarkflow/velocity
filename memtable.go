@@ -14,6 +14,7 @@ type Entry struct {
 	Key       []byte
 	Value     []byte
 	Timestamp uint64
+	ExpiresAt uint64 // unix nano timestamp; 0 means no expiry
 	Deleted   bool
 	checksum  uint32
 }
@@ -22,8 +23,10 @@ type Entry struct {
 var entryPool = sync.Pool{
 	New: func() interface{} {
 		return &Entry{
-			Key:   make([]byte, 0, 64),
-			Value: make([]byte, 0, 256),
+			Key:       make([]byte, 0, 64),
+			Value:     make([]byte, 0, 256),
+			Timestamp: 0,
+			ExpiresAt: 0,
 		}
 	},
 }
@@ -45,6 +48,7 @@ func (mt *MemTable) Put(key, value []byte) {
 	entry.Key = append(entry.Key[:0], key...)
 	entry.Value = append(entry.Value[:0], value...)
 	entry.Timestamp = uint64(time.Now().UnixNano())
+	entry.ExpiresAt = 0
 	entry.Deleted = false
 	entry.checksum = crc32.ChecksumIEEE(append(key, value...))
 
@@ -55,6 +59,27 @@ func (mt *MemTable) Put(key, value []byte) {
 
 	mt.entries.Store(string(key), entry)
 	atomic.AddInt64(&mt.size, int64(len(entry.Key)+len(entry.Value))-oldSize)
+}
+
+// PutEntry inserts a preconfigured Entry into the memtable. This is used when
+// we already have an Entry (for example when replaying WAL or writing with TTL)
+func (mt *MemTable) PutEntry(entry *Entry) {
+	oldSize := int64(0)
+	if old, ok := mt.entries.Load(string(entry.Key)); ok {
+		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+	}
+
+	// Copy key/value into a pooled entry to avoid retaining caller buffers
+	e := entryPool.Get().(*Entry)
+	e.Key = append(e.Key[:0], entry.Key...)
+	e.Value = append(e.Value[:0], entry.Value...)
+	e.Timestamp = entry.Timestamp
+	e.ExpiresAt = entry.ExpiresAt
+	e.Deleted = entry.Deleted
+	e.checksum = entry.checksum
+
+	mt.entries.Store(string(e.Key), e)
+	atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
 }
 
 func (mt *MemTable) Get(key []byte) *Entry {

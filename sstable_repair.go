@@ -133,6 +133,11 @@ func RepairSSTable(inPath, outPath string, crypto *CryptoProvider) (int, error) 
 			break
 		}
 
+		var expiresAt uint64
+		if err := binary.Read(f, binary.LittleEndian, &expiresAt); err != nil {
+			break
+		}
+
 		var deleted uint8
 		if err := binary.Read(f, binary.LittleEndian, &deleted); err != nil {
 			break
@@ -143,7 +148,7 @@ func RepairSSTable(inPath, outPath string, crypto *CryptoProvider) (int, error) 
 			break
 		}
 
-		plaintext, err := crypto.Decrypt(nonce, ciphertext, buildEntryAAD(key, timestamp, deleted == 1))
+		plaintext, err := crypto.Decrypt(nonce, ciphertext, buildEntryAAD(key, timestamp, expiresAt, deleted == 1))
 		if err != nil {
 			break
 		}
@@ -160,7 +165,7 @@ func RepairSSTable(inPath, outPath string, crypto *CryptoProvider) (int, error) 
 		}
 
 		// Re-encrypt with current crypto provider (in case of rotation) and write entry to tmp file
-		nonce2, ciphertext2, err := crypto.Encrypt(plaintext, buildEntryAAD(key, timestamp, deleted == 1))
+		nonce2, ciphertext2, err := crypto.Encrypt(plaintext, buildEntryAAD(key, timestamp, expiresAt, deleted == 1))
 		if err != nil {
 			tmpFile.Close()
 			return count, err
@@ -201,6 +206,10 @@ func RepairSSTable(inPath, outPath string, crypto *CryptoProvider) (int, error) 
 			tmpFile.Close()
 			return count, err
 		}
+		if err := binary.Write(tmpFile, binary.LittleEndian, expiresAt); err != nil {
+			tmpFile.Close()
+			return count, err
+		}
 		var delByte uint8
 		if deleted == 1 {
 			delByte = 1
@@ -214,7 +223,7 @@ func RepairSSTable(inPath, outPath string, crypto *CryptoProvider) (int, error) 
 			return count, err
 		}
 
-		entrySize := 4 + len(key) + 2 + len(nonce2) + 4 + len(ciphertext2) + 8 + 1 + 4
+		entrySize := 4 + len(key) + 2 + len(nonce2) + 4 + len(ciphertext2) + 8 + 8 + 1 + 4
 		currentOffset += uint64(entrySize)
 
 		indexEntries = append(indexEntries, IndexEntry{Key: append([]byte{}, key...), Offset: startOffset, Size: uint32(entrySize)})

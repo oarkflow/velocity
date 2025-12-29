@@ -5,6 +5,7 @@ import (
 	"hash/crc32"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -233,6 +234,51 @@ func (db *DB) Put(key, value []byte) error {
 	return db.put(key, value)
 }
 
+// PutWithTTL stores a key with a TTL. If ttl <= 0 the key will not expire.
+func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	// Build entry
+	e := entryPool.Get().(*Entry)
+	e.Key = append(e.Key[:0], key...)
+	e.Value = append(e.Value[:0], value...)
+	e.Timestamp = uint64(time.Now().UnixNano())
+	if ttl > 0 {
+		e.ExpiresAt = uint64(time.Now().Add(ttl).UnixNano())
+	} else {
+		e.ExpiresAt = 0
+	}
+	e.Deleted = false
+	// checksum
+	h := crc32.NewIEEE()
+	h.Write(e.Key)
+	h.Write(e.Value)
+	e.checksum = h.Sum32()
+
+	// Write to WAL
+	if err := db.wal.Write(e); err != nil {
+		entryPool.Put(e)
+		return err
+	}
+
+	// Put into memtable
+	db.memTable.PutEntry(e)
+
+	// Update cache
+	if db.cache != nil {
+		db.cache.Put(string(key), append([]byte{}, value...))
+	}
+
+	// Return entry buffer to pool
+	entryPool.Put(e)
+	if db.memTable.Size() > db.memTableSize {
+		go db.flushMemTable()
+	}
+
+	return nil
+}
+
 // Internal put method without locking - used when already holding a lock
 func (db *DB) put(key, value []byte) error {
 	// Get an entry from pool to reduce allocations
@@ -288,6 +334,10 @@ func (db *DB) get(key []byte) ([]byte, error) {
 
 	// Check memtable first
 	if entry := db.memTable.Get(key); entry != nil {
+		// Check expiry
+		if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
+			return nil, fmt.Errorf("key not found")
+		}
 		if entry.Deleted {
 			return nil, fmt.Errorf("key not found")
 		}
@@ -309,6 +359,10 @@ func (db *DB) get(key []byte) ([]byte, error) {
 			return nil, err
 		}
 		if entry != nil {
+			// Check expiry
+			if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
+				return nil, fmt.Errorf("key not found")
+			}
 			if entry.Deleted {
 				return nil, fmt.Errorf("key not found")
 			}
@@ -497,6 +551,150 @@ func (db *DB) Decr(key []byte, step ...any) (any, error) {
 	return db.incr(key, val, "decr")
 }
 
+// TTL returns the remaining time to live for key. If key has no expiry, it
+// returns -1 duration and nil error. If key does not exist or is expired, it
+// returns 0 and an error.
+func (db *DB) TTL(key []byte) (time.Duration, error) {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	// Check memtable first
+	if entry := db.memTable.Get(key); entry != nil {
+		// deleted or expired
+		if entry.Deleted {
+			return 0, fmt.Errorf("key not found")
+		}
+		if entry.ExpiresAt == 0 {
+			return time.Duration(-1), nil
+		}
+		remaining := time.Until(time.Unix(0, int64(entry.ExpiresAt)))
+		if remaining <= 0 {
+			return 0, fmt.Errorf("key not found")
+		}
+		return remaining, nil
+	}
+
+	// Check SSTables
+	sstables := make([]*SSTable, len(db.sstables))
+	copy(sstables, db.sstables)
+	for i := len(sstables) - 1; i >= 0; i-- {
+		entry, err := sstables[i].Get(key)
+		if err != nil {
+			return 0, err
+		}
+		if entry != nil {
+			if entry.Deleted {
+				return 0, fmt.Errorf("key not found")
+			}
+			if entry.ExpiresAt == 0 {
+				return time.Duration(-1), nil
+			}
+			remaining := time.Until(time.Unix(0, int64(entry.ExpiresAt)))
+			if remaining <= 0 {
+				return 0, fmt.Errorf("key not found")
+			}
+			return remaining, nil
+		}
+	}
+
+	return 0, fmt.Errorf("key not found")
+}
+
+// Keys returns all keys that match the provided shell-style pattern. If pattern
+// is empty it behaves like "*". Uses path.Match for globbing semantics.
+func (db *DB) Keys(pattern string) ([]string, error) {
+	if pattern == "" {
+		pattern = "*"
+	}
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	seen := make(map[string]bool)
+	var keys []string
+	match := func(s string) bool {
+		ok, _ := path.Match(pattern, s)
+		return ok
+	}
+
+	// memtable: recent entries override
+	db.memTable.entries.Range(func(k, v any) bool {
+		e := v.(*Entry)
+		s := string(e.Key)
+		if e.Deleted {
+			return true
+		}
+		if e.ExpiresAt != 0 && time.Now().UnixNano() > int64(e.ExpiresAt) {
+			return true
+		}
+		if match(s) && !seen[s] {
+			seen[s] = true
+			keys = append(keys, s)
+		}
+		return true
+	})
+
+	// For small DBs we materialize all keys for deterministic ordering
+	totalEstimate := 0
+	for _, sst := range db.sstables {
+		totalEstimate += sst.entryCount
+	}
+	if totalEstimate <= 100000 {
+		allKeys := make([]string, 0, totalEstimate+1000)
+		for k := range seen {
+			allKeys = append(allKeys, k)
+		}
+		for _, sst := range db.sstables {
+			idxPos := uint32(0)
+			for i := 0; i < sst.entryCount; i++ {
+				entry, err := sst.readIndexEntryAt(idxPos)
+				if err != nil {
+					break
+				}
+				if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
+					allKeys = append(allKeys, string(entry.Key))
+				}
+				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				idxPos += uint32(idxEntrySize)
+			}
+		}
+		uniq := make(map[string]bool)
+		uKeys := make([]string, 0, len(allKeys))
+		for _, s := range allKeys {
+			if !uniq[s] && match(s) {
+				uniq[s] = true
+				uKeys = append(uKeys, s)
+			}
+		}
+		sort.Strings(uKeys)
+		return uKeys, nil
+	}
+
+	// Large DB: sequential scan
+	sstables := make([]*SSTable, len(db.sstables))
+	copy(sstables, db.sstables)
+	for _, sst := range sstables {
+		idxPos := uint32(0)
+		for i := 0; i < sst.entryCount; i++ {
+			entry, err := sst.readIndexEntryAt(idxPos)
+			if err != nil {
+				break
+			}
+			if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
+				s := string(entry.Key)
+				if match(s) && !seen[s] {
+					seen[s] = true
+					keys = append(keys, s)
+				}
+			}
+			idxEntrySize := 4 + len(entry.Key) + 8 + 4
+			idxPos += uint32(idxEntrySize)
+		}
+	}
+
+	sort.Strings(keys)
+	return keys, nil
+}
+
 // KeysPage returns a page of keys (offset, limit) without loading the entire dataset into memory.
 // It returns the page of keys and the total number of keys.
 func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
@@ -517,14 +715,13 @@ func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 	}
 
 	// From memtable (recent keys override older sstable keys)
+	// When the DB is small we want to materialize the full set of keys, so always
+	// iterate the memtable completely. For large DBs we may stop early in the
+	// sequential SSTable scan below to avoid scanning the entire dataset.
 	db.memTable.entries.Range(func(key, value any) bool {
 		entry := value.(*Entry)
 		if !entry.Deleted {
 			appendKey(entry.Key)
-		}
-		// stop early if we've collected enough for requested pages
-		if limit > 0 && len(keys) >= offset+limit {
-			return false
 		}
 		return true
 	})

@@ -98,8 +98,8 @@ func (w *DB) Crypto() *CryptoProvider {
 func (w *WAL) Write(entry *Entry) error {
 	w.mutex.Lock()
 
-	// Encrypt value using AEAD with entry metadata as AAD
-	nonce, ciphertext, err := w.crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.Deleted))
+	// Encrypt value using AEAD with entry metadata as AAD (including expiry)
+	nonce, ciphertext, err := w.crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.ExpiresAt, entry.Deleted))
 	if err != nil {
 		w.mutex.Unlock()
 		return err
@@ -116,6 +116,7 @@ func (w *WAL) Write(entry *Entry) error {
 	binary.Write(w.buffer, binary.LittleEndian, valueLen)
 	w.buffer.Write(ciphertext)
 	binary.Write(w.buffer, binary.LittleEndian, entry.Timestamp)
+	binary.Write(w.buffer, binary.LittleEndian, entry.ExpiresAt)
 
 	var deleted uint8
 	if entry.Deleted {
@@ -538,6 +539,11 @@ func (w *WAL) Replay() ([]*Entry, error) {
 			return nil, err
 		}
 
+		var expiresAt uint64
+		if err := binary.Read(f, binary.LittleEndian, &expiresAt); err != nil {
+			return nil, err
+		}
+
 		var deleted uint8
 		if err := binary.Read(f, binary.LittleEndian, &deleted); err != nil {
 			return nil, err
@@ -549,7 +555,7 @@ func (w *WAL) Replay() ([]*Entry, error) {
 		}
 
 		// Decrypt
-		plaintext, err := w.crypto.Decrypt(nonce, ciphertext, buildEntryAAD(key, timestamp, deleted == 1))
+		plaintext, err := w.crypto.Decrypt(nonce, ciphertext, buildEntryAAD(key, timestamp, expiresAt, deleted == 1))
 		if err != nil {
 			// Decryption error likely means corruption; stop and return what we have
 			return nil, fmt.Errorf("WAL replay: decrypt failed for key %x: %w", key, err)
@@ -559,10 +565,10 @@ func (w *WAL) Replay() ([]*Entry, error) {
 			Key:       append([]byte{}, key...),
 			Value:     append([]byte{}, plaintext...),
 			Timestamp: timestamp,
+			ExpiresAt: expiresAt,
 			Deleted:   deleted == 1,
 			checksum:  checksum,
 		}
-
 		// basic checksum verification
 		calc := crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
 		if entry.Deleted {
