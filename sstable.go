@@ -593,3 +593,151 @@ func LoadSSTable(path string, crypto *CryptoProvider) (*SSTable, error) {
 
 	return sst, nil
 }
+
+// SSTableIterator iterates over entries in an SSTable
+type SSTableIterator struct {
+	sst     *SSTable
+	index   int
+	entries []*Entry
+}
+
+// NewSSTableIterator creates a new iterator for the SSTable
+func NewSSTableIterator(sst *SSTable) (*SSTableIterator, error) {
+	iter := &SSTableIterator{
+		sst:   sst,
+		index: -1,
+	}
+
+	// Load all entries into memory for simplicity (for large SSTables, this could be optimized)
+	iter.entries = make([]*Entry, 0, sst.entryCount)
+	idxPos := uint32(0)
+	for i := 0; i < sst.entryCount; i++ {
+		entry, err := sst.readIndexEntryAt(idxPos)
+		if err != nil {
+			return nil, err
+		}
+		// Read the full entry
+		fullEntry, err := sst.readEntryAt(entry.Offset, entry.Size)
+		if err != nil {
+			return nil, err
+		}
+		iter.entries = append(iter.entries, fullEntry)
+		idxEntrySize := 4 + len(entry.Key) + 8 + 4
+		idxPos += uint32(idxEntrySize)
+	}
+
+	return iter, nil
+}
+
+// Next advances the iterator
+func (iter *SSTableIterator) Next() bool {
+	iter.index++
+	return iter.index < len(iter.entries)
+}
+
+// Entry returns the current entry
+func (iter *SSTableIterator) Entry() *Entry {
+	if iter.index < 0 || iter.index >= len(iter.entries) {
+		return nil
+	}
+	return iter.entries[iter.index]
+}
+
+// MergedIterator merges multiple SSTableIterators
+type MergedIterator struct {
+	iterators []*SSTableIterator
+	current   *Entry
+}
+
+// NewMergedIterator creates a merged iterator
+func NewMergedIterator(iterators ...*SSTableIterator) *MergedIterator {
+	return &MergedIterator{
+		iterators: iterators,
+	}
+}
+
+// Next advances to the next entry in sorted order
+func (mi *MergedIterator) Next() bool {
+	var candidates []*Entry
+	for _, iter := range mi.iterators {
+		if iter.Next() {
+			candidates = append(candidates, iter.Entry())
+		}
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+
+	// Find the smallest key
+	minEntry := candidates[0]
+	for _, entry := range candidates[1:] {
+		if compareKeys(entry.Key, minEntry.Key) < 0 {
+			minEntry = entry
+		}
+	}
+	mi.current = minEntry
+	return true
+}
+
+// Entry returns the current entry
+func (mi *MergedIterator) Entry() *Entry {
+	return mi.current
+}
+
+// readEntryAt reads a full entry at the given offset and size
+func (sst *SSTable) readEntryAt(offset uint64, size uint32) (*Entry, error) {
+	data := sst.mmap[offset : offset+uint64(size)]
+
+	reader := bytes.NewReader(data)
+	var keyLen, valueLen uint32
+	var timestamp uint64
+	var deleted uint8
+	var checksum uint32
+	var nonceLen uint16
+
+	binary.Read(reader, binary.LittleEndian, &keyLen)
+
+	entryKey := make([]byte, keyLen)
+	reader.Read(entryKey)
+
+	binary.Read(reader, binary.LittleEndian, &nonceLen)
+	nonce := make([]byte, nonceLen)
+	reader.Read(nonce)
+
+	binary.Read(reader, binary.LittleEndian, &valueLen)
+	ciphertext := make([]byte, valueLen)
+	reader.Read(ciphertext)
+
+	binary.Read(reader, binary.LittleEndian, &timestamp)
+	var expiresAt uint64
+	binary.Read(reader, binary.LittleEndian, &expiresAt)
+	binary.Read(reader, binary.LittleEndian, &deleted)
+	binary.Read(reader, binary.LittleEndian, &checksum)
+
+	plaintext, err := sst.crypto.Decrypt(nonce, ciphertext, buildEntryAAD(entryKey, timestamp, expiresAt, deleted == 1))
+	if err != nil {
+		return nil, err
+	}
+
+	entry := &Entry{
+		Key:       entryKey,
+		Value:     plaintext,
+		Timestamp: timestamp,
+		ExpiresAt: expiresAt,
+		Deleted:   deleted == 1,
+		checksum:  checksum,
+	}
+
+	// Verify checksum
+	var calc uint32
+	if entry.Deleted {
+		calc = crc32.ChecksumIEEE(entry.Key)
+	} else {
+		calc = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
+	}
+	if calc != entry.checksum {
+		return nil, fmt.Errorf("sstable: checksum mismatch for key %x: expected %08x got %08x", entryKey, entry.checksum, calc)
+	}
+
+	return entry, nil
+}

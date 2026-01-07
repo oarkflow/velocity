@@ -43,7 +43,7 @@ type DB struct {
 	path       string
 	memTable   *MemTable
 	wal        *WAL
-	sstables   []*SSTable
+	levels     [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
 	mutex      sync.RWMutex
 	compacting atomic.Bool
 	cache      *LRUCache
@@ -52,8 +52,8 @@ type DB struct {
 	// Configuration
 	memTableSize int64
 	// Files storage
-	filesDir       string
-	MaxUploadSize  int64
+	filesDir      string
+	MaxUploadSize int64
 }
 
 var defaultPath = "./data/velocity"
@@ -69,9 +69,9 @@ func init() {
 }
 
 type Config struct {
-	Path           string
-	EncryptionKey  []byte
-	MaxUploadSize  int64 // bytes; 0 means use default
+	Path          string
+	EncryptionKey []byte
+	MaxUploadSize int64 // bytes; 0 means use default
 }
 
 const (
@@ -128,14 +128,14 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		path:           currentPath,
-		memTable:       NewMemTable(),
-		wal:            wal,
-		sstables:       make([]*SSTable, 0),
-		memTableSize:   DefaultMemTableSize,
-		cache:          nil,
-		crypto:         cryptoProvider,
-		MaxUploadSize:  cfg.MaxUploadSize,
+		path:          currentPath,
+		memTable:      NewMemTable(),
+		wal:           wal,
+		levels:        make([][]*SSTable, MaxLevels),
+		memTableSize:  DefaultMemTableSize,
+		cache:         nil,
+		crypto:        cryptoProvider,
+		MaxUploadSize: cfg.MaxUploadSize,
 	}
 	// Ensure files directory exists for object storage
 	db.filesDir = filepath.Join(db.path, "objects")
@@ -164,12 +164,22 @@ func NewWithConfig(cfg Config) (*DB, error) {
 				log.Printf("velocity: failed to load sstable %s: %v", name, err)
 				continue
 			}
-			db.sstables = append(db.sstables, sst)
+			// Parse level from filename, e.g., sst_L0_001.db -> level 0
+			level := 0
+			if len(name) > 6 && name[4:6] == "L" {
+				if l, err := strconv.Atoi(name[5:6]); err == nil && l < MaxLevels {
+					level = l
+				}
+			}
+			if level >= len(db.levels) {
+				db.levels = append(db.levels, make([][]*SSTable, level-len(db.levels)+1)...)
+			}
+			db.levels[level] = append(db.levels[level], sst)
 		}
 	}
 
 	// Start background compaction
-	// go db.compactionLoop()
+	go db.compactionLoop()
 
 	return db, nil
 }
@@ -344,29 +354,29 @@ func (db *DB) get(key []byte) ([]byte, error) {
 		return value, nil
 	}
 
-	// Check SSTables
-	sstables := make([]*SSTable, len(db.sstables))
-	copy(sstables, db.sstables)
-
-	// Search SSTables in reverse order (newest first)
-	for i := len(sstables) - 1; i >= 0; i-- {
-		entry, err := sstables[i].Get(key)
-		if err != nil {
-			return nil, err
-		}
-		if entry != nil {
-			// Check expiry
-			if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
-				return nil, fmt.Errorf("key not found")
+	// Check SSTables by level
+	for level := 0; level < len(db.levels); level++ {
+		sstables := db.levels[level]
+		// Search SSTables in reverse order (newest first) within level
+		for i := len(sstables) - 1; i >= 0; i-- {
+			entry, err := sstables[i].Get(key)
+			if err != nil {
+				return nil, err
 			}
-			if entry.Deleted {
-				return nil, fmt.Errorf("key not found")
+			if entry != nil {
+				// Check expiry
+				if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
+					return nil, fmt.Errorf("key not found")
+				}
+				if entry.Deleted {
+					return nil, fmt.Errorf("key not found")
+				}
+				value := entry.Value
+				if db.cache != nil {
+					db.cache.Put(keyStr, append([]byte{}, value...))
+				}
+				return value, nil
 			}
-			value := entry.Value
-			if db.cache != nil {
-				db.cache.Put(keyStr, append([]byte{}, value...))
-			}
-			return value, nil
 		}
 	}
 
@@ -425,14 +435,15 @@ func (db *DB) flushMemTable() error {
 		return compareKeys(entries[i].Key, entries[j].Key) < 0
 	})
 
-	// Create new SSTable
-	sstPath := filepath.Join(db.path, fmt.Sprintf("sst_%d.db", time.Now().UnixNano()))
+	// Create new SSTable in L0
+	level := 0
+	sstPath := filepath.Join(db.path, fmt.Sprintf("sst_L%d_%d.db", level, time.Now().UnixNano()))
 	sst, err := NewSSTable(sstPath, entries, db.crypto)
 	if err != nil {
 		return err
 	}
 
-	db.sstables = append(db.sstables, sst)
+	db.levels[level] = append(db.levels[level], sst)
 
 	// Truncate WAL after successfully flushing memtable to SSTable
 	if err := db.wal.Truncate(); err != nil {
@@ -449,8 +460,10 @@ func (db *DB) Close() error {
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
-	for _, sst := range db.sstables {
-		sst.Close()
+	for _, level := range db.levels {
+		for _, sst := range level {
+			sst.Close()
+		}
 	}
 
 	return db.wal.Close()
@@ -471,19 +484,19 @@ func (db *DB) Has(key []byte) bool {
 		return !entry.Deleted
 	}
 
-	// Check SSTables
-	sstables := make([]*SSTable, len(db.sstables))
-	copy(sstables, db.sstables)
-
-	// Search SSTables in reverse order (newest first)
-	for i := len(sstables) - 1; i >= 0; i-- {
-		entry, err := sstables[i].Get(key)
-		if err != nil {
-			log.Printf("velocity: integrity verification failed for key %x: %v", key, err)
-			continue
-		}
-		if entry != nil {
-			return !entry.Deleted
+	// Check SSTables by level
+	for level := 0; level < len(db.levels); level++ {
+		sstables := db.levels[level]
+		// Search SSTables in reverse order (newest first) within level
+		for i := len(sstables) - 1; i >= 0; i-- {
+			entry, err := sstables[i].Get(key)
+			if err != nil {
+				log.Printf("velocity: integrity verification failed for key %x: %v", key, err)
+				continue
+			}
+			if entry != nil {
+				return !entry.Deleted
+			}
 		}
 	}
 
@@ -570,26 +583,27 @@ func (db *DB) TTL(key []byte) (time.Duration, error) {
 		return remaining, nil
 	}
 
-	// Check SSTables
-	sstables := make([]*SSTable, len(db.sstables))
-	copy(sstables, db.sstables)
-	for i := len(sstables) - 1; i >= 0; i-- {
-		entry, err := sstables[i].Get(key)
-		if err != nil {
-			return 0, err
-		}
-		if entry != nil {
-			if entry.Deleted {
-				return 0, fmt.Errorf("key not found")
+	// Check SSTables by level
+	for level := 0; level < len(db.levels); level++ {
+		sstables := db.levels[level]
+		for i := len(sstables) - 1; i >= 0; i-- {
+			entry, err := sstables[i].Get(key)
+			if err != nil {
+				return 0, err
 			}
-			if entry.ExpiresAt == 0 {
-				return time.Duration(-1), nil
+			if entry != nil {
+				if entry.Deleted {
+					return 0, fmt.Errorf("key not found")
+				}
+				if entry.ExpiresAt == 0 {
+					return time.Duration(-1), nil
+				}
+				remaining := time.Until(time.Unix(0, int64(entry.ExpiresAt)))
+				if remaining <= 0 {
+					return 0, fmt.Errorf("key not found")
+				}
+				return remaining, nil
 			}
-			remaining := time.Until(time.Unix(0, int64(entry.ExpiresAt)))
-			if remaining <= 0 {
-				return 0, fmt.Errorf("key not found")
-			}
-			return remaining, nil
 		}
 	}
 
@@ -631,26 +645,30 @@ func (db *DB) Keys(pattern string) ([]string, error) {
 
 	// For small DBs we materialize all keys for deterministic ordering
 	totalEstimate := 0
-	for _, sst := range db.sstables {
-		totalEstimate += sst.entryCount
+	for _, level := range db.levels {
+		for _, sst := range level {
+			totalEstimate += sst.entryCount
+		}
 	}
 	if totalEstimate <= 100000 {
 		allKeys := make([]string, 0, totalEstimate+1000)
 		for k := range seen {
 			allKeys = append(allKeys, k)
 		}
-		for _, sst := range db.sstables {
-			idxPos := uint32(0)
-			for i := 0; i < sst.entryCount; i++ {
-				entry, err := sst.readIndexEntryAt(idxPos)
-				if err != nil {
-					break
+		for _, level := range db.levels {
+			for _, sst := range level {
+				idxPos := uint32(0)
+				for i := 0; i < sst.entryCount; i++ {
+					entry, err := sst.readIndexEntryAt(idxPos)
+					if err != nil {
+						break
+					}
+					if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
+						allKeys = append(allKeys, string(entry.Key))
+					}
+					idxEntrySize := 4 + len(entry.Key) + 8 + 4
+					idxPos += uint32(idxEntrySize)
 				}
-				if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
-					allKeys = append(allKeys, string(entry.Key))
-				}
-				idxEntrySize := 4 + len(entry.Key) + 8 + 4
-				idxPos += uint32(idxEntrySize)
 			}
 		}
 		uniq := make(map[string]bool)
@@ -666,24 +684,24 @@ func (db *DB) Keys(pattern string) ([]string, error) {
 	}
 
 	// Large DB: sequential scan
-	sstables := make([]*SSTable, len(db.sstables))
-	copy(sstables, db.sstables)
-	for _, sst := range sstables {
-		idxPos := uint32(0)
-		for i := 0; i < sst.entryCount; i++ {
-			entry, err := sst.readIndexEntryAt(idxPos)
-			if err != nil {
-				break
-			}
-			if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
-				s := string(entry.Key)
-				if match(s) && !seen[s] {
-					seen[s] = true
-					keys = append(keys, s)
+	for _, level := range db.levels {
+		for _, sst := range level {
+			idxPos := uint32(0)
+			for i := 0; i < sst.entryCount; i++ {
+				entry, err := sst.readIndexEntryAt(idxPos)
+				if err != nil {
+					break
 				}
+				if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
+					s := string(entry.Key)
+					if match(s) && !seen[s] {
+						seen[s] = true
+						keys = append(keys, s)
+					}
+				}
+				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				idxPos += uint32(idxEntrySize)
 			}
-			idxEntrySize := 4 + len(entry.Key) + 8 + 4
-			idxPos += uint32(idxEntrySize)
 		}
 	}
 
@@ -725,8 +743,10 @@ func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 	// If database is small-ish, materialize all keys for deterministic ordering and accurate pagination
 	// (this keeps behavior deterministic for the HTTP API and tests)
 	totalEstimate := 0
-	for _, sst := range db.sstables {
-		totalEstimate += sst.entryCount
+	for _, level := range db.levels {
+		for _, sst := range level {
+			totalEstimate += sst.entryCount
+		}
 	}
 	// memtable entries count is hard to obtain directly; assume small
 	if totalEstimate <= 100000 {
@@ -737,18 +757,20 @@ func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 			allKeys = append(allKeys, k)
 		}
 		// scan remaining sstables to add keys
-		for _, sst := range db.sstables {
-			idxPos := uint32(0)
-			for i := 0; i < sst.entryCount; i++ {
-				entry, err := sst.readIndexEntryAt(idxPos)
-				if err != nil {
-					break
+		for _, level := range db.levels {
+			for _, sst := range level {
+				idxPos := uint32(0)
+				for i := 0; i < sst.entryCount; i++ {
+					entry, err := sst.readIndexEntryAt(idxPos)
+					if err != nil {
+						break
+					}
+					if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
+						allKeys = append(allKeys, string(entry.Key))
+					}
+					idxEntrySize := 4 + len(entry.Key) + 8 + 4
+					idxPos += uint32(idxEntrySize)
 				}
-				if !entryIsDeletedInMemTable(db.memTable, entry.Key) {
-					allKeys = append(allKeys, string(entry.Key))
-				}
-				idxEntrySize := 4 + len(entry.Key) + 8 + 4
-				idxPos += uint32(idxEntrySize)
 			}
 		}
 		// deduplicate and sort
@@ -782,22 +804,24 @@ func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 	}
 
 	// From SSTables — sequential scan, stop once we've collected enough
-	sstables := make([]*SSTable, len(db.sstables))
-	copy(sstables, db.sstables)
-
-	for _, sst := range sstables {
-		// iterate index region sequentially until we have enough
-		idxPos := uint32(0)
-		for i := 0; i < sst.entryCount; i++ {
-			entry, err := sst.readIndexEntryAt(idxPos)
-			if err != nil {
-				break
+	for _, level := range db.levels {
+		for _, sst := range level {
+			// iterate index region sequentially until we have enough
+			idxPos := uint32(0)
+			for i := 0; i < sst.entryCount; i++ {
+				entry, err := sst.readIndexEntryAt(idxPos)
+				if err != nil {
+					break
+				}
+				if !entryIsDeletedInMemTable(db.memTable, entry.Key) { // ensure not deleted by memtable
+					appendKey(entry.Key)
+				}
+				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				idxPos += uint32(idxEntrySize)
+				if limit > 0 && len(keys) >= offset+limit {
+					break
+				}
 			}
-			if !entryIsDeletedInMemTable(db.memTable, entry.Key) { // ensure not deleted by memtable
-				appendKey(entry.Key)
-			}
-			idxEntrySize := 4 + len(entry.Key) + 8 + 4
-			idxPos += uint32(idxEntrySize)
 			if limit > 0 && len(keys) >= offset+limit {
 				break
 			}
@@ -810,8 +834,10 @@ func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 	// compute total conservatively as number of unique keys we've seen plus remaining entries across SSTables not yet scanned
 	total := len(seen)
 	// we can approximate total as unique keys + sum of sst.entryCount to avoid extra scans
-	for _, sst := range db.sstables {
-		total += sst.entryCount
+	for _, level := range db.levels {
+		for _, sst := range level {
+			total += sst.entryCount
+		}
 	}
 
 	if limit == 0 {
@@ -842,4 +868,138 @@ func entryIsDeletedInMemTable(mt *MemTable, key []byte) bool {
 		return e.Deleted
 	}
 	return false
+}
+
+// compactionLoop runs in the background and performs compaction when levels exceed size thresholds
+func (db *DB) compactionLoop() {
+	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			db.performCompaction()
+		}
+	}
+}
+
+// performCompaction checks levels and compacts if necessary
+func (db *DB) performCompaction() {
+	if db.compacting.Load() {
+		return // Already compacting
+	}
+	db.compacting.Store(true)
+	defer db.compacting.Store(false)
+
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	// Calculate level sizes
+	levelSizes := make([]int64, MaxLevels)
+	for level, sstables := range db.levels {
+		for _, sst := range sstables {
+			// Approximate size as entryCount * average entry size (rough estimate)
+			levelSizes[level] += int64(sst.entryCount * 100) // Assume 100 bytes per entry
+		}
+	}
+
+	// Check each level for compaction
+	for level := 0; level < MaxLevels-1; level++ {
+		nextLevelSize := levelSizes[level+1]
+		if nextLevelSize == 0 {
+			nextLevelSize = 1 // Avoid division by zero
+		}
+		if float64(levelSizes[level]) > float64(CompactionRatio)*float64(nextLevelSize) {
+			db.compactLevel(level)
+			break // Compact one level at a time
+		}
+	}
+}
+
+// compactLevel merges level with level+1
+func (db *DB) compactLevel(level int) {
+	if level >= MaxLevels-1 {
+		return
+	}
+
+	// Collect all entries from current level and next level
+	var allEntries []*Entry
+	iterators := make([]*SSTableIterator, 0)
+
+	// Add iterators for current level
+	for _, sst := range db.levels[level] {
+		iter, err := NewSSTableIterator(sst)
+		if err != nil {
+			log.Printf("velocity: failed to create iterator for sstable: %v", err)
+			continue
+		}
+		iterators = append(iterators, iter)
+	}
+
+	// Add iterators for next level
+	for _, sst := range db.levels[level+1] {
+		iter, err := NewSSTableIterator(sst)
+		if err != nil {
+			log.Printf("velocity: failed to create iterator for sstable: %v", err)
+			continue
+		}
+		iterators = append(iterators, iter)
+	}
+
+	// Merge iterators
+	merged := NewMergedIterator(iterators...)
+
+	// Collect all entries, resolving duplicates (newer timestamps win)
+	seen := make(map[string]*Entry)
+	for merged.Next() {
+		entry := merged.Entry()
+		keyStr := string(entry.Key)
+		if existing, ok := seen[keyStr]; !ok || entry.Timestamp > existing.Timestamp {
+			seen[keyStr] = entry
+		}
+	}
+
+	for _, entry := range seen {
+		allEntries = append(allEntries, entry)
+	}
+
+	// Sort entries
+	sort.Slice(allEntries, func(i, j int) bool {
+		return compareKeys(allEntries[i].Key, allEntries[j].Key) < 0
+	})
+
+	// Create new SSTables for next level
+	newSSTables := make([]*SSTable, 0)
+	batchSize := 10000 // Entries per SSTable
+	for i := 0; i < len(allEntries); i += batchSize {
+		end := i + batchSize
+		if end > len(allEntries) {
+			end = len(allEntries)
+		}
+		batch := allEntries[i:end]
+
+		sstPath := filepath.Join(db.path, fmt.Sprintf("sst_L%d_%d.db", level+1, time.Now().UnixNano()))
+		sst, err := NewSSTable(sstPath, batch, db.crypto)
+		if err != nil {
+			log.Printf("velocity: failed to create compacted sstable: %v", err)
+			continue
+		}
+		newSSTables = append(newSSTables, sst)
+	}
+
+	// Close and remove old SSTables
+	for _, sst := range db.levels[level] {
+		sst.Close()
+		os.Remove(sst.file.Name())
+	}
+	for _, sst := range db.levels[level+1] {
+		sst.Close()
+		os.Remove(sst.file.Name())
+	}
+
+	// Update levels
+	db.levels[level] = nil // Clear current level
+	db.levels[level+1] = newSSTables
+
+	log.Printf("velocity: compacted level %d into level %d, created %d sstables", level, level+1, len(newSSTables))
 }

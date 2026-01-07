@@ -44,6 +44,7 @@ func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer
 				"error": err.Error(),
 			})
 		},
+		BodyLimit: 100 * 1024 * 1024, // 100MB max upload size
 	})
 
 	// Security middleware

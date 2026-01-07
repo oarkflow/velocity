@@ -13,6 +13,9 @@ func (s *HTTPServer) setupObjectStorageRoutes() {
 	// Object storage routes (require authentication)
 	objects := s.app.Group("/api/objects", s.jwtAuthMiddleware())
 
+	// List objects (must be before /* to avoid conflict)
+	objects.Get("/", s.handleObjectList)
+
 	// Object CRUD operations
 	objects.Post("/*", s.handleObjectUpload)
 	objects.Get("/*", s.handleObjectDownload)
@@ -23,9 +26,6 @@ func (s *HTTPServer) setupObjectStorageRoutes() {
 	objects.Get("/meta/*", s.handleObjectMetadata)
 	objects.Put("/acl/*", s.handleObjectACL)
 	objects.Get("/acl/*", s.handleGetObjectACL)
-
-	// List objects
-	objects.Get("/", s.handleObjectList)
 
 	// Folder operations
 	folders := s.app.Group("/api/folders", s.jwtAuthMiddleware())
@@ -49,8 +49,27 @@ func (s *HTTPServer) handleObjectUpload(c *fiber.Ctx) error {
 		})
 	}
 
+	// Get file from form
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "File is required",
+		})
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Unable to open uploaded file",
+		})
+	}
+	defer file.Close()
+
 	// Get content type
-	contentType := c.Get("Content-Type", "application/octet-stream")
+	contentType := fileHeader.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 
 	// Parse options from headers/query
 	opts := &velocity.ObjectOptions{
@@ -70,12 +89,8 @@ func (s *HTTPServer) handleObjectUpload(c *fiber.Ctx) error {
 		}
 	}
 
-	// Get body as stream
-	body := c.Context().RequestBodyStream()
-	contentLength := int64(c.Context().Request.Header.ContentLength())
-
 	// Store object
-	meta, err := s.db.StoreObjectStream(path, contentType, username, body, contentLength, opts)
+	meta, err := s.db.StoreObjectStream(path, contentType, username, file, fileHeader.Size, opts)
 	if err != nil {
 		if err == velocity.ErrInvalidPath {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{

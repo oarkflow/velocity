@@ -24,213 +24,303 @@ qs('#login-form').addEventListener('submit', async (ev) =>{
   const fd = new FormData(form);
   const payload = {username: fd.get('username'), password: fd.get('password')};
   const r = await api('/auth/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-  if (!r.ok){ qs('#data-output').textContent = `Login failed: ${r.status} ${JSON.stringify(r.body)}`; return; }
+  if (!r.ok){ alert(`Login failed: ${r.status} ${JSON.stringify(r.body)}`); return; }
   localStorage.setItem('token', r.body.token);
   qs('#login').classList.add('hidden');
-  qs('#main-tabs').classList.remove('hidden');
+  qs('#file-manager').classList.remove('hidden');
   qs('#auth-ui #user-info').textContent = r.body.user.username; qs('#auth-ui #user-info').classList.remove('hidden');
   qs('#logout-btn').classList.remove('hidden');
-  // show data tab and load keys/files
-  const dataTab = qs('.tabs button[data-tab="data"]'); if (dataTab){ dataTab.click(); }
-  loadKeys(0);
-  refreshFiles();
+  // Load root directory
+  loadDirectory('');
 });
 
 qs('#logout-btn').addEventListener('click', () => { localStorage.removeItem('token'); location.reload(); });
 
-// Tabs
-qsa('.tabs button').forEach(b=> b.addEventListener('click', (ev)=>{
-  const tab = b.dataset.tab;
-  // active state
-  qsa('.tabs button').forEach(x=> x.classList.remove('active'));
-  b.classList.add('active');
-  qsa('.panel').forEach(p=> p.classList.add('hidden'));
-  qs(`#${tab}`).classList.remove('hidden');
-}));
+// File Manager
+let currentPath = '';
 
-// Put
-qs('#put-form').addEventListener('submit', async (ev)=>{
-  ev.preventDefault();
-  const data = Object.fromEntries(new FormData(ev.target));
-  const r = await api('/api/put', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data)});
-  qs('#data-output').textContent = `Status: ${r.status}\n${JSON.stringify(r.body, null, 2)}`;
-});
+async function loadDirectory(path) {
+  currentPath = path;
+  updateBreadcrumb(path);
 
-// Get / Delete
-qs('#get-form').addEventListener('submit', async (ev)=>{
-  ev.preventDefault();
-  const key = new FormData(ev.target).get('key');
-  const r = await api('/api/get/' + encodeURIComponent(key));
-  qs('#data-output').textContent = `Status: ${r.status}\n${JSON.stringify(r.body, null, 2)}`;
-});
-qs('#delete-key').addEventListener('click', async ()=>{
-  const key = qs('#get-form input[name="key"]').value;
-  if (!confirm(`Delete key ${key}?`)) return;
-  const r = await api('/api/delete/' + encodeURIComponent(key), {method:'DELETE'});
-  qs('#data-output').textContent = `Status: ${r.status}\n${JSON.stringify(r.body, null, 2)}`;
-  // refresh key list
-  loadKeys(currentKeysPage);
-});
+  const r = await api('/api/objects?prefix=' + encodeURIComponent(path));
+  const tbody = qs('#files-list');
+  tbody.innerHTML = '';
 
-// Keys listing (pagination)
-let currentKeysPage = 0;
-async function loadKeys(page=0){
-  const limit = parseInt(qs('#keys-limit').value, 10) || 10;
-  const offset = page * limit;
-  const r = await api(`/api/keys?limit=${limit}&offset=${offset}`);
-  const tbody = qs('#keys-table tbody'); tbody.innerHTML='';
-  if (!r.ok){ tbody.innerHTML = `<tr><td colspan="2">Error: ${r.status}</td></tr>`; return; }
-  (r.body.keys || []).forEach(k=>{
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td><code>${k}</code></td><td><button data-fill="${k}">Fill</button> <button data-get="${k}">Get</button> <button data-delete="${k}">Delete</button></td>`;
-    tbody.appendChild(tr);
-  });
-  qs('#keys-prev').disabled = (page <= 0);
-  qs('#keys-next').disabled = ((page+1)*limit >= (r.body.total || 0));
-  currentKeysPage = page;
-}
-qs('#keys-prev').addEventListener('click', ()=>{ if (currentKeysPage>0) loadKeys(currentKeysPage-1); });
-qs('#keys-next').addEventListener('click', ()=>{ loadKeys(currentKeysPage+1); });
-qs('#keys-limit').addEventListener('change', ()=>{ loadKeys(0); });
-
-// delegate actions
-qs('#keys-table').addEventListener('click', async (ev)=>{
-  const fill = ev.target.dataset.fill; const g = ev.target.dataset.get; const del = ev.target.dataset.delete;
-  if (fill){ qs('#get-form input[name="key"]').value = fill; return; }
-  if (g){ const r = await api('/api/get/' + encodeURIComponent(g)); qs('#data-output').textContent = `Status: ${r.status}\n${JSON.stringify(r.body, null, 2)}`; return; }
-  if (del){ if (!confirm(`Delete key ${del}?`)) return; const r = await api('/api/delete/' + encodeURIComponent(del), {method:'DELETE'}); qs('#data-output').textContent = `Status: ${r.status}\n${JSON.stringify(r.body, null, 2)}`; loadKeys(currentKeysPage); }
-});
-
-
-// Files
-async function refreshFiles(){
-  const r = await api('/api/files');
-  const tbody = qs('#files-table tbody'); tbody.innerHTML='';
-  if (!r.ok){ qs('#files-output').textContent = `Error: ${r.status} ${JSON.stringify(r.body)}`; return; }
-  (r.body.files || []).forEach(f=>{
-    const tr = document.createElement('tr');
-    const uploaded = f.uploaded_at ? new Date(f.uploaded_at).toLocaleString() : '';
-    const size = typeof f.size === 'number' ? (f.size >= 1024 ? (f.size/1024).toFixed(1) + ' KB' : f.size + ' B') : '';
-    // preview column (image types)
-    const isImage = (f.content_type||'').startsWith('image/');
-    const previewBtn = isImage ? `<button data-preview="${f.key}">Preview</button>` : '';
-    const progressBar = `<div class="progress" data-prog="${f.key}"><i style="width:0%"></i></div>`;
-    const regenBtn = isImage ? `<button data-regen="${f.key}">Regen</button>` : '';
-    const thumbImg = f.thumbnail_url ? `<img class="thumb-preview" src="${f.thumbnail_url}" width="48" alt="thumb" />` : '';
-    tr.innerHTML = `<td>${f.key || ''}</td><td>${f.filename||''}</td><td>${f.content_type||''}</td><td>${size}</td><td>${uploaded}</td><td>${thumbImg||previewBtn}</td><td>`+
-      `${progressBar} ${regenBtn} <button data-download="${f.key}">Download</button> <button data-delete="${f.key}">Delete</button></td>`;
-    tbody.appendChild(tr);
-  });
-}
-qs('#refresh-files').addEventListener('click', refreshFiles);
-qs('#regen-all-thumbs').addEventListener('click', async ()=>{
-  if (!confirm('Regenerate all thumbnails? This may take some time.')) return;
-  const headers = tokenHeader();
-  const r = await fetch(apiBase + '/admin/thumbnails/regenerate', {method:'POST', headers});
-  const txt = await r.text();
-  qs('#files-output').textContent = `Status: ${r.status}\n${txt}`;
-  refreshFiles();
-});
-qs('#files-table').addEventListener('click', async (ev)=>{
-  const dl = ev.target.dataset.download; const del = ev.target.dataset.delete; const prev = ev.target.dataset.preview;
-  if (dl){
-    // download with progress
+  if (!r.ok) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-red-500">Error loading directory</td></tr>';
+    return;
   }
-  if (ev.target.classList && ev.target.classList.contains('thumb-preview')){
-    const src = ev.target.src;
-    qs('#preview-img').src = src; qs('#preview-modal').classList.remove('hidden'); return;
-  }
-  if (dl){
-    // download with progress
-    const key = dl;
-    const url = apiBase + '/api/files/' + encodeURIComponent(key);
-    const headers = tokenHeader();
-    const resp = await fetch(url, {headers});
-    if (!resp.ok){ qs('#files-output').textContent = `Download failed: ${resp.status}`; return; }
-    const total = resp.headers.get('Content-Length');
-    const reader = resp.body.getReader();
-    const progEl = qs(`.progress[data-prog="${key}"] i`);
-    const chunks = [];
-    let received = 0;
-    while(true){
-      const {done, value} = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      if (total && progEl){ progEl.style.width = Math.floor((received/parseInt(total))*100) + '%'; }
+
+  const objects = r.body.objects || [];
+  const folders = new Set();
+  const files = [];
+
+  // Separate folders and files
+  objects.forEach(obj => {
+    const relativePath = obj.path.replace(path, '').replace(/^\//, '');
+    if (relativePath.includes('/')) {
+      const folder = relativePath.split('/')[0];
+      folders.add(folder);
+    } else {
+      files.push(obj);
     }
-    const blob = new Blob(chunks);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = '';
-    document.body.appendChild(a); a.click(); a.remove();
-    if (progEl) setTimeout(()=>{ progEl.style.width='0%'; }, 800);
-    return;
+  });
+
+  // Add parent directory if not root
+  if (path) {
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-gray-100 cursor-pointer';
+    tr.innerHTML = `
+      <td class="py-2">
+        <div class="flex items-center">
+          <svg class="w-5 h-5 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
+          </svg>
+          ..
+        </div>
+      </td>
+      <td>Folder</td>
+      <td>-</td>
+      <td>-</td>
+      <td></td>
+    `;
+    tr.addEventListener('click', () => {
+      const parentPath = path.split('/').slice(0, -2).join('/') + (path.split('/').slice(0, -2).length > 0 ? '/' : '');
+      loadDirectory(parentPath);
+    });
+    tbody.appendChild(tr);
   }
-  if (prev){
-    // preview image — request server-side thumbnail for speed
-    const key = prev;
-    const url = apiBase + '/api/files/' + encodeURIComponent(key) + '/thumbnail';
-    const headers = tokenHeader();
-    const resp = await fetch(url, {headers});
-    if (!resp.ok){ qs('#files-output').textContent = `Preview failed: ${resp.status}`; return; }
-    const blob = await resp.blob();
-    const urlObj = URL.createObjectURL(blob);
-    qs('#preview-img').src = urlObj;
-    qs('#preview-modal').classList.remove('hidden');
-    return;
-  }
-  if (del){ if (!confirm(`Delete file ${del}?`)) return; const r = await api('/api/files/' + encodeURIComponent(del), {method:'DELETE'}); qs('#files-output').textContent = JSON.stringify(r.body, null, 2); refreshFiles(); }
-  if (ev.target.dataset.regen){
-    // regenerate single thumbnail (admin)
-    const key = ev.target.dataset.regen;
-    if (!confirm(`Regenerate thumbnail for ${key}?`)) return;
-    const headers = tokenHeader();
-    const r = await fetch(apiBase + '/admin/thumbnails/' + encodeURIComponent(key) + '/regenerate', {method:'POST', headers});
-    const txt = await r.text();
-    qs('#files-output').textContent = `Status: ${r.status}\n${txt}`;
-    refreshFiles();
-  }
+
+  // Add folders
+  folders.forEach(folder => {
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-gray-100 cursor-pointer';
+    tr.innerHTML = `
+      <td class="py-2">
+        <div class="flex items-center">
+          <svg class="w-5 h-5 mr-2 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2-2z"></path>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5a2 2 0 012-2h4a2 2 0 012 2v2H8V5z"></path>
+          </svg>
+          ${decodeURIComponent(folder)}
+        </div>
+      </td>
+      <td>Folder</td>
+      <td>-</td>
+      <td>-</td>
+      <td>
+        <button class="text-red-500 hover:text-red-700" data-delete-folder="${folder}">Delete</button>
+      </td>
+    `;
+    tr.addEventListener('click', () => {
+      loadDirectory(path + folder + '/');
+    });
+    tbody.appendChild(tr);
+  });
+
+  // Add files
+  files.forEach(file => {
+    const tr = document.createElement('tr');
+    tr.className = 'hover:bg-gray-100';
+    const size = file.size ? (file.size >= 1024 ? (file.size/1024).toFixed(1) + ' KB' : file.size + ' B') : '-';
+    const modified = file.modified_at ? new Date(file.modified_at).toLocaleString() : '-';
+    const isImage = file.content_type && file.content_type.startsWith('image/');
+    const fileName = decodeURIComponent(file.path).split('/').pop();
+
+    tr.innerHTML = `
+      <td class="py-2">
+        <div class="flex items-center">
+          <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+          </svg>
+          ${fileName}
+        </div>
+      </td>
+      <td>${file.content_type || 'Unknown'}</td>
+      <td>${size}</td>
+      <td>${modified}</td>
+      <td>
+        ${isImage ? '<button class="text-blue-500 hover:text-blue-700 mr-2" data-preview="' + file.path + '">Preview</button>' : ''}
+        <button class="text-green-500 hover:text-green-700 mr-2" data-download="' + file.path + '">Download</button>
+        <button class="text-red-500 hover:text-red-700" data-delete="' + file.path + '">Delete</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function updateBreadcrumb(path) {
+  const breadcrumb = qs('#breadcrumb');
+  const parts = path.split('/').filter(p => p);
+  let html = '<span class="cursor-pointer text-blue-500" data-path="">Root</span>';
+
+  let currentPath = '';
+  parts.forEach((part, index) => {
+    currentPath += part + '/';
+    html += ' / <span class="cursor-pointer text-blue-500" data-path="' + currentPath + '">' + part + '</span>';
+  });
+
+  breadcrumb.innerHTML = html;
+
+  // Add click handlers
+  breadcrumb.querySelectorAll('[data-path]').forEach(el => {
+    el.addEventListener('click', () => {
+      loadDirectory(el.dataset.path);
+    });
+  });
+}
+
+// Upload button
+qs('#upload-btn').addEventListener('click', () => {
+  qs('#upload-modal').classList.remove('hidden');
 });
-qs('#preview-close').addEventListener('click', ()=>{ qs('#preview-img').src=''; qs('#preview-modal').classList.add('hidden'); });
-  if (del){ if (!confirm(`Delete file ${del}?`)) return; const r = await api('/api/files/' + encodeURIComponent(del), {method:'DELETE'}); qs('#files-output').textContent = JSON.stringify(r.body, null, 2); refreshFiles(); }
+
+qs('#upload-cancel').addEventListener('click', () => {
+  qs('#upload-modal').classList.add('hidden');
 });
-qs('#preview-close').addEventListener('click', ()=>{ qs('#preview-img').src=''; qs('#preview-modal').classList.add('hidden'); });
-qs('#upload-form').addEventListener('submit', async (ev)=>{
+
+qs('#upload-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const form = ev.target; const fd = new FormData(form);
-  const overwrite = !!fd.get('overwrite');
-  const key = fd.get('key');
+  const form = ev.target;
+  const fd = new FormData(form);
   const file = form.querySelector('input[type=file]').files[0];
-  if (!file){ alert('Choose a file'); return; }
-  const up = new FormData(); up.append('file', file); if (key) up.append('key', key);
-  const params = overwrite ? '?overwrite=true' : '';
-  const t = tokenHeader();
-  const r = await fetch(apiBase + '/api/files' + params, {method:'POST', headers: t, body: up});
-  const txt = await r.text();
-  let json = txt; try { json = JSON.parse(txt); } catch(e){}
-  qs('#files-output').textContent = `Status: ${r.status}\n${JSON.stringify(json, null, 2)}`;
-  refreshFiles();
+  if (!file) {
+    alert('Please select a file');
+    return;
+  }
+
+  const uploadPath = currentPath + file.name;
+  const uploadData = new FormData();
+  uploadData.append('file', file);
+
+  const r = await api('/api/objects/' + encodeURIComponent(uploadPath), {
+    method: 'POST',
+    body: uploadData
+  });
+
+  if (r.ok) {
+    qs('#upload-modal').classList.add('hidden');
+    loadDirectory(currentPath);
+  } else {
+    alert('Upload failed: ' + JSON.stringify(r.body));
+  }
 });
 
-// WAL
-qs('#wal-refresh').addEventListener('click', async ()=>{
-  const r = await api('/admin/wal'); qs('#wal-output').textContent = JSON.stringify(r.body, null, 2);
-});
-qs('#wal-rotate').addEventListener('click', async ()=>{
-  if (!confirm('Force rotate WAL now?')) return;
-  const r = await api('/admin/wal/rotate', {method:'POST'}); qs('#wal-output').textContent = JSON.stringify(r.body, null, 2);
-});
-qs('#wal-archives-refresh').addEventListener('click', async ()=>{
-  const r = await api('/admin/wal/archives'); const tbody = qs('#wal-archives tbody'); tbody.innerHTML=''; (r.body.archives||[]).forEach(a=>{ const tr=document.createElement('tr'); tr.innerHTML = `<td>${a.name}</td><td>${a.size}</td><td>${a.mod_time}</td>`; tbody.appendChild(tr); });
+// New folder
+qs('#new-folder-btn').addEventListener('click', () => {
+  qs('#new-folder-modal').classList.remove('hidden');
 });
 
-// SSTable repair
-qs('#sstable-form').addEventListener('submit', async (ev)=>{
+qs('#new-folder-cancel').addEventListener('click', () => {
+  qs('#new-folder-modal').classList.add('hidden');
+});
+
+qs('#new-folder-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
-  const path = new FormData(ev.target).get('path');
-  const r = await api('/admin/sstable/repair', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path})});
-  qs('#sstable-output').textContent = JSON.stringify(r.body, null, 2);
+  const form = ev.target;
+  const fd = new FormData(form);
+  const folderName = fd.get('folder-name');
+  if (!folderName) {
+    alert('Please enter a folder name');
+    return;
+  }
+
+  const folderPath = currentPath + folderName + '/';
+  const r = await api('/api/folders/' + encodeURIComponent(folderPath), {
+    method: 'POST'
+  });
+
+  if (r.ok) {
+    qs('#new-folder-modal').classList.add('hidden');
+    loadDirectory(currentPath);
+  } else {
+    alert('Failed to create folder: ' + JSON.stringify(r.body));
+  }
+});
+
+// Refresh
+qs('#refresh-btn').addEventListener('click', () => {
+  loadDirectory(currentPath);
+});
+
+// Search
+qs('#search-input').addEventListener('input', (ev) => {
+  const query = ev.target.value.toLowerCase();
+  const rows = qs('#files-list').querySelectorAll('tr');
+  rows.forEach(row => {
+    const name = row.querySelector('td:first-child').textContent.toLowerCase();
+    if (name.includes(query)) {
+      row.style.display = '';
+    } else {
+      row.style.display = 'none';
+    }
+  });
+});
+
+// File actions
+qs('#files-list').addEventListener('click', async (ev) => {
+  const preview = ev.target.dataset.preview;
+  const download = ev.target.dataset.download;
+  const deleteFile = ev.target.dataset.delete;
+  const deleteFolder = ev.target.dataset.deleteFolder;
+
+  if (preview) {
+    // preview uses the encoded path returned by the API directly (no double-encoding)
+    const res = await fetch(apiBase + '/api/objects/' + preview, {
+      headers: tokenHeader()
+    });
+    if (res.ok) {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      qs('#preview-img').src = url;
+      qs('#preview-modal').classList.remove('hidden');
+    } else {
+      alert('Preview failed: ' + res.status);
+    }
+  }
+
+  if (download) {
+    const res = await fetch(apiBase + '/api/objects/' + download, {
+      headers: tokenHeader()
+    });
+    if (res.ok) {
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = decodeURIComponent(download.split('/').pop());
+      a.click();
+    } else {
+      alert('Download failed: ' + res.status);
+    }
+  }
+
+  if (deleteFile) {
+    if (confirm('Delete file ' + decodeURIComponent(deleteFile) + '?')) {
+      const r = await api('/api/objects/' + deleteFile, { method: 'DELETE' });
+      if (r.ok) {
+        loadDirectory(currentPath);
+      } else {
+        alert('Delete failed: ' + JSON.stringify(r.body));
+      }
+    }
+  }
+
+  if (deleteFolder) {
+    if (confirm('Delete folder ' + deleteFolder + '?')) {
+      const r = await api('/api/folders/' + encodeURIComponent(currentPath + deleteFolder + '/'), { method: 'DELETE' });
+      if (r.ok) {
+        loadDirectory(currentPath);
+      } else {
+        alert('Delete folder failed: ' + JSON.stringify(r.body));
+      }
+    }
+  }
+});
+
+qs('#preview-close').addEventListener('click', () => {
+  qs('#preview-modal').classList.add('hidden');
+  qs('#preview-img').src = '';
 });
 
 // Init
@@ -238,13 +328,10 @@ qs('#sstable-form').addEventListener('submit', async (ev)=>{
   const t = localStorage.getItem('token');
   if (t){
     qs('#login').classList.add('hidden');
-    qs('#main-tabs').classList.remove('hidden');
+    qs('#file-manager').classList.remove('hidden');
     qs('#auth-ui #user-info').textContent = 'admin';
     qs('#auth-ui #user-info').classList.remove('hidden');
     qs('#logout-btn').classList.remove('hidden');
-    // show data tab and load keys/files on load
-    const dataTab = qs('.tabs button[data-tab="data"]'); if (dataTab){ dataTab.click(); }
-    loadKeys(0);
-    refreshFiles();
+    loadDirectory('');
   }
 })();

@@ -114,7 +114,7 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 		log.Println("Created default admin user (username: admin, password: password123)")
 	}
 
-	tcpServer := velocity.NewTCPServer(db, tcpPort, userDB)
+	tcpServer := web.NewTCPServer(db, tcpPort, userDB)
 	if err := tcpServer.Start(); err != nil {
 		log.Fatalf("failed to start tcp server: %v", err)
 	}
