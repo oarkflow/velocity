@@ -427,7 +427,7 @@ func runServer() {
 	}
 
 	// Start TCP server on port 8080
-	tcpServer := velocity.NewTCPServer(db, "8080", userDB)
+	tcpServer := web.NewTCPServer(db, "8080", userDB)
 	err = tcpServer.Start()
 	if err != nil {
 		log.Fatal("Failed to start TCP server:", err)
@@ -497,7 +497,7 @@ func testTCPAuth() {
 	}
 
 	// Start TCP server on port 8080
-	tcpServer := velocity.NewTCPServer(db, "8080", userDB)
+	tcpServer := web.NewTCPServer(db, "8080", userDB)
 	err = tcpServer.Start()
 	if err != nil {
 		log.Fatal("Failed to start TCP server:", err)

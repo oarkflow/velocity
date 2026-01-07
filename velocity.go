@@ -54,7 +54,6 @@ type DB struct {
 	// Files storage
 	filesDir       string
 	MaxUploadSize  int64
-	useFileStorage bool
 }
 
 var defaultPath = "./data/velocity"
@@ -73,7 +72,6 @@ type Config struct {
 	Path           string
 	EncryptionKey  []byte
 	MaxUploadSize  int64 // bytes; 0 means use default
-	UseFileStorage bool  // store files on filesystem instead of in-DB blobs
 }
 
 const (
@@ -138,12 +136,10 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		cache:          nil,
 		crypto:         cryptoProvider,
 		MaxUploadSize:  cfg.MaxUploadSize,
-		useFileStorage: cfg.UseFileStorage,
 	}
-	if db.useFileStorage {
-		db.filesDir = filepath.Join(db.path, "files")
-		os.MkdirAll(db.filesDir, 0755)
-	}
+	// Ensure files directory exists for object storage
+	db.filesDir = filepath.Join(db.path, "objects")
+	os.MkdirAll(db.filesDir, 0755)
 
 	// Load entries from WAL into memtable
 	if len(entries) > 0 {

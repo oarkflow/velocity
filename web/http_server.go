@@ -78,6 +78,7 @@ func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer
 	}
 
 	server.setupRoutes()
+	server.setupObjectStorageRoutes()
 	return server
 }
 

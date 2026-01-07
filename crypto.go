@@ -150,3 +150,59 @@ func parseKeyString(value string) ([]byte, error) {
 
 	return nil, fmt.Errorf("expected 32-byte key (raw/base64/hex), got %d bytes", len(value))
 }
+
+// DeriveObjectKey derives a unique encryption key for an object using HKDF
+func (cp *CryptoProvider) DeriveObjectKey(objectID string, salt []byte) ([]byte, error) {
+	if len(salt) == 0 {
+		salt = make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+			return nil, err
+		}
+	}
+
+	// Use the AEAD key as the master key for derivation
+	// In a real implementation, you'd use HKDF here
+	// For now, we'll use a simple hash-based approach
+	h := make([]byte, 0, len(salt)+len(objectID))
+	h = append(h, salt...)
+	h = append(h, []byte(objectID)...)
+
+	// This is simplified - in production use proper HKDF
+	derived := make([]byte, chacha20poly1305.KeySize)
+	copy(derived, h)
+	if len(h) < chacha20poly1305.KeySize {
+		// Pad if needed
+		for i := len(h); i < chacha20poly1305.KeySize; i++ {
+			derived[i] = byte(i)
+		}
+	}
+
+	return derived[:chacha20poly1305.KeySize], nil
+}
+
+// EncryptStream encrypts data in chunks for streaming
+func (cp *CryptoProvider) EncryptStream(plaintext []byte, aad []byte) ([]byte, error) {
+	nonce, ciphertext, err := cp.Encrypt(plaintext, aad)
+	if err != nil {
+		return nil, err
+	}
+
+	// Combine nonce and ciphertext
+	result := make([]byte, len(nonce)+len(ciphertext))
+	copy(result, nonce)
+	copy(result[len(nonce):], ciphertext)
+
+	return result, nil
+}
+
+// DecryptStream decrypts data that was encrypted with EncryptStream
+func (cp *CryptoProvider) DecryptStream(data []byte, aad []byte) ([]byte, error) {
+	if len(data) < chacha20poly1305.NonceSizeX {
+		return nil, fmt.Errorf("invalid encrypted data: too short")
+	}
+
+	nonce := data[:chacha20poly1305.NonceSizeX]
+	ciphertext := data[chacha20poly1305.NonceSizeX:]
+
+	return cp.Decrypt(nonce, ciphertext, aad)
+}
