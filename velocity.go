@@ -54,6 +54,9 @@ type DB struct {
 	// Files storage
 	filesDir      string
 	MaxUploadSize int64
+	
+	// Master key management
+	masterKeyManager *MasterKeyManager
 }
 
 var defaultPath = "./data/velocity"
@@ -72,6 +75,7 @@ type Config struct {
 	Path          string
 	EncryptionKey []byte
 	MaxUploadSize int64 // bytes; 0 means use default
+	MasterKeyConfig MasterKeyConfig // New: flexible master key configuration
 }
 
 const (
@@ -103,7 +107,16 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		cfg.MaxUploadSize = DefaultMaxUploadSize
 	}
 
-	key, err := ensureMasterKey(currentPath, cfg.EncryptionKey)
+	// Initialize master key configuration if not provided
+	if cfg.MasterKeyConfig == (MasterKeyConfig{}) {
+		cfg.MasterKeyConfig = DefaultMasterKeyConfig()
+	}
+
+	// Create master key manager
+	masterKeyManager := NewMasterKeyManager(currentPath, cfg.MasterKeyConfig)
+
+	// Get master key using the manager
+	key, err := ensureMasterKeyWithManager(masterKeyManager, cfg.EncryptionKey)
 	if err != nil {
 		return nil, err
 	}
@@ -128,14 +141,15 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		path:          currentPath,
-		memTable:      NewMemTable(),
-		wal:           wal,
-		levels:        make([][]*SSTable, MaxLevels),
-		memTableSize:  DefaultMemTableSize,
-		cache:         nil,
-		crypto:        cryptoProvider,
-		MaxUploadSize: cfg.MaxUploadSize,
+		path:             currentPath,
+		memTable:         NewMemTable(),
+		wal:              wal,
+		levels:           make([][]*SSTable, MaxLevels),
+		memTableSize:     DefaultMemTableSize,
+		cache:            nil,
+		crypto:           cryptoProvider,
+		MaxUploadSize:    cfg.MaxUploadSize,
+		masterKeyManager: masterKeyManager,
 	}
 	// Ensure files directory exists for object storage
 	db.filesDir = filepath.Join(db.path, "objects")

@@ -139,15 +139,15 @@ func TestBatchWriterChecksumAndWALReplay(t *testing.T) {
 		t.Fatalf("failed to reopen db: %v", err)
 	}
 	defer db2.Close()
-	log.Printf("DEBUG: db2 sstable count: %d", len(db2.sstables))
-	if len(db2.sstables) > 0 {
-		ent, err := db2.sstables[0].Get([]byte("k1"))
+	log.Printf("DEBUG: db2 sstable count: %d", len(db2.levels[0]))
+	if len(db2.levels[0]) > 0 {
+		ent, err := db2.levels[0][0].Get([]byte("k1"))
 		if err != nil {
-			log.Printf("DEBUG: db2.sstables[0].Get error: %v", err)
+			log.Printf("DEBUG: db2.levels[0][0].Get error: %v", err)
 		} else if ent == nil {
-			log.Printf("DEBUG: db2.sstables[0].Get returned nil for k1")
+			log.Printf("DEBUG: db2.levels[0][0].Get returned nil for k1")
 		} else {
-			log.Printf("DEBUG: db2.sstables[0].Get returned k1 -> %s checksum=%08x", string(ent.Value), ent.checksum)
+			log.Printf("DEBUG: db2.levels[0][0].Get returned k1 -> %s checksum=%08x", string(ent.Value), ent.checksum)
 		}
 	}
 
@@ -156,8 +156,8 @@ func TestBatchWriterChecksumAndWALReplay(t *testing.T) {
 	if err != nil {
 		log.Printf("DEBUG: db2.Get error: %v", err)
 		// try sst directly
-		if len(db2.sstables) > 0 {
-			ent, _ := db2.sstables[0].Get([]byte("k1"))
+		if len(db2.levels[0]) > 0 {
+			ent, _ := db2.levels[0][0].Get([]byte("k1"))
 			if ent != nil {
 				log.Printf("DEBUG: sst direct found k1 -> %s checksum=%08x", string(ent.Value), ent.checksum)
 			}
@@ -175,10 +175,10 @@ func TestBatchWriterChecksumAndWALReplay(t *testing.T) {
 		}
 	} else {
 		// check SSTable
-		if len(db2.sstables) == 0 {
+		if len(db2.levels[0]) == 0 {
 			t.Fatalf("no sstables found and memtable missing entry after replay")
 		}
-		ent, err := db2.sstables[0].Get([]byte("k1"))
+		ent, err := db2.levels[0][0].Get([]byte("k1"))
 		if err != nil {
 			t.Fatalf("sst.Get error: %v", err)
 		}

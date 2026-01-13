@@ -125,6 +125,13 @@ func (s *HTTPServer) setupRoutes() {
 	admin.Get("/wal/archives", s.handleAdminWalArchives)
 	admin.Post("/sstable/repair", s.handleAdminSSTableRepair)
 
+	// Master key management routes
+	admin.Get("/masterkey/config", s.handleGetMasterKeyConfig)
+	admin.Post("/masterkey/config", s.handleSetMasterKeyConfig)
+	admin.Post("/masterkey/refresh", s.handleRefreshMasterKey)
+	admin.Delete("/masterkey/cache", s.handleClearMasterKeyCache)
+	admin.Get("/masterkey/cache/info", s.handleGetKeyCacheInfo)
+
 	// Thumbnail management
 	admin.Post("/thumbnails/regenerate", s.handleAdminRegenerateThumbnails)
 	admin.Post("/thumbnails/:key/regenerate", s.handleAdminRegenerateThumbnail)

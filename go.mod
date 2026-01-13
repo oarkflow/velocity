@@ -4,8 +4,9 @@ go 1.25.0
 
 require (
 	github.com/oarkflow/convert v0.0.5
+	github.com/oarkflow/shamir v0.0.2
 	golang.org/x/crypto v0.45.0
-	golang.org/x/image v0.34.0
+	golang.org/x/term v0.37.0
 )
 
 require github.com/oarkflow/date v0.0.4 // indirect

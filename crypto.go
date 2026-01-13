@@ -119,6 +119,11 @@ func ensureMasterKey(dbPath string, explicit []byte) ([]byte, error) {
 	return fresh, nil
 }
 
+// ensureMasterKeyWithManager uses MasterKeyManager for flexible key management
+func ensureMasterKeyWithManager(manager *MasterKeyManager, explicit []byte) ([]byte, error) {
+	return manager.GetMasterKey(explicit)
+}
+
 func loadKeyFromEnv() ([]byte, error) {
 	raw := strings.TrimSpace(os.Getenv("VELOCITY_MASTER_KEY"))
 	if raw == "" {
