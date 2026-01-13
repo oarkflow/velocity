@@ -54,9 +54,10 @@ type DB struct {
 	// Files storage
 	filesDir      string
 	MaxUploadSize int64
-	
+
 	// Master key management
 	masterKeyManager *MasterKeyManager
+	masterKey        []byte // Store the master key
 }
 
 var defaultPath = "./data/velocity"
@@ -150,6 +151,7 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		crypto:           cryptoProvider,
 		MaxUploadSize:    cfg.MaxUploadSize,
 		masterKeyManager: masterKeyManager,
+		masterKey:        key,
 	}
 	// Ensure files directory exists for object storage
 	db.filesDir = filepath.Join(db.path, "objects")
@@ -196,6 +198,10 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	go db.compactionLoop()
 
 	return db, nil
+}
+
+func (db *DB) MasterKey() []byte {
+	return db.masterKey
 }
 
 // SetPerformanceMode toggles high-level performance profiles for the DB.
