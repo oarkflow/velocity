@@ -95,7 +95,7 @@ func ensureMasterKey(dbPath string, explicit []byte) ([]byte, error) {
 	keyPath := filepath.Join(dbPath, masterKeyFilename)
 	data, err := os.ReadFile(keyPath)
 	if err == nil {
-		key, err := parseKeyString(strings.TrimSpace(string(data)))
+		key, err := ParseKeyString(strings.TrimSpace(string(data)))
 		if err != nil {
 			return nil, fmt.Errorf("invalid master key file: %w", err)
 		}
@@ -129,14 +129,14 @@ func loadKeyFromEnv() ([]byte, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	key, err := parseKeyString(raw)
+	key, err := ParseKeyString(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid VELOCITY_MASTER_KEY: %w", err)
 	}
 	return key, nil
 }
 
-func parseKeyString(value string) ([]byte, error) {
+func ParseKeyString(value string) ([]byte, error) {
 	if value == "" {
 		return nil, errors.New("empty key value")
 	}

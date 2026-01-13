@@ -110,7 +110,7 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read master key: %w", err)
 		}
-		key, err := parseKeyString(strings.TrimSpace(keyStr))
+		key, err := ParseKeyString(strings.TrimSpace(keyStr))
 		if err != nil {
 			return nil, fmt.Errorf("invalid master key: %w", err)
 		}
@@ -152,7 +152,7 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read master key: %w", err)
 		}
-		key, err = parseKeyString(strings.TrimSpace(keyStr))
+		key, err = ParseKeyString(strings.TrimSpace(keyStr))
 		if err != nil {
 			return nil, fmt.Errorf("invalid master key: %w", err)
 		}
@@ -267,7 +267,7 @@ func (mkm *MasterKeyManager) createShamirShares() ([]byte, error) {
 			fmt.Printf("Generated new master key: %s\n(Copied to clipboard)\n", keyString)
 		}
 	} else {
-		masterKey, err = parseKeyString(strings.TrimSpace(keyStr))
+		masterKey, err = ParseKeyString(strings.TrimSpace(keyStr))
 		if err != nil {
 			return nil, fmt.Errorf("invalid master key: %w", err)
 		}
