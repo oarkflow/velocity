@@ -75,6 +75,7 @@ func init() {
 type Config struct {
 	Path          string
 	EncryptionKey []byte
+	MasterKey     []byte // If provided and valid, use this as the master key
 	MaxUploadSize int64 // bytes; 0 means use default
 	MasterKeyConfig MasterKeyConfig // New: flexible master key configuration
 }
@@ -117,7 +118,14 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	masterKeyManager := NewMasterKeyManager(currentPath, cfg.MasterKeyConfig)
 
 	// Get master key using the manager
-	key, err := ensureMasterKeyWithManager(masterKeyManager, cfg.EncryptionKey)
+	// Priority: MasterKey from config > EncryptionKey from config > manager default behavior
+	var explicitKey []byte
+	if len(cfg.MasterKey) > 0 {
+		explicitKey = cfg.MasterKey
+	} else if len(cfg.EncryptionKey) > 0 {
+		explicitKey = cfg.EncryptionKey
+	}
+	key, err := ensureMasterKeyWithManager(masterKeyManager, explicitKey)
 	if err != nil {
 		return nil, err
 	}
