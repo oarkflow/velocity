@@ -73,11 +73,12 @@ func init() {
 }
 
 type Config struct {
-	Path          string
-	EncryptionKey []byte
-	MasterKey     []byte // If provided and valid, use this as the master key
-	MaxUploadSize int64 // bytes; 0 means use default
-	MasterKeyConfig MasterKeyConfig // New: flexible master key configuration
+	Path              string
+	EncryptionKey     []byte
+	MasterKey         []byte // If provided and valid, use this as the master key
+	MaxUploadSize     int64  // bytes; 0 means use default
+	MasterKeyConfig   MasterKeyConfig // New: flexible master key configuration
+	DeviceFingerprint bool   // Enable device fingerprint validation
 }
 
 const (
@@ -128,6 +129,14 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	key, err := ensureMasterKeyWithManager(masterKeyManager, explicitKey)
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply device fingerprint key binding if enabled
+	if cfg.DeviceFingerprint {
+		key, err = combineWithDeviceKey(key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to bind key to device: %w", err)
+		}
 	}
 
 	cryptoProvider, err := newCryptoProvider(key)

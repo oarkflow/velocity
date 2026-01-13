@@ -4,6 +4,8 @@ github.com/oarkflow/convert v0.0.5 h1:5s5DlnZLSUweB+EDUjynj0Eput7AkGUEQUvs/j4CWm
 github.com/oarkflow/convert v0.0.5/go.mod h1:/N8EEJiKUCtYS//+UfS3IX3ej7K1wIPgW/1nBhbeEXs=
 github.com/oarkflow/date v0.0.4 h1:EwY/wiS3CqZNBx7b2x+3kkJwVNuGk+G0dls76kL/fhU=
 github.com/oarkflow/date v0.0.4/go.mod h1:xQTFc6p6O5VX6J75ZrPJbelIFGca1ASmhpgirFqL8vM=
+github.com/oarkflow/licensing v0.0.24 h1:VcQBObxqoZH4iLV5S1fshgOL4B2GoKG5uV3YCzdINbg=
+github.com/oarkflow/licensing v0.0.24/go.mod h1:tq0O+QIZ0yI/3+8/w57vh6K3UoQrmXYAfvadXAP9fKc=
 github.com/oarkflow/shamir v0.0.2 h1:u4FO7xHX/O5px/bGN7Axf51XZCS8wfoaZgYRT14AvPE=
 github.com/oarkflow/shamir v0.0.2/go.mod h1:p62l6V+YPhitBC5dr6+Y+a/+Bp8ggQ7YN0YHanedojw=
 golang.org/x/crypto v0.45.0 h1:jMBrvKuj23MTlT0bQEOBcAE0mjg8mK9RXFhRH6nyF3Q=

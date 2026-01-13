@@ -16,6 +16,7 @@ func main() {
 				Enabled: false, // Disable cache to see prompts each time
 			},
 		},
+		DeviceFingerprint: true,
 	}
 
 	db, err := velocity.NewWithConfig(config)
@@ -29,6 +30,8 @@ func main() {
 
 	// Test database operations
 	fmt.Println("\nTesting database operations...")
+
+	// db.Put([]byte("test_key"), []byte("test_value"))
 
 
 	value, err := db.Get([]byte("test_key"))
