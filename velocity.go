@@ -996,8 +996,12 @@ func (db *DB) compactLevel(level int) {
 		}
 	}
 
+	// Filter out tombstone entries (deleted entries) during compaction
+	// Tombstones should not be persisted beyond compaction
 	for _, entry := range seen {
-		allEntries = append(allEntries, entry)
+		if !entry.Deleted {
+			allEntries = append(allEntries, entry)
+		}
 	}
 
 	// Sort entries
