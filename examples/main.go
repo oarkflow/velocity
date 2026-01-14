@@ -24,19 +24,22 @@ func main() {
 
 	fmt.Println("=== Velocity DB Object Storage Example ===")
 
-	// Example 1: Store a simple object
-	example1_StoreObject(db)
-	// Retrieve the object
-	retrieved, _, err := db.GetObject("documents/hello.txt", "user1")
-	if err != nil {
-		log.Printf("Error retrieving object: %v\n", err)
-		return
-	}
-	fmt.Printf("✓ Retrieved: %s\n\n", string(retrieved))
-	time.Sleep(10*time.Second)
+	// Example 5: List and search objects
+	example5_ListObjects(db)
+	time.Sleep(15 * time.Second)
 	return
 
-	// Example 2: Create nested folders and organize files
+	// Example 1: Store a simple object
+	example1_StoreObject(db)
+
+	// Example 2: Store multiple files
+	example2_StoreMultipleFiles(db)
+
+	// Example 3: View a single file using previewer
+	example3_ViewSingleFile(db)
+	return
+
+	// Example 4: Create nested folders and organize files
 	example2_FolderStructure(db)
 
 	// Example 3: Access control and permissions
@@ -87,8 +90,93 @@ func example1_StoreObject(db *velocity.DB) {
 	fmt.Printf("✓ Retrieved: %s\n\n", string(retrieved))
 }
 
+func example2_StoreMultipleFiles(db *velocity.DB) {
+	fmt.Println("Example 2: Store multiple files at once")
+	fmt.Println("-----------------------------------------")
+
+	// Define multiple files to store
+	files := map[string]struct {
+		content     []byte
+		contentType string
+	}{
+		"documents/report.pdf": {
+			content:     []byte("PDF Report Content - Quarterly Analysis"),
+			contentType: "application/pdf",
+		},
+		"images/logo.png": {
+			content:     []byte("PNG Image Data"),
+			contentType: "image/png",
+		},
+		"data/config.json": {
+			content:     []byte(`{"database": "velocity", "version": "1.0"}`),
+			contentType: "application/json",
+		},
+		"documents/readme.md": {
+			content:     []byte("# Project Documentation\n\nWelcome to our project!"),
+			contentType: "text/markdown",
+		},
+		"scripts/deploy.sh": {
+			content:     []byte("#!/bin/bash\necho 'Deploying application...'\n"),
+			contentType: "text/x-shellscript",
+		},
+	}
+
+	// Store all files
+	successCount := 0
+	for path, fileInfo := range files {
+		opts := &velocity.ObjectOptions{
+			Encrypt: true,
+			Tags: map[string]string{
+				"batch":      "upload-demo",
+				"created_by": "example2",
+			},
+		}
+
+		meta, err := db.StoreObject(path, fileInfo.contentType, "user1", fileInfo.content, opts)
+		if err != nil {
+			log.Printf("✗ Error storing %s: %v\n", path, err)
+			continue
+		}
+
+		fmt.Printf("✓ Stored: %s\n", path)
+		fmt.Printf("  - Object ID: %s\n", meta.ObjectID[:16]+"...")
+		fmt.Printf("  - Size: %d bytes\n", meta.Size)
+		fmt.Printf("  - Content Type: %s\n", meta.ContentType)
+		successCount++
+	}
+
+	fmt.Printf("\n✓ Successfully stored %d out of %d files\n\n", successCount, len(files))
+}
+
+func example3_ViewSingleFile(db *velocity.DB) {
+	fmt.Println("Example 3: View a single file using previewer")
+	fmt.Println("-----------------------------------------------")
+
+	// View the readme file we just created
+	filePath := "documents/readme.md"
+
+	fmt.Printf("Attempting to preview: %s\n", filePath)
+	err := db.ViewObject(filePath, "user1")
+	if err != nil {
+		log.Printf("✗ Error viewing file: %v\n", err)
+		return
+	}
+
+	fmt.Println("\n✓ File preview completed successfully")
+
+	// Also demonstrate viewing another file
+	fmt.Println("\nViewing another file...")
+	err = db.ViewObject("data/config.json", "user1")
+	if err != nil {
+		log.Printf("✗ Error viewing file: %v\n", err)
+		return
+	}
+
+	fmt.Println("\n✓ All file previews completed\n")
+}
+
 func example2_FolderStructure(db *velocity.DB) {
-	fmt.Println("Example 2: Create nested folders and organize files")
+	fmt.Println("Example 4: Create nested folders and organize files")
 	fmt.Println("----------------------------------------------------")
 
 	// Create nested folder structure
@@ -232,7 +320,7 @@ func example5_ListObjects(db *velocity.DB) {
 
 	// List all objects in projects/alpha
 	opts := velocity.ObjectListOptions{
-		Prefix:    "projects/alpha/",
+		Prefix:    "",
 		Recursive: true,
 		MaxKeys:   100,
 	}

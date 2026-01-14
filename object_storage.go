@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/oarkflow/previewer"
 )
 
 const (
@@ -619,6 +621,377 @@ func (db *DB) DeleteFolder(path, user string) error {
 	return db.Delete(folderKey)
 }
 
+// GetFolder retrieves folder metadata
+func (db *DB) GetFolder(path string) (*FolderMetadata, error) {
+	path = normalizePath(path)
+
+	folderKey := []byte(ObjectFolderPrefix + path)
+	raw, err := db.Get(folderKey)
+	if err != nil {
+		return nil, ErrObjectNotFound
+	}
+
+	var folder FolderMetadata
+	if err := json.Unmarshal(raw, &folder); err != nil {
+		return nil, err
+	}
+
+	return &folder, nil
+}
+
+// ListFolders lists all folders or folders under a specific parent
+func (db *DB) ListFolders(parentPath string, recursive bool) ([]FolderMetadata, error) {
+	parentPath = normalizePath(parentPath)
+	folders := make([]FolderMetadata, 0)
+
+	offset := 0
+	limit := 100
+
+	for {
+		keys, _ := db.KeysPage(offset, limit)
+		if len(keys) == 0 {
+			break
+		}
+
+		for _, key := range keys {
+			keyStr := string(key)
+			if !strings.HasPrefix(keyStr, ObjectFolderPrefix) {
+				continue
+			}
+
+			path := strings.TrimPrefix(keyStr, ObjectFolderPrefix)
+
+			// Filter by parent
+			if parentPath != "" {
+				if recursive {
+					// Include all folders under parent
+					if !strings.HasPrefix(path, parentPath+FolderSeparator) && path != parentPath {
+						continue
+					}
+				} else {
+					// Only direct children
+					folder := extractFolder(path)
+					if folder != parentPath {
+						continue
+					}
+				}
+			}
+
+			raw, err := db.Get(key)
+			if err != nil {
+				continue
+			}
+
+			var folder FolderMetadata
+			if err := json.Unmarshal(raw, &folder); err != nil {
+				continue
+			}
+
+			folders = append(folders, folder)
+		}
+
+		if len(keys) < limit {
+			break
+		}
+		offset += limit
+	}
+
+	// Sort by path
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].Path < folders[j].Path
+	})
+
+	return folders, nil
+}
+
+// FolderExists checks if a folder exists
+func (db *DB) FolderExists(path string) bool {
+	path = normalizePath(path)
+	folderKey := []byte(ObjectFolderPrefix + path)
+	return db.Has(folderKey)
+}
+
+// RenameFolder renames or moves a folder and all its contents
+func (db *DB) RenameFolder(oldPath, newPath, user string) error {
+	oldPath = normalizePath(oldPath)
+	newPath = normalizePath(newPath)
+
+	if !isValidPath(newPath) {
+		return ErrInvalidPath
+	}
+
+	// Check if source exists
+	if !db.FolderExists(oldPath) {
+		return ErrObjectNotFound
+	}
+
+	// Check if destination already exists
+	if db.FolderExists(newPath) {
+		return ErrObjectExists
+	}
+
+	// Create new parent folders if needed
+	newParent := extractFolder(newPath)
+	if newParent != "" {
+		if err := db.CreateFolder(newParent, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+	}
+
+	// Get all objects in the folder
+	opts := ObjectListOptions{
+		Folder:    oldPath,
+		Recursive: true,
+		MaxKeys:   10000,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+
+	// Move all objects
+	for _, obj := range objects {
+		// Calculate new path
+		relativePath := strings.TrimPrefix(obj.Path, oldPath+FolderSeparator)
+		newObjPath := newPath + FolderSeparator + relativePath
+
+		// Get object data
+		data, _, err := db.GetObject(obj.Path, user)
+		if err != nil {
+			continue
+		}
+
+		// Store at new location
+		_, err = db.StoreObject(newObjPath, obj.ContentType, user, data, &ObjectOptions{
+			Encrypt:        obj.Encrypted,
+			Tags:           obj.Tags,
+			CustomMetadata: obj.CustomMetadata,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Delete old object
+		_ = db.DeleteObject(obj.Path, user)
+	}
+
+	// Get all subfolders
+	subFolders, err := db.ListFolders(oldPath, true)
+	if err != nil {
+		return err
+	}
+
+	// Move all subfolders
+	for _, folder := range subFolders {
+		if folder.Path == oldPath {
+			continue
+		}
+
+		// Calculate new folder path
+		relativePath := strings.TrimPrefix(folder.Path, oldPath+FolderSeparator)
+		newFolderPath := newPath + FolderSeparator + relativePath
+
+		// Create new folder
+		if err := db.CreateFolder(newFolderPath, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+
+		// Delete old folder (force delete even if not empty)
+		oldKey := []byte(ObjectFolderPrefix + folder.Path)
+		_ = db.Delete(oldKey)
+	}
+
+	// Create the new folder
+	newFolder := &FolderMetadata{
+		Path:       newPath,
+		Name:       extractName(newPath),
+		Parent:     extractFolder(newPath),
+		CreatedAt:  time.Now().UTC(),
+		CreatedBy:  user,
+		ModifiedAt: time.Now().UTC(),
+	}
+
+	folderBytes, err := json.Marshal(newFolder)
+	if err != nil {
+		return err
+	}
+
+	newKey := []byte(ObjectFolderPrefix + newPath)
+	if err := db.PutWithTTL(newKey, folderBytes, 0); err != nil {
+		return err
+	}
+
+	// Delete the old folder
+	oldKey := []byte(ObjectFolderPrefix + oldPath)
+	return db.Delete(oldKey)
+}
+
+// GetFolderSize calculates the total size of all objects in a folder
+func (db *DB) GetFolderSize(path string, recursive bool) (int64, int, error) {
+	path = normalizePath(path)
+
+	opts := ObjectListOptions{
+		Folder:    path,
+		Recursive: recursive,
+		MaxKeys:   100000,
+	}
+
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var totalSize int64
+	for _, obj := range objects {
+		totalSize += obj.Size
+	}
+
+	return totalSize, len(objects), nil
+}
+
+// CopyFolder copies a folder and all its contents to a new location
+func (db *DB) CopyFolder(sourcePath, destPath, user string) error {
+	sourcePath = normalizePath(sourcePath)
+	destPath = normalizePath(destPath)
+
+	if !isValidPath(destPath) {
+		return ErrInvalidPath
+	}
+
+	// Check if source exists
+	if !db.FolderExists(sourcePath) {
+		return ErrObjectNotFound
+	}
+
+	// Check if destination already exists
+	if db.FolderExists(destPath) {
+		return ErrObjectExists
+	}
+
+	// Create destination folder
+	if err := db.CreateFolder(destPath, user); err != nil {
+		return err
+	}
+
+	// Get all objects in the source folder
+	opts := ObjectListOptions{
+		Folder:    sourcePath,
+		Recursive: true,
+		MaxKeys:   10000,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+
+	// Copy all objects
+	for _, obj := range objects {
+		// Calculate destination path
+		relativePath := strings.TrimPrefix(obj.Path, sourcePath+FolderSeparator)
+		destObjPath := destPath + FolderSeparator + relativePath
+
+		// Get object data
+		data, _, err := db.GetObject(obj.Path, user)
+		if err != nil {
+			continue
+		}
+
+		// Store at new location
+		_, err = db.StoreObject(destObjPath, obj.ContentType, user, data, &ObjectOptions{
+			Encrypt:        obj.Encrypted,
+			Tags:           obj.Tags,
+			CustomMetadata: obj.CustomMetadata,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	// Get all subfolders
+	subFolders, err := db.ListFolders(sourcePath, true)
+	if err != nil {
+		return err
+	}
+
+	// Copy all subfolders
+	for _, folder := range subFolders {
+		if folder.Path == sourcePath {
+			continue
+		}
+
+		// Calculate destination folder path
+		relativePath := strings.TrimPrefix(folder.Path, sourcePath+FolderSeparator)
+		destFolderPath := destPath + FolderSeparator + relativePath
+
+		// Create destination folder
+		if err := db.CreateFolder(destFolderPath, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// DeleteFolderRecursive deletes a folder and all its contents
+func (db *DB) DeleteFolderRecursive(path, user string) error {
+	path = normalizePath(path)
+
+	// Check if folder exists
+	if !db.FolderExists(path) {
+		return ErrObjectNotFound
+	}
+
+	// Get all objects in the folder
+	opts := ObjectListOptions{
+		Folder:    path,
+		Recursive: true,
+		MaxKeys:   10000,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+
+	// Delete all objects
+	for _, obj := range objects {
+		if err := db.DeleteObject(obj.Path, user); err != nil {
+			// Continue deleting even if some fail
+			continue
+		}
+	}
+
+	// Get all subfolders (in reverse order to delete children first)
+	subFolders, err := db.ListFolders(path, true)
+	if err != nil {
+		return err
+	}
+
+	// Sort in reverse order (deepest first)
+	sort.Slice(subFolders, func(i, j int) bool {
+		return subFolders[i].Path > subFolders[j].Path
+	})
+
+	// Delete all subfolders
+	for _, folder := range subFolders {
+		folderKey := []byte(ObjectFolderPrefix + folder.Path)
+		_ = db.Delete(folderKey)
+	}
+
+	// Delete the main folder
+	folderKey := []byte(ObjectFolderPrefix + path)
+	return db.Delete(folderKey)
+}
+
+// CreateFolders creates multiple folders at once
+func (db *DB) CreateFolders(paths []string, user string) error {
+	for _, path := range paths {
+		if err := db.CreateFolder(path, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return fmt.Errorf("failed to create folder %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // GetObjectMetadata retrieves metadata for an object
 func (db *DB) GetObjectMetadata(path string) (*ObjectMetadata, error) {
 	metaKey := []byte(ObjectMetaPrefix + path)
@@ -787,4 +1160,71 @@ func translateObjectError(err error) error {
 		return ErrObjectNotFound
 	}
 	return err
+}
+
+// ViewObject retrieves an object from the database and previews it using the previewer
+// It creates a temporary file with the appropriate extension and opens it in a browser
+func (db *DB) ViewObject(path, userID string) error {
+	// Retrieve the object from the database
+	data, meta, err := db.GetObject(path, userID)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve object: %w", err)
+	}
+
+	// Create a temporary file to store the data
+	// Extract file extension from the path
+	ext := filepath.Ext(path)
+	if ext == "" {
+		// Try to determine extension from content type
+		ext = getExtensionFromContentType(meta.ContentType)
+	}
+
+	// Create temp file with appropriate extension
+	tempFile, err := os.CreateTemp("", "velocity-preview-*"+ext)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath) // Clean up temp file after preview
+
+	// Write data to temp file
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to write to temp file: %w", err)
+	}
+	tempFile.Close()
+
+	// Preview the file
+	return previewer.PreviewFile(tempPath)
+}
+
+// getExtensionFromContentType maps common content types to file extensions
+func getExtensionFromContentType(contentType string) string {
+	extensionMap := map[string]string{
+		"text/plain":              ".txt",
+		"text/html":               ".html",
+		"text/css":                ".css",
+		"text/javascript":         ".js",
+		"text/markdown":           ".md",
+		"application/json":        ".json",
+		"application/xml":         ".xml",
+		"application/pdf":         ".pdf",
+		"application/zip":         ".zip",
+		"image/png":               ".png",
+		"image/jpeg":              ".jpg",
+		"image/gif":               ".gif",
+		"image/svg+xml":           ".svg",
+		"video/mp4":               ".mp4",
+		"audio/mpeg":              ".mp3",
+		"text/x-shellscript":      ".sh",
+		"application/x-sh":        ".sh",
+		"text/x-python":           ".py",
+		"text/x-go":               ".go",
+		"application/octet-stream": ".bin",
+	}
+
+	if ext, ok := extensionMap[contentType]; ok {
+		return ext
+	}
+	return ".txt" // Default extension
 }

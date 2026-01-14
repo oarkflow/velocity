@@ -239,6 +239,16 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	w.closed = true
+
+	// Close stopChan and ticker while holding lock
+	if w.stopChan != nil {
+		close(w.stopChan)
+		w.stopChan = nil
+	}
+	if w.ticker != nil {
+		w.ticker.Stop()
+		w.ticker = nil
+	}
 	w.mutex.Unlock()
 
 	defer func() {
@@ -246,11 +256,6 @@ func (w *WAL) Close() error {
 			log.Printf("WAL.Close() panic recovered: %v", r)
 		}
 	}()
-
-	close(w.stopChan)
-	if w.ticker != nil {
-		w.ticker.Stop()
-	}
 
 	// Swap and flush any pending buffer synchronously to ensure durability
 	w.mutex.Lock()
@@ -262,10 +267,16 @@ func (w *WAL) Close() error {
 	_ = w.writeBufferToFile(old)
 
 	// Close flush channel and wait for background flusher to finish
-	close(w.flushChan)
+	if w.flushChan != nil {
+		close(w.flushChan)
+		w.flushChan = nil
+	}
 	w.flushWg.Wait()
 
-	return w.file.Close()
+	if w.file != nil {
+		return w.file.Close()
+	}
+	return nil
 }
 
 // SetBufferSize adjusts the WAL in-memory buffer capacity while preserving existing contents.

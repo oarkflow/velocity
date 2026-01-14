@@ -48,6 +48,7 @@ type DB struct {
 	levels     [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
 	mutex      sync.RWMutex
 	compacting atomic.Bool
+	flushing   atomic.Bool // Prevent concurrent flushes
 	cache      *LRUCache
 	crypto     *CryptoProvider
 
@@ -373,6 +374,10 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	e.checksum = h.Sum32()
 
 	// Write to WAL
+	if db.wal == nil {
+		entryPool.Put(e)
+		return fmt.Errorf("WAL is not initialized")
+	}
 	if err := db.wal.Write(e); err != nil {
 		entryPool.Put(e)
 		return err
@@ -389,7 +394,10 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	// Return entry buffer to pool
 	entryPool.Put(e)
 	if db.memTable.Size() > db.memTableSize {
-		go db.flushMemTable()
+		// Only trigger flush if not already flushing
+		if !db.flushing.Load() {
+			go db.flushMemTable()
+		}
 	}
 
 	return nil
@@ -410,6 +418,10 @@ func (db *DB) put(key, value []byte) error {
 	e.checksum = h.Sum32()
 
 	// Write to WAL first for durability
+	if db.wal == nil {
+		entryPool.Put(e)
+		return fmt.Errorf("WAL is not initialized")
+	}
 	err := db.wal.Write(e)
 	if err != nil {
 		entryPool.Put(e)
@@ -427,7 +439,10 @@ func (db *DB) put(key, value []byte) error {
 	// Return entry buffer to pool
 	entryPool.Put(e)
 	if db.memTable.Size() > db.memTableSize {
-		go db.flushMemTable()
+		// Only trigger flush if not already flushing
+		if !db.flushing.Load() {
+			go db.flushMemTable()
+		}
 	}
 
 	return nil
@@ -507,6 +522,9 @@ func (db *DB) Delete(key []byte) error {
 	// Compute checksum for tombstone
 	entry.checksum = crc32.ChecksumIEEE(entry.Key)
 
+	if db.wal == nil {
+		return fmt.Errorf("WAL is not initialized")
+	}
 	err := db.wal.Write(entry)
 	if err != nil {
 		return err
@@ -522,8 +540,19 @@ func (db *DB) Delete(key []byte) error {
 }
 
 func (db *DB) flushMemTable() error {
+	// Prevent concurrent flushes
+	if !db.flushing.CompareAndSwap(false, true) {
+		return nil // Already flushing
+	}
+	defer db.flushing.Store(false)
+
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
+
+	// Nil check
+	if db.memTable == nil {
+		return fmt.Errorf("memTable is not initialized")
+	}
 
 	// Create new memtable
 	oldMemTable := db.memTable
@@ -576,10 +605,13 @@ func (db *DB) Close() error {
 	// Signal shutdown to any background goroutines
 	if db.shutdownCh != nil {
 		close(db.shutdownCh)
+		db.shutdownCh = nil
 	}
 
 	// Flush memtable to ensure all data is persisted
-	db.flushMemTable()
+	if db.memTable != nil && db.wal != nil {
+		db.flushMemTable()
+	}
 
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
@@ -587,12 +619,17 @@ func (db *DB) Close() error {
 	// Close all SSTables
 	for _, level := range db.levels {
 		for _, sst := range level {
-			sst.Close()
+			if sst != nil {
+				sst.Close()
+			}
 		}
 	}
 
 	// Close WAL (this also flushes any remaining buffer)
-	return db.wal.Close()
+	if db.wal != nil {
+		return db.wal.Close()
+	}
+	return nil
 }
 
 func (db *DB) Has(key []byte) bool {
@@ -1005,6 +1042,8 @@ func (db *DB) compactionLoop() {
 		select {
 		case <-ticker.C:
 			db.performCompaction()
+		case <-db.shutdownCh:
+			return
 		}
 	}
 }
@@ -1012,33 +1051,55 @@ func (db *DB) compactionLoop() {
 // performCompaction checks levels and compacts if necessary
 func (db *DB) performCompaction() {
 	if db.compacting.Load() {
+		log.Printf("velocity: compaction already in progress, skipping")
 		return // Already compacting
 	}
 	db.compacting.Store(true)
 	defer db.compacting.Store(false)
 
+	// Acquire lock only to read level info
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
 
 	// Calculate level sizes
 	levelSizes := make([]int64, MaxLevels)
+	levelCounts := make([]int, MaxLevels)
 	for level, sstables := range db.levels {
+		levelCounts[level] = len(sstables)
 		for _, sst := range sstables {
-			// Approximate size as entryCount * average entry size (rough estimate)
-			levelSizes[level] += int64(sst.entryCount * 100) // Assume 100 bytes per entry
+			// Get actual file size
+			if fi, err := sst.file.Stat(); err == nil {
+				levelSizes[level] += fi.Size()
+			}
 		}
 	}
 
+	// Log current level states
+	log.Printf("velocity: level sizes: L0=%d bytes (%d sstables), L1=%d bytes (%d sstables), L2=%d bytes (%d sstables)",
+		levelSizes[0], levelCounts[0], levelSizes[1], levelCounts[1], levelSizes[2], levelCounts[2])
+
 	// Check each level for compaction
+	compacted := false
 	for level := 0; level < MaxLevels-1; level++ {
 		nextLevelSize := levelSizes[level+1]
 		if nextLevelSize == 0 {
 			nextLevelSize = 1 // Avoid division by zero
 		}
-		if float64(levelSizes[level]) > float64(CompactionRatio)*float64(nextLevelSize) {
+		ratio := float64(levelSizes[level]) / float64(nextLevelSize)
+		if ratio > float64(CompactionRatio) {
+			log.Printf("velocity: triggering compaction L%d -> L%d (ratio: %.2f > %d)", level, level+1, ratio, CompactionRatio)
+			// Release lock before expensive compaction work
+			db.mutex.Unlock()
 			db.compactLevel(level)
-			break // Compact one level at a time
+			compacted = true
+			return // Compact one level at a time, lock already released
 		}
+	}
+
+	// Release lock before returning
+	db.mutex.Unlock()
+
+	if !compacted {
+		log.Printf("velocity: no compaction needed (all ratios below threshold)")
 	}
 }
 
@@ -1048,12 +1109,21 @@ func (db *DB) compactLevel(level int) {
 		return
 	}
 
+	// Acquire lock to snapshot current SSTables
+	db.mutex.Lock()
+	currentLevelSSTables := make([]*SSTable, len(db.levels[level]))
+	copy(currentLevelSSTables, db.levels[level])
+	nextLevelSSTables := make([]*SSTable, len(db.levels[level+1]))
+	copy(nextLevelSSTables, db.levels[level+1])
+	db.mutex.Unlock()
+
 	// Collect all entries from current level and next level
+	// This work is done WITHOUT holding the lock so reads can proceed
 	var allEntries []*Entry
 	iterators := make([]*SSTableIterator, 0)
 
 	// Add iterators for current level
-	for _, sst := range db.levels[level] {
+	for _, sst := range currentLevelSSTables {
 		iter, err := NewSSTableIterator(sst)
 		if err != nil {
 			log.Printf("velocity: failed to create iterator for sstable: %v", err)
@@ -1063,7 +1133,7 @@ func (db *DB) compactLevel(level int) {
 	}
 
 	// Add iterators for next level
-	for _, sst := range db.levels[level+1] {
+	for _, sst := range nextLevelSSTables {
 		iter, err := NewSSTableIterator(sst)
 		if err != nil {
 			log.Printf("velocity: failed to create iterator for sstable: %v", err)
@@ -1077,27 +1147,35 @@ func (db *DB) compactLevel(level int) {
 
 	// Collect all entries, resolving duplicates (newer timestamps win)
 	seen := make(map[string]*Entry)
+	entryCount := 0
 	for merged.Next() {
 		entry := merged.Entry()
+		entryCount++
 		keyStr := string(entry.Key)
 		if existing, ok := seen[keyStr]; !ok || entry.Timestamp > existing.Timestamp {
 			seen[keyStr] = entry
 		}
 	}
+	log.Printf("velocity: compaction collected %d entries from iterators, %d unique keys", entryCount, len(seen))
 
 	// Filter out tombstone entries (deleted entries) and expired entries during compaction
 	// Tombstones should not be persisted beyond compaction
 	// Entries with ExpiresAt=0 never expire
 	now := uint64(time.Now().UnixNano())
+	deletedCount := 0
+	expiredCount := 0
 	for _, entry := range seen {
 		if entry.Deleted {
+			deletedCount++
 			continue // Skip deleted entries
 		}
 		if entry.ExpiresAt > 0 && entry.ExpiresAt < now {
+			expiredCount++
 			continue // Skip expired entries
 		}
 		allEntries = append(allEntries, entry)
 	}
+	log.Printf("velocity: after filtering: %d valid entries, %d deleted, %d expired", len(allEntries), deletedCount, expiredCount)
 
 	// Sort entries
 	sort.Slice(allEntries, func(i, j int) bool {
@@ -1123,19 +1201,44 @@ func (db *DB) compactLevel(level int) {
 		newSSTables = append(newSSTables, sst)
 	}
 
-	// Close and remove old SSTables
-	for _, sst := range db.levels[level] {
-		sst.Close()
-		os.Remove(sst.file.Name())
-	}
-	for _, sst := range db.levels[level+1] {
-		sst.Close()
-		os.Remove(sst.file.Name())
-	}
+	// CRITICAL: Acquire lock briefly to swap SSTables atomically
+	// This ensures concurrent reads see consistent state
+	db.mutex.Lock()
 
-	// Update levels
-	db.levels[level] = nil // Clear current level
+	// Save references to old SSTables before swapping
+	oldLevel := db.levels[level]
+	oldNextLevel := db.levels[level+1]
+
+	// Atomically update levels - concurrent reads will now use new SSTables
+	db.levels[level] = nil
 	db.levels[level+1] = newSSTables
+
+	db.mutex.Unlock()
+	// Lock released - reads can proceed with new SSTables
+
+	// Now safe to close and remove old SSTables
+	// Any reads that were in progress have either:
+	// 1. Acquired read lock before we swapped levels (using old SSTables, still valid)
+	// 2. Acquire read lock after we swapped (using new SSTables)
+	// The mutex ensures this is safe without needing delays
+	for _, sst := range oldLevel {
+		if sst.file != nil {
+			fileName := sst.file.Name()
+			sst.Close()
+			os.Remove(fileName)
+		} else {
+			sst.Close()
+		}
+	}
+	for _, sst := range oldNextLevel {
+		if sst.file != nil {
+			fileName := sst.file.Name()
+			sst.Close()
+			os.Remove(fileName)
+		} else {
+			sst.Close()
+		}
+	}
 
 	log.Printf("velocity: compacted level %d into level %d, created %d sstables", level, level+1, len(newSSTables))
 }

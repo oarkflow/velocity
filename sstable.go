@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -241,6 +242,8 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 		file:        file,
 		mmap:        mmap,
 		indexData:   indexEntries,
+		entryCount:  len(entries),
+		indexOffset: indexOffset,
 		bloomFilter: bf,
 		crypto:      crypto,
 	}
@@ -383,8 +386,11 @@ func (sst *SSTable) Get(key []byte) (*Entry, error) {
 		return nil, nil
 	}
 
-	// Read entry from mmap
+	// Read entry from mmap with bounds checking
 	offset := entryIdx.Offset
+	if offset >= uint64(len(sst.mmap)) || offset+uint64(entryIdx.Size) > uint64(len(sst.mmap)) {
+		return nil, fmt.Errorf("sstable: entry offset %d size %d out of bounds (mmap size: %d)", offset, entryIdx.Size, len(sst.mmap))
+	}
 	data := sst.mmap[offset:]
 
 	var keyLen, valueLen uint32
@@ -442,8 +448,19 @@ func (sst *SSTable) Get(key []byte) (*Entry, error) {
 }
 
 func (sst *SSTable) Close() error {
-	syscall.Munmap(sst.mmap)
-	return sst.file.Close()
+	if sst.mmap != nil {
+		if err := syscall.Munmap(sst.mmap); err != nil {
+			// Log but continue to close file
+			log.Printf("velocity: SSTable munmap error: %v", err)
+		}
+		sst.mmap = nil
+	}
+	if sst.file != nil {
+		err := sst.file.Close()
+		sst.file = nil
+		return err
+	}
+	return nil
 }
 
 // LoadSSTable opens an existing SSTable file, memory maps it and reconstructs
@@ -603,6 +620,7 @@ type SSTableIterator struct {
 
 // NewSSTableIterator creates a new iterator for the SSTable
 func NewSSTableIterator(sst *SSTable) (*SSTableIterator, error) {
+	log.Printf("velocity: creating iterator for sstable %s with entryCount=%d", sst.file.Name(), sst.entryCount)
 	iter := &SSTableIterator{
 		sst:   sst,
 		index: -1,
@@ -614,17 +632,20 @@ func NewSSTableIterator(sst *SSTable) (*SSTableIterator, error) {
 	for i := 0; i < sst.entryCount; i++ {
 		entry, err := sst.readIndexEntryAt(idxPos)
 		if err != nil {
+			log.Printf("velocity: failed to read index entry at pos %d: %v", idxPos, err)
 			return nil, err
 		}
 		// Read the full entry
 		fullEntry, err := sst.readEntryAt(entry.Offset, entry.Size)
 		if err != nil {
+			log.Printf("velocity: failed to read full entry at offset %d: %v", entry.Offset, err)
 			return nil, err
 		}
 		iter.entries = append(iter.entries, fullEntry)
 		idxEntrySize := 4 + len(entry.Key) + 8 + 4
 		idxPos += uint32(idxEntrySize)
 	}
+	log.Printf("velocity: iterator loaded %d entries from sstable", len(iter.entries))
 
 	return iter, nil
 }
@@ -647,35 +668,66 @@ func (iter *SSTableIterator) Entry() *Entry {
 type MergedIterator struct {
 	iterators []*SSTableIterator
 	current   *Entry
+	// Track which iterator provided the last entry
+	lastIteratorIndex int
+	// Track if each iterator has been initialized
+	initialized []bool
 }
 
 // NewMergedIterator creates a merged iterator
 func NewMergedIterator(iterators ...*SSTableIterator) *MergedIterator {
 	return &MergedIterator{
-		iterators: iterators,
+		iterators:         iterators,
+		lastIteratorIndex: -1,
+		initialized:       make([]bool, len(iterators)),
 	}
 }
 
 // Next advances to the next entry in sorted order
 func (mi *MergedIterator) Next() bool {
-	var candidates []*Entry
-	for _, iter := range mi.iterators {
-		if iter.Next() {
-			candidates = append(candidates, iter.Entry())
+	// On first call, initialize all iterators
+	// On subsequent calls, only advance the iterator that provided the last entry
+	if mi.lastIteratorIndex == -1 {
+		// First call: advance all iterators
+		for i := range mi.iterators {
+			if mi.iterators[i].Next() {
+				mi.initialized[i] = true
+			}
+		}
+	} else {
+		// Advance only the iterator that provided the last entry
+		if mi.lastIteratorIndex >= 0 && mi.lastIteratorIndex < len(mi.iterators) {
+			if mi.iterators[mi.lastIteratorIndex].Next() {
+				mi.initialized[mi.lastIteratorIndex] = true
+			} else {
+				mi.initialized[mi.lastIteratorIndex] = false
+			}
 		}
 	}
-	if len(candidates) == 0 {
+
+	// Find the smallest key among all valid current entries
+	var minEntry *Entry
+	minIndex := -1
+	for i, iter := range mi.iterators {
+		if !mi.initialized[i] {
+			continue
+		}
+		entry := iter.Entry()
+		if entry == nil {
+			continue
+		}
+		if minEntry == nil || compareKeys(entry.Key, minEntry.Key) < 0 {
+			minEntry = entry
+			minIndex = i
+		}
+	}
+
+	if minEntry == nil {
 		return false
 	}
 
-	// Find the smallest key
-	minEntry := candidates[0]
-	for _, entry := range candidates[1:] {
-		if compareKeys(entry.Key, minEntry.Key) < 0 {
-			minEntry = entry
-		}
-	}
 	mi.current = minEntry
+	mi.lastIteratorIndex = minIndex
 	return true
 }
 
@@ -686,6 +738,9 @@ func (mi *MergedIterator) Entry() *Entry {
 
 // readEntryAt reads a full entry at the given offset and size
 func (sst *SSTable) readEntryAt(offset uint64, size uint32) (*Entry, error) {
+	if offset >= uint64(len(sst.mmap)) || offset+uint64(size) > uint64(len(sst.mmap)) {
+		return nil, fmt.Errorf("sstable: readEntryAt offset %d size %d out of bounds (mmap size: %d)", offset, size, len(sst.mmap))
+	}
 	data := sst.mmap[offset : offset+uint64(size)]
 
 	reader := bytes.NewReader(data)
