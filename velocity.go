@@ -1085,12 +1085,18 @@ func (db *DB) compactLevel(level int) {
 		}
 	}
 
-	// Filter out tombstone entries (deleted entries) during compaction
+	// Filter out tombstone entries (deleted entries) and expired entries during compaction
 	// Tombstones should not be persisted beyond compaction
+	// Entries with ExpiresAt=0 never expire
+	now := uint64(time.Now().UnixNano())
 	for _, entry := range seen {
-		if !entry.Deleted {
-			allEntries = append(allEntries, entry)
+		if entry.Deleted {
+			continue // Skip deleted entries
 		}
+		if entry.ExpiresAt > 0 && entry.ExpiresAt < now {
+			continue // Skip expired entries
+		}
+		allEntries = append(allEntries, entry)
 	}
 
 	// Sort entries

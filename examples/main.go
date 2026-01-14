@@ -20,12 +20,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close() // CRITICAL: Always close the database to flush data to disk
+	// defer db.Close() // CRITICAL: Always close the database to flush data to disk
 
 	fmt.Println("=== Velocity DB Object Storage Example ===")
 
 	// Example 1: Store a simple object
-	// example1_StoreObject(db)
+	example1_StoreObject(db)
 	// Retrieve the object
 	retrieved, _, err := db.GetObject("documents/hello.txt", "user1")
 	if err != nil {

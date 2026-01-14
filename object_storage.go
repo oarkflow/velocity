@@ -588,7 +588,8 @@ func (db *DB) CreateFolder(path, user string) error {
 		return err
 	}
 
-	return db.Put(folderKey, folderBytes)
+	// Use PutWithTTL(0) to ensure folder metadata never expires
+	return db.PutWithTTL(folderKey, folderBytes, 0)
 }
 
 // DeleteFolder deletes a folder (must be empty)
@@ -642,7 +643,8 @@ func (db *DB) SetObjectACL(path string, acl *ObjectACL) error {
 		return err
 	}
 
-	return db.Put(aclKey, aclBytes)
+	// Use PutWithTTL(0) to ensure ACL never expires
+	return db.PutWithTTL(aclKey, aclBytes, 0)
 }
 
 // GetObjectACL retrieves access control for an object
@@ -669,7 +671,8 @@ func (db *DB) saveObjectMetadata(meta *ObjectMetadata) error {
 	if err != nil {
 		return err
 	}
-	return db.Put(metaKey, metaBytes)
+	// Use PutWithTTL(0) to ensure metadata never expires
+	return db.PutWithTTL(metaKey, metaBytes, 0)
 }
 
 func (db *DB) saveObjectVersion(path string, version *ObjectVersion) error {
@@ -678,12 +681,14 @@ func (db *DB) saveObjectVersion(path string, version *ObjectVersion) error {
 	if err != nil {
 		return err
 	}
-	return db.Put(versionKey, versionBytes)
+	// Use PutWithTTL(0) to ensure version info never expires
+	return db.PutWithTTL(versionKey, versionBytes, 0)
 }
 
 func (db *DB) indexObject(path, objectID string) error {
 	indexKey := []byte(ObjectIndexPrefix + path)
-	return db.Put(indexKey, []byte(objectID))
+	// Use PutWithTTL(0) to ensure index entries never expire
+	return db.PutWithTTL(indexKey, []byte(objectID), 0)
 }
 
 func (db *DB) hasPermission(path, user, permission string) bool {
