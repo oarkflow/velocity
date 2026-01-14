@@ -3,6 +3,7 @@ package velocity
 import (
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -18,6 +19,9 @@ import (
 
 const (
 	masterKeyFilename = "master.key"
+	keyMarkerFilename = "key.marker"
+	// Known plaintext for key verification
+	keyMarkerPlaintext = "velocity-key-verification-marker-v1"
 )
 
 // CryptoProvider wraps an AEAD cipher for encrypting values at rest.
@@ -210,4 +214,123 @@ func (cp *CryptoProvider) DecryptStream(data []byte, aad []byte) ([]byte, error)
 	ciphertext := data[chacha20poly1305.NonceSizeX:]
 
 	return cp.Decrypt(nonce, ciphertext, aad)
+}
+
+// KeyVerificationError indicates the provided key doesn't match the stored key marker
+type KeyVerificationError struct {
+	Message string
+}
+
+func (e *KeyVerificationError) Error() string {
+	return e.Message
+}
+
+// createKeyMarker creates a verification marker for the given key
+// This allows us to verify on restart that the user provided the correct key
+func createKeyMarker(dbPath string, key []byte) error {
+	markerPath := filepath.Join(dbPath, keyMarkerFilename)
+
+	// Create crypto provider with the key
+	cp, err := newCryptoProvider(key)
+	if err != nil {
+		return err
+	}
+
+	// Create a hash of the key as additional verification
+	keyHash := sha256.Sum256(key)
+
+	// Encrypt the known plaintext with the key
+	nonce, ciphertext, err := cp.Encrypt([]byte(keyMarkerPlaintext), keyHash[:])
+	if err != nil {
+		return err
+	}
+
+	// Store: keyHash (32 bytes) + nonce (24 bytes) + ciphertext
+	markerData := make([]byte, 0, 32+len(nonce)+len(ciphertext))
+	markerData = append(markerData, keyHash[:]...)
+	markerData = append(markerData, nonce...)
+	markerData = append(markerData, ciphertext...)
+
+	// Write marker file
+	encoded := base64.StdEncoding.EncodeToString(markerData)
+	return os.WriteFile(markerPath, []byte(encoded), 0600)
+}
+
+// verifyKeyMarker checks if the provided key matches the stored key marker
+// Returns nil if verification passes, KeyVerificationError if key doesn't match
+func verifyKeyMarker(dbPath string, key []byte) error {
+	markerPath := filepath.Join(dbPath, keyMarkerFilename)
+
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No marker exists, this is the first time - create it
+			return createKeyMarker(dbPath, key)
+		}
+		return err
+	}
+
+	// Decode marker data
+	markerData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+	if err != nil {
+		return fmt.Errorf("corrupted key marker file: %w", err)
+	}
+
+	if len(markerData) < 32+chacha20poly1305.NonceSizeX+1 {
+		return fmt.Errorf("corrupted key marker file: too short")
+	}
+
+	// Extract components
+	storedKeyHash := markerData[:32]
+	nonce := markerData[32 : 32+chacha20poly1305.NonceSizeX]
+	ciphertext := markerData[32+chacha20poly1305.NonceSizeX:]
+
+	// First quick check: verify key hash matches
+	keyHash := sha256.Sum256(key)
+	if !equalBytes(keyHash[:], storedKeyHash) {
+		return &KeyVerificationError{
+			Message: "master key verification failed: the provided key does not match the key used to create this database. Please provide the correct master key.",
+		}
+	}
+
+	// Create crypto provider and try to decrypt
+	cp, err := newCryptoProvider(key)
+	if err != nil {
+		return err
+	}
+
+	plaintext, err := cp.Decrypt(nonce, ciphertext, keyHash[:])
+	if err != nil {
+		return &KeyVerificationError{
+			Message: "master key verification failed: decryption error. The provided key does not match the key used to create this database.",
+		}
+	}
+
+	// Verify plaintext matches
+	if string(plaintext) != keyMarkerPlaintext {
+		return &KeyVerificationError{
+			Message: "master key verification failed: marker mismatch. The provided key does not match the key used to create this database.",
+		}
+	}
+
+	return nil
+}
+
+// hasKeyMarker checks if a key marker file exists
+func hasKeyMarker(dbPath string) bool {
+	markerPath := filepath.Join(dbPath, keyMarkerFilename)
+	_, err := os.Stat(markerPath)
+	return err == nil
+}
+
+// equalBytes compares two byte slices in constant time (for security)
+func equalBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var result byte
+	for i := range a {
+		result |= a[i] ^ b[i]
+	}
+	return result == 0
 }

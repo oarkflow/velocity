@@ -125,23 +125,13 @@ func (w *WAL) Write(entry *Entry) error {
 	binary.Write(w.buffer, binary.LittleEndian, deleted)
 	binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
 
-	needSync := w.buffer.Len() >= WALBufferSize
-	if needSync {
-		// swap buffer with fresh buffer and send old buffer to flush channel without holding lock
-		old := w.buffer
-		w.buffer = bytes.NewBuffer(make([]byte, 0, WALBufferSize))
+	// Always sync immediately for data safety - ensures durability
+	// This is critical for preventing data loss on unexpected shutdown
+	if err := w.syncUnsafe(); err != nil {
 		w.mutex.Unlock()
-
-		select {
-		case w.flushChan <- old:
-			// dispatched to background flusher
-		default:
-			// flush channel full; fallback to synchronous write to preserve durability
-			_ = w.writeBufferToFile(old)
-		}
-	} else {
-		w.mutex.Unlock()
+		return err
 	}
+	w.mutex.Unlock()
 
 	return nil
 }

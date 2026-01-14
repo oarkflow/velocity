@@ -5,12 +5,14 @@ import (
 	"hash/crc32"
 	"log"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/oarkflow/convert"
@@ -58,9 +60,70 @@ type DB struct {
 	// Master key management
 	masterKeyManager *MasterKeyManager
 	masterKey        []byte // Store the master key
+
+	// Graceful shutdown
+	closed     atomic.Bool
+	shutdownCh chan struct{}
 }
 
 var defaultPath = "./data/velocity"
+
+// Global registry for graceful shutdown of all open databases
+var (
+	openDatabases   = make(map[*DB]struct{})
+	openDatabasesMu sync.Mutex
+	shutdownOnce    sync.Once
+)
+
+// registerDB adds a database to the global registry for graceful shutdown
+func registerDB(db *DB) {
+	openDatabasesMu.Lock()
+	openDatabases[db] = struct{}{}
+	openDatabasesMu.Unlock()
+
+	// Setup signal handling once (first database registration)
+	shutdownOnce.Do(setupGracefulShutdown)
+}
+
+// unregisterDB removes a database from the global registry
+func unregisterDB(db *DB) {
+	openDatabasesMu.Lock()
+	delete(openDatabases, db)
+	openDatabasesMu.Unlock()
+}
+
+// setupGracefulShutdown sets up signal handlers for graceful termination
+func setupGracefulShutdown() {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	go func() {
+		sig := <-sigChan
+		log.Printf("velocity: received signal %v, initiating graceful shutdown...", sig)
+
+		openDatabasesMu.Lock()
+		databases := make([]*DB, 0, len(openDatabases))
+		for db := range openDatabases {
+			databases = append(databases, db)
+		}
+		openDatabasesMu.Unlock()
+
+		// Close all open databases
+		for _, db := range databases {
+			if err := db.Close(); err != nil {
+				log.Printf("velocity: error closing database %s: %v", db.path, err)
+			} else {
+				log.Printf("velocity: database %s closed successfully", db.path)
+			}
+		}
+
+		log.Printf("velocity: graceful shutdown complete")
+
+		// Re-raise the signal after cleanup for proper exit
+		signal.Reset(sig)
+		syscall.Kill(syscall.Getpid(), sig.(syscall.Signal))
+	}()
+}
 
 func init() {
 	path, err := os.UserHomeDir()
@@ -139,6 +202,12 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		}
 	}
 
+	// CRITICAL: Verify the key matches what was used to create the database
+	// This prevents data corruption when wrong key is provided on restart
+	if err := verifyKeyMarker(currentPath, key); err != nil {
+		return nil, err
+	}
+
 	cryptoProvider, err := newCryptoProvider(key)
 	if err != nil {
 		return nil, err
@@ -169,6 +238,7 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		MaxUploadSize:    cfg.MaxUploadSize,
 		masterKeyManager: masterKeyManager,
 		masterKey:        key,
+		shutdownCh:       make(chan struct{}),
 	}
 	// Ensure files directory exists for object storage
 	db.filesDir = filepath.Join(db.path, "objects")
@@ -210,6 +280,9 @@ func NewWithConfig(cfg Config) (*DB, error) {
 			db.levels[level] = append(db.levels[level], sst)
 		}
 	}
+
+	// Register DB for graceful shutdown on signals
+	registerDB(db)
 
 	// Start background compaction
 	go db.compactionLoop()
@@ -492,17 +565,33 @@ func (db *DB) flushMemTable() error {
 }
 
 func (db *DB) Close() error {
+	// Prevent double-close using atomic flag
+	if db.closed.Swap(true) {
+		return nil // Already closed
+	}
+
+	// Unregister from graceful shutdown handler
+	unregisterDB(db)
+
+	// Signal shutdown to any background goroutines
+	if db.shutdownCh != nil {
+		close(db.shutdownCh)
+	}
+
+	// Flush memtable to ensure all data is persisted
 	db.flushMemTable()
 
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
+	// Close all SSTables
 	for _, level := range db.levels {
 		for _, sst := range level {
 			sst.Close()
 		}
 	}
 
+	// Close WAL (this also flushes any remaining buffer)
 	return db.wal.Close()
 }
 

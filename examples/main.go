@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
+	"time"
 
 	"github.com/oarkflow/velocity"
 )
@@ -12,18 +12,29 @@ func main() {
 	// Initialize database with encryption
 	db, err := velocity.NewWithConfig(velocity.Config{
 		Path:          "./velocitydb_data",
-		EncryptionKey: make([]byte, 32), // In production, use proper key management
+		MasterKeyConfig: velocity.MasterKeyConfig{
+			Source: velocity.UserDefined,
+		},
 		MaxUploadSize: 100 * 1024 * 1024,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer db.Close() // CRITICAL: Always close the database to flush data to disk
 
 	fmt.Println("=== Velocity DB Object Storage Example ===")
 
 	// Example 1: Store a simple object
-	example1_StoreObject(db)
+	// example1_StoreObject(db)
+	// Retrieve the object
+	retrieved, _, err := db.GetObject("documents/hello.txt", "user1")
+	if err != nil {
+		log.Printf("Error retrieving object: %v\n", err)
+		return
+	}
+	fmt.Printf("✓ Retrieved: %s\n\n", string(retrieved))
+	time.Sleep(10*time.Second)
+	return
 
 	// Example 2: Create nested folders and organize files
 	example2_FolderStructure(db)
@@ -349,9 +360,4 @@ func example7_PublicPrivate(db *velocity.DB) {
 		fmt.Printf("✗ Anonymous should be denied: %v\n", err)
 	}
 	fmt.Println()
-}
-
-func init() {
-	// Clean up test data on start
-	os.RemoveAll("./velocitydb_data")
 }
