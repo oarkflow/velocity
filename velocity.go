@@ -1069,7 +1069,6 @@ func (db *DB) performCompaction() {
 	}
 
 	// Check each level for compaction
-	compacted := false
 	for level := 0; level < MaxLevels-1; level++ {
 		nextLevelSize := levelSizes[level+1]
 		if nextLevelSize == 0 {
@@ -1080,7 +1079,6 @@ func (db *DB) performCompaction() {
 			// Release lock before expensive compaction work
 			db.mutex.Unlock()
 			db.compactLevel(level)
-			compacted = true
 			return // Compact one level at a time, lock already released
 		}
 	}
