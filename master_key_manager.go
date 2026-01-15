@@ -22,14 +22,14 @@ import (
 
 // MasterKeyManager handles flexible master key management
 type MasterKeyManager struct {
-	config     MasterKeyConfig
-	dbPath     string
+	config MasterKeyConfig
+	dbPath string
 
 	// User key caching
-	cachedKey      []byte
-	cacheExpiry    time.Time
-	lastAccess     time.Time
-	cacheMutex     sync.RWMutex
+	cachedKey   []byte
+	cacheExpiry time.Time
+	lastAccess  time.Time
+	cacheMutex  sync.RWMutex
 
 	// Key prompt function (can be overridden for testing)
 	promptFunc func(string) (string, error)
@@ -81,7 +81,7 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 		if mkm.cachedKey != nil && time.Now().Before(mkm.cacheExpiry) {
 			// Check idle timeout
 			if mkm.config.UserKeyCache.MaxIdleTime > 0 &&
-			   time.Since(mkm.lastAccess) > mkm.config.UserKeyCache.MaxIdleTime {
+				time.Since(mkm.lastAccess) > mkm.config.UserKeyCache.MaxIdleTime {
 				mkm.cacheMutex.RUnlock()
 				mkm.clearCache()
 			} else {
@@ -97,7 +97,7 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 	}
 
 	// Check if Shamir shares exist
-	sharesDir := filepath.Join(mkm.dbPath, "shamir_shares")
+	sharesDir := filepath.Join(mkm.dbPath, "key_shares")
 	if _, err := os.Stat(sharesDir); err == nil {
 		// Shares exist, use them to reconstruct key
 		return mkm.loadShamirShares(sharesDir)
@@ -106,7 +106,15 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 	// Check if key already exists (for user-defined mode)
 	if mkm.hasExistingKey() {
 		// Key exists, just prompt for it
-		keyStr, err := mkm.promptFunc("Enter master key: ")
+		prompt := "Enter master key: "
+
+		// Check metadata for hint
+		meta, _ := GetVaultMetadata(mkm.dbPath)
+		if meta != nil && meta.Type == "shamir" {
+			prompt = "Enter Shared Master Key: "
+		}
+
+		keyStr, err := mkm.promptFunc(prompt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read master key: %w", err)
 		}
@@ -146,6 +154,12 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to confirm: %w", err)
 		}
+
+		// Save metadata for single key (will be updated if shamir is chosen)
+		SaveVaultMetadata(mkm.dbPath, &VaultMetadata{
+			CreatedAt: time.Now(),
+			Type:      "single",
+		})
 	} else {
 		// Prompt user for key
 		keyStr, err := mkm.promptFunc("Enter master key (32 bytes, base64/hex): ")
@@ -191,6 +205,12 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 		if err := mkm.createShamirSharesFromKey(key, threshold, totalShares); err != nil {
 			return nil, fmt.Errorf("failed to create Shamir shares: %w", err)
 		}
+
+		// Update metadata
+		SaveVaultMetadata(mkm.dbPath, &VaultMetadata{
+			CreatedAt: time.Now(),
+			Type:      "shamir",
+		})
 	}
 
 	// Cache the key if enabled
@@ -232,7 +252,7 @@ func (mkm *MasterKeyManager) getShamirSharedKey() ([]byte, error) {
 
 	sharesDir := mkm.config.ShamirConfig.SharesPath
 	if sharesDir == "" {
-		sharesDir = filepath.Join(mkm.dbPath, "shamir_shares")
+		sharesDir = filepath.Join(mkm.dbPath, "key_shares")
 	}
 
 	// Check if shares exist
@@ -286,7 +306,7 @@ func (mkm *MasterKeyManager) createShamirShares() ([]byte, error) {
 	// Create shares directory
 	sharesDir := mkm.config.ShamirConfig.SharesPath
 	if sharesDir == "" {
-		sharesDir = filepath.Join(mkm.dbPath, "shamir_shares")
+		sharesDir = filepath.Join(mkm.dbPath, "key_shares")
 	}
 	if err := os.MkdirAll(sharesDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create shares directory: %w", err)
@@ -325,7 +345,6 @@ func (mkm *MasterKeyManager) loadShamirShares(sharesDir string) ([]byte, error) 
 	if len(shareFiles) == 0 {
 		return nil, fmt.Errorf("no share files found")
 	}
-
 
 	// Load all shares in order
 	var allShares [][]byte
@@ -396,7 +415,7 @@ func (mkm *MasterKeyManager) createShamirSharesFromKey(masterKey []byte, thresho
 	}
 
 	// Create shares directory
-	sharesDir := filepath.Join(mkm.dbPath, "shamir_shares")
+	sharesDir := filepath.Join(mkm.dbPath, "key_shares")
 	if err := os.MkdirAll(sharesDir, 0700); err != nil {
 		return fmt.Errorf("failed to create shares directory: %w", err)
 	}
@@ -413,6 +432,11 @@ func (mkm *MasterKeyManager) createShamirSharesFromKey(masterKey []byte, thresho
 	fmt.Printf("Created %d Shamir shares in %s\n", len(shares), sharesDir)
 	fmt.Printf("Threshold: %d shares needed to reconstruct key\n", threshold)
 	return nil
+}
+
+// CreateShamirSharesFromKey is the public wrapper for creating Shamir shares
+func (mkm *MasterKeyManager) CreateShamirSharesFromKey(masterKey []byte, threshold, totalShares int) error {
+	return mkm.createShamirSharesFromKey(masterKey, threshold, totalShares)
 }
 
 // copyToClipboard copies text to system clipboard

@@ -83,7 +83,7 @@ func userDefinedExample() {
 
 	// Check cache info
 	hasCached, expiry, lastAccess := db.GetKeyCacheInfo()
-	fmt.Printf("Key cached: %v, Expires: %v, Last access: %v\n", 
+	fmt.Printf("Key cached: %v, Expires: %v, Last access: %v\n",
 		hasCached, expiry.Format(time.RFC3339), lastAccess.Format(time.RFC3339))
 
 	// Clear cache manually
@@ -103,7 +103,7 @@ func shamirExample() {
 				Enabled:     true,
 				Threshold:   3,
 				TotalShares: 5,
-				SharesPath:  "./data/shamir_shares",
+				SharesPath:  "./data/key_shares",
 			},
 		},
 	}
@@ -114,7 +114,7 @@ func shamirExample() {
 	// In a real scenario, this would either:
 	// 1. Create new Shamir shares if none exist
 	// 2. Prompt user to select shares for key reconstruction
-	
+
 	fmt.Printf("Shamir configuration:\n")
 	fmt.Printf("  Threshold: %d shares needed\n", config.MasterKeyConfig.ShamirConfig.Threshold)
 	fmt.Printf("  Total shares: %d\n", config.MasterKeyConfig.ShamirConfig.TotalShares)
@@ -131,7 +131,7 @@ func shamirExample() {
 // Example of switching master key sources at runtime
 func switchSourceExample() {
 	config := velocity.Config{
-		Path: "./data/switch_db",
+		Path:            "./data/switch_db",
 		MasterKeyConfig: velocity.DefaultMasterKeyConfig(),
 	}
 
