@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1162,9 +1163,16 @@ func translateObjectError(err error) error {
 	return err
 }
 
-// ViewObject retrieves an object from the database and previews it using the previewer
-// It creates a temporary file with the appropriate extension and opens it in a browser
+// ViewObject retrieves an object from the database and previews it in a secure in-memory sandbox
+// No temporary files are created - everything stays in protected memory
 func (db *DB) ViewObject(path, userID string) error {
+	// Use secure in-memory preview - no disk writes
+	return db.ViewObjectSecure(path, userID)
+}
+
+// ViewObjectLegacy is the legacy implementation that uses temporary files
+// DEPRECATED: Use ViewObject (secure in-memory mode) instead
+func (db *DB) ViewObjectLegacy(path, userID string) error {
 	// Retrieve the object from the database
 	data, meta, err := db.GetObject(path, userID)
 	if err != nil {
@@ -1179,20 +1187,35 @@ func (db *DB) ViewObject(path, userID string) error {
 		ext = getExtensionFromContentType(meta.ContentType)
 	}
 
-	// Create temp file with appropriate extension
+	// Create temp file with appropriate extension and secure permissions
 	tempFile, err := os.CreateTemp("", "velocity-preview-*"+ext)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tempPath := tempFile.Name()
-	defer os.Remove(tempPath) // Clean up temp file after preview
+
+	// Ensure temp file is cleaned up after preview, even on error
+	defer func() {
+		if removeErr := os.Remove(tempPath); removeErr != nil {
+			log.Printf("Warning: failed to clean up temp file %s: %v", tempPath, removeErr)
+		}
+	}()
+
+	// Set secure permissions (owner read/write only)
+	if err := os.Chmod(tempPath, 0600); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to set secure permissions on temp file: %w", err)
+	}
 
 	// Write data to temp file
 	if _, err := tempFile.Write(data); err != nil {
 		tempFile.Close()
 		return fmt.Errorf("failed to write to temp file: %w", err)
 	}
-	tempFile.Close()
+
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
 
 	// Preview the file
 	return previewer.PreviewFile(tempPath)

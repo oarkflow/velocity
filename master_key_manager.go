@@ -159,12 +159,16 @@ func (mkm *MasterKeyManager) getUserDefinedKey() ([]byte, error) {
 	}
 
 	// Ask if user wants Shamir sharing
-	shamirResponse, err := mkm.promptFunc("Split key using Shamir sharing? Y/n: ")
+	shamirResponse, err := mkm.promptFunc("Split master key and store locally? Y/n: ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read Shamir response: %w", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	shamirResponse = strings.TrimSpace(shamirResponse)
+	if shamirResponse == "" {
+		shamirResponse = "n"
 	}
 
-	if strings.ToLower(strings.TrimSpace(shamirResponse)) != "n" {
+	if strings.ToLower(shamirResponse) != "n" {
 		// Get number of shares
 		sharesResponse, err := mkm.promptFunc("Number of shares (minimum 3, default 3): ")
 		if err != nil {

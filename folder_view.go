@@ -10,20 +10,39 @@ import (
 	"github.com/oarkflow/previewer/pkg/vfs"
 )
 
-// ViewFolder retrieves a folder from vault, builds a VFS around it, and opens it in previewer
+// ViewFolder retrieves a folder from vault and opens it in a secure in-memory sandbox
+// No temporary files are created - everything stays in protected memory
 func (db *DB) ViewFolder(folderPath, user string, compress bool, maxFileSize int64) error {
+	// Use secure in-memory VFS - no disk writes
+	return db.ViewFolderSecure(folderPath, user, compress, maxFileSize)
+}
+
+// ViewFolderLegacy is the legacy implementation that uses temporary directories
+// DEPRECATED: Use ViewFolder (secure in-memory mode) instead
+func (db *DB) ViewFolderLegacy(folderPath, user string, compress bool, maxFileSize int64) error {
 	// Get folder from vault
 	folder, err := db.GetFolder(folderPath)
 	if err != nil {
 		return fmt.Errorf("folder not found in vault: %w", err)
 	}
 
-	log.Printf("Found folder in vault: %s", folder.Path)
+	log.Printf("Found folder in vault: %s (LEGACY MODE - using temp files)", folder.Path)
 
 	// Download folder contents to temporary directory
 	tempDir, err := os.MkdirTemp("", "velocity-folder-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	// Ensure temp directory is cleaned up after preview completes
+	defer func() {
+		if removeErr := os.RemoveAll(tempDir); removeErr != nil {
+			log.Printf("Warning: failed to clean up temp directory %s: %v", tempDir, removeErr)
+		}
+	}()
+
+	// Set secure permissions on temp directory (owner read/write/execute only)
+	if err := os.Chmod(tempDir, 0700); err != nil {
+		log.Printf("Warning: failed to set secure permissions on temp directory: %v", err)
 	}
 
 	log.Printf("Extracting folder to: %s", tempDir)
@@ -82,8 +101,8 @@ func (db *DB) ViewFolder(folderPath, user string, compress bool, maxFileSize int
 			continue
 		}
 
-		// Write to file
-		if err := os.WriteFile(objectPath, data, 0644); err != nil {
+		// Write to file with secure permissions (owner read/write only)
+		if err := os.WriteFile(objectPath, data, 0600); err != nil {
 			log.Printf("Warning: failed to write file %s: %v", objectPath, err)
 			continue
 		}

@@ -1087,10 +1087,6 @@ func (db *DB) performCompaction() {
 
 	// Release lock before returning
 	db.mutex.Unlock()
-
-	if !compacted {
-		log.Printf("velocity: no compaction needed (all ratios below threshold)")
-	}
 }
 
 // compactLevel merges level with level+1
