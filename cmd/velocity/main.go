@@ -13,12 +13,37 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
+var (
+	dbPath string
+	defaultDBPath = ".velocity"
+)
+
+func SetDBPath(path string) {
+	dbPath = path
+}
+
+func SetDefaultDBPath(path string) {
+	defaultDBPath = path
+}
+
+func init() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("Failed to get user home directory: %v", err)
+		return
+	}
+	dbPath = home
+}
+
 // Resolve DB path: flag > env > default
 func getDBPath() string {
-	if path := os.Getenv("VELOCITY_DB_PATH"); path != "" {
-		return path
+	if defaultDBPath == "" {
+		defaultDBPath = ".velocity"
 	}
-	return "./velocitydb"
+	if dbPath == "" {
+		dbPath = "."
+	}
+	return filepath.Join(dbPath, defaultDBPath)
 }
 
 func main() {

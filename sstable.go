@@ -620,7 +620,6 @@ type SSTableIterator struct {
 
 // NewSSTableIterator creates a new iterator for the SSTable
 func NewSSTableIterator(sst *SSTable) (*SSTableIterator, error) {
-	log.Printf("velocity: creating iterator for sstable %s with entryCount=%d", sst.file.Name(), sst.entryCount)
 	iter := &SSTableIterator{
 		sst:   sst,
 		index: -1,
@@ -645,7 +644,6 @@ func NewSSTableIterator(sst *SSTable) (*SSTableIterator, error) {
 		idxEntrySize := 4 + len(entry.Key) + 8 + 4
 		idxPos += uint32(idxEntrySize)
 	}
-	log.Printf("velocity: iterator loaded %d entries from sstable", len(iter.entries))
 
 	return iter, nil
 }

@@ -113,12 +113,8 @@ func setupGracefulShutdown() {
 		for _, db := range databases {
 			if err := db.Close(); err != nil {
 				log.Printf("velocity: error closing database %s: %v", db.path, err)
-			} else {
-				log.Printf("velocity: database %s closed successfully", db.path)
 			}
 		}
-
-		log.Printf("velocity: graceful shutdown complete")
 
 		// Re-raise the signal after cleanup for proper exit
 		signal.Reset(sig)
@@ -248,7 +244,6 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	// Load entries from WAL into memtable
 	if len(entries) > 0 {
 		db.memTable.LoadEntries(entries)
-		log.Printf("velocity: WAL replay restored %d entries", len(entries))
 	}
 
 	// Load existing SSTables from disk
@@ -1073,10 +1068,6 @@ func (db *DB) performCompaction() {
 		}
 	}
 
-	// Log current level states
-	log.Printf("velocity: level sizes: L0=%d bytes (%d sstables), L1=%d bytes (%d sstables), L2=%d bytes (%d sstables)",
-		levelSizes[0], levelCounts[0], levelSizes[1], levelCounts[1], levelSizes[2], levelCounts[2])
-
 	// Check each level for compaction
 	compacted := false
 	for level := 0; level < MaxLevels-1; level++ {
@@ -1086,7 +1077,6 @@ func (db *DB) performCompaction() {
 		}
 		ratio := float64(levelSizes[level]) / float64(nextLevelSize)
 		if ratio > float64(CompactionRatio) {
-			log.Printf("velocity: triggering compaction L%d -> L%d (ratio: %.2f > %d)", level, level+1, ratio, CompactionRatio)
 			// Release lock before expensive compaction work
 			db.mutex.Unlock()
 			db.compactLevel(level)
@@ -1156,8 +1146,6 @@ func (db *DB) compactLevel(level int) {
 			seen[keyStr] = entry
 		}
 	}
-	log.Printf("velocity: compaction collected %d entries from iterators, %d unique keys", entryCount, len(seen))
-
 	// Filter out tombstone entries (deleted entries) and expired entries during compaction
 	// Tombstones should not be persisted beyond compaction
 	// Entries with ExpiresAt=0 never expire
@@ -1175,7 +1163,6 @@ func (db *DB) compactLevel(level int) {
 		}
 		allEntries = append(allEntries, entry)
 	}
-	log.Printf("velocity: after filtering: %d valid entries, %d deleted, %d expired", len(allEntries), deletedCount, expiredCount)
 
 	// Sort entries
 	sort.Slice(allEntries, func(i, j int) bool {
@@ -1239,6 +1226,4 @@ func (db *DB) compactLevel(level int) {
 			sst.Close()
 		}
 	}
-
-	log.Printf("velocity: compacted level %d into level %d, created %d sstables", level, level+1, len(newSSTables))
 }
