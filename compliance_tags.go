@@ -34,6 +34,17 @@ type ComplianceTagManager struct {
 	db    *DB
 	tags  map[string][]*ComplianceTag // path -> multiple tags
 	mu    sync.RWMutex
+
+	consentMgr    *ConsentManager
+	retentionMgr  *RetentionManager
+	residencyMgr  *DataResidencyManager
+	breakGlassMgr *BreakGlassManager
+	keyMgr        *DataClassKeyManager
+	maskingEngine *DataMaskingEngine
+	lineageMgr    *LineageManager
+	auditMgr      *AuditLogManager
+	violationsMgr *ViolationsManager
+	policyEngine  *PolicyEngine
 }
 
 // NewComplianceTagManager creates a new compliance tag manager
@@ -42,8 +53,99 @@ func NewComplianceTagManager(db *DB) *ComplianceTagManager {
 		db:   db,
 		tags: make(map[string][]*ComplianceTag),
 	}
+
+	// Wire default managers
+	ctm.consentMgr = NewConsentManager(db)
+	ctm.retentionMgr = NewRetentionManager(db)
+	ctm.residencyMgr = NewDataResidencyManager(db)
+	ctm.breakGlassMgr = NewBreakGlassManager(db)
+	ctm.keyMgr = NewDataClassKeyManager(db)
+	ctm.maskingEngine = NewDataMaskingEngine()
+	ctm.lineageMgr = NewLineageManager(db)
+	ctm.auditMgr = NewAuditLogManager(db)
+	ctm.violationsMgr = NewViolationsManager(db)
+	alertMgr := NewAlertManager(db)
+	ctm.violationsMgr.SetAlertManager(alertMgr)
+	breachSystem := NewBreachNotificationSystem(db)
+	ctm.violationsMgr.SetBreachNotificationSystem(breachSystem)
+	ctm.policyEngine = NewPolicyEngine(db)
+	_ = ctm.policyEngine.LoadPolicies(context.Background())
+	if len(ctm.policyEngine.policies) == 0 {
+		_ = ctm.policyEngine.InstallDefaultPacks(context.Background())
+	}
+
+	// Add basic masking rules
+	_ = ctm.maskingEngine.AddRule(&MaskingRule{
+		RuleID:     "email",
+		PatternStr: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
+		Strategy:   "partial",
+		DataClass:  DataClassConfidential,
+	})
+	_ = ctm.maskingEngine.AddRule(&MaskingRule{
+		RuleID:     "ssn",
+		PatternStr: `\d{3}-?\d{2}-?\d{4}`,
+		Strategy:   "full",
+		DataClass:  DataClassRestricted,
+	})
+	_ = ctm.maskingEngine.AddRule(&MaskingRule{
+		RuleID:     "credit_card",
+		PatternStr: `\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}`,
+		Strategy:   "partial",
+		DataClass:  DataClassRestricted,
+	})
+
 	ctm.loadTags()
 	return ctm
+}
+
+// SetConsentManager sets the consent manager.
+func (ctm *ComplianceTagManager) SetConsentManager(cm *ConsentManager) {
+	ctm.consentMgr = cm
+}
+
+// SetRetentionManager sets the retention manager.
+func (ctm *ComplianceTagManager) SetRetentionManager(rm *RetentionManager) {
+	ctm.retentionMgr = rm
+}
+
+// SetResidencyManager sets the data residency manager.
+func (ctm *ComplianceTagManager) SetResidencyManager(drm *DataResidencyManager) {
+	ctm.residencyMgr = drm
+}
+
+// SetBreakGlassManager sets the break-glass manager.
+func (ctm *ComplianceTagManager) SetBreakGlassManager(bg *BreakGlassManager) {
+	ctm.breakGlassMgr = bg
+}
+
+// SetKeyManager sets the data-class key manager.
+func (ctm *ComplianceTagManager) SetKeyManager(km *DataClassKeyManager) {
+	ctm.keyMgr = km
+}
+
+// SetMaskingEngine sets the data masking engine.
+func (ctm *ComplianceTagManager) SetMaskingEngine(engine *DataMaskingEngine) {
+	ctm.maskingEngine = engine
+}
+
+// SetLineageManager sets the data lineage manager.
+func (ctm *ComplianceTagManager) SetLineageManager(lm *LineageManager) {
+	ctm.lineageMgr = lm
+}
+
+// SetAuditLogManager sets the audit log manager.
+func (ctm *ComplianceTagManager) SetAuditLogManager(am *AuditLogManager) {
+	ctm.auditMgr = am
+}
+
+// SetViolationsManager sets the violations manager.
+func (ctm *ComplianceTagManager) SetViolationsManager(vm *ViolationsManager) {
+	ctm.violationsMgr = vm
+}
+
+// SetPolicyEngine sets the policy engine.
+func (ctm *ComplianceTagManager) SetPolicyEngine(pe *PolicyEngine) {
+	ctm.policyEngine = pe
 }
 
 // TagPath applies compliance frameworks to a path (folder, file, or key)
@@ -256,6 +358,14 @@ func (ctm *ComplianceTagManager) RemoveTag(ctx context.Context, path string) err
 
 // ValidateOperation checks if an operation complies with tagged requirements
 func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *ComplianceOperationRequest) (*ComplianceValidationResult, error) {
+	// System operations bypass all compliance checks
+	if req.SystemOperation {
+		return &ComplianceValidationResult{
+			Allowed: true,
+			Reason:  "system operation - compliance checks bypassed",
+		}, nil
+	}
+
 	tag := ctm.GetTag(req.Path)
 	if tag == nil {
 		// No compliance requirements - allow
@@ -290,11 +400,112 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 		}
 	}
 
-	// If encryption is required, check it
-	if tag.EncryptionReq && req.Operation == "write" && !req.Encrypted {
+	// If encryption is required, check it (skip for system operations)
+	if !req.SystemOperation && tag.EncryptionReq && req.Operation == "write" && !req.Encrypted {
 		result.Allowed = false
 		result.ViolatedRules = append(result.ViolatedRules, "encryption required but data is not encrypted")
 		result.RequiredActions = append(result.RequiredActions, "encrypt data before write")
+	}
+
+	// Consent checks for GDPR
+	if !req.SystemOperation && ctm.consentMgr != nil && containsFramework(tag.Frameworks, FrameworkGDPR) && (req.Operation == "read" || req.Operation == "write") {
+		if req.SubjectID == "" || req.Purpose == "" {
+			result.RequiredActions = append(result.RequiredActions, "identify data subject and purpose for consent verification")
+		} else {
+			hasConsent, _, err := ctm.consentMgr.HasActiveConsent(ctx, req.SubjectID, req.Purpose)
+			if err != nil {
+				return nil, err
+			}
+			if !hasConsent {
+				result.Allowed = false
+				result.ViolatedRules = append(result.ViolatedRules, "GDPR: missing valid consent for processing")
+				result.RequiredActions = append(result.RequiredActions, "obtain valid consent before processing")
+			}
+		}
+	}
+
+	// Retention enforcement
+	if ctm.retentionMgr != nil && tag.RetentionDays > 0 && req.DataAge > 0 {
+		dataAge := time.Duration(req.DataAge) * 24 * time.Hour
+		exceeds, policy, err := ctm.retentionMgr.EvaluateRetention(ctx, string(tag.DataClass), dataAge)
+		if err != nil {
+			return nil, err
+		}
+		if exceeds {
+			if policy != nil {
+				result.ViolatedRules = append(result.ViolatedRules, fmt.Sprintf("retention policy exceeded: %s", policy.PolicyID))
+			} else {
+				result.ViolatedRules = append(result.ViolatedRules, "retention policy exceeded")
+			}
+			result.RequiredActions = append(result.RequiredActions, "delete or anonymize expired data")
+			if !req.SystemOperation {
+				result.Allowed = false
+			}
+		}
+	}
+
+	// Data residency enforcement
+	if ctm.residencyMgr != nil && req.Region != "" {
+		allowed, policy, err := ctm.residencyMgr.ValidateResidency(ctx, req.Path, req.Region)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			result.Allowed = false
+			if policy != nil {
+				result.ViolatedRules = append(result.ViolatedRules, fmt.Sprintf("data residency violation: %s", policy.PolicyID))
+			} else {
+				result.ViolatedRules = append(result.ViolatedRules, "data residency violation")
+			}
+			result.RequiredActions = append(result.RequiredActions, "store data in approved region")
+		}
+	}
+
+	// Break-glass enforcement for restricted data (only when explicitly required)
+	breakGlassRequired := false
+	if tag.Metadata != nil {
+		if v, ok := tag.Metadata["break_glass_required"]; ok {
+			switch val := v.(type) {
+			case bool:
+				breakGlassRequired = val
+			case string:
+				breakGlassRequired = strings.EqualFold(val, "true")
+			}
+		}
+	}
+	if !req.SystemOperation && breakGlassRequired && ctm.breakGlassMgr != nil && tag.DataClass >= DataClassRestricted {
+		if req.BreakGlassRequestID == "" {
+			result.RequiredActions = append(result.RequiredActions, "request break-glass approval for restricted data")
+			result.Allowed = false
+			result.ViolatedRules = append(result.ViolatedRules, "break-glass approval required")
+		} else {
+			active, err := ctm.breakGlassMgr.IsActive(ctx, req.BreakGlassRequestID)
+			if err != nil {
+				return nil, err
+			}
+			if !active {
+				result.Allowed = false
+				result.ViolatedRules = append(result.ViolatedRules, "break-glass approval expired or not active")
+			}
+		}
+	}
+
+	// Key management requirement
+	if ctm.keyMgr != nil && tag.EncryptionReq && req.Operation == "write" {
+		_, version, err := ctm.keyMgr.GetKeyForClass(tag.DataClass)
+		if err == nil {
+			result.RequiredActions = append(result.RequiredActions, fmt.Sprintf("use class-specific encryption key version %d", version))
+		}
+	}
+
+	// Masking requirements for reads of sensitive data
+	if ctm.maskingEngine != nil && req.Operation == "read" && tag.DataClass >= DataClassConfidential {
+		result.RequiredActions = append(result.RequiredActions, "apply data masking before returning content")
+	}
+
+	// Data lineage tracking
+	if ctm.lineageMgr != nil {
+		result.RequiredActions = append(result.RequiredActions, "record data lineage event")
 	}
 
 	// Check access policy
@@ -308,6 +519,31 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 		result.RequiredActions = append(result.RequiredActions, "log audit event with high severity")
 	}
 
+	// Policy engine evaluation
+	if !req.SystemOperation && ctm.policyEngine != nil {
+		if err := ctm.policyEngine.EvaluatePolicies(ctx, tag.Frameworks, req, tag, result); err != nil {
+			return nil, err
+		}
+	}
+
+	// Record audit and violations
+	if ctm.auditMgr != nil {
+		_ = ctm.auditMgr.LogComplianceOperation(ctx, req, result, 0)
+	}
+	if ctm.violationsMgr != nil && !result.Allowed {
+		_ = ctm.violationsMgr.RecordFromValidation(ctx, req, result)
+	}
+
+	// Record lineage event
+	if ctm.lineageMgr != nil {
+		_ = ctm.lineageMgr.RecordEvent(ctx, &LineageEvent{
+			Path:      req.Path,
+			Action:    req.Operation,
+			Actor:     req.Actor,
+			Timestamp: time.Now(),
+		})
+	}
+
 	return result, nil
 }
 
@@ -319,7 +555,7 @@ func (ctm *ComplianceTagManager) validateGDPR(req *ComplianceOperationRequest, t
 	}
 
 	// GDPR Article 32: Security of processing
-	if req.Operation == "write" && !req.Encrypted && tag.DataClass >= DataClassConfidential {
+	if !req.SystemOperation && req.Operation == "write" && !req.Encrypted && tag.DataClass >= DataClassConfidential {
 		result.Allowed = false
 		result.ViolatedRules = append(result.ViolatedRules, "GDPR Article 32: confidential data must be encrypted")
 	}
@@ -339,7 +575,7 @@ func (ctm *ComplianceTagManager) validateGDPR(req *ComplianceOperationRequest, t
 // validateHIPAA checks HIPAA compliance requirements
 func (ctm *ComplianceTagManager) validateHIPAA(req *ComplianceOperationRequest, tag *ComplianceTag, result *ComplianceValidationResult) {
 	// HIPAA Security Rule: Encryption requirement
-	if req.Operation == "write" && !req.Encrypted {
+	if !req.SystemOperation && req.Operation == "write" && !req.Encrypted {
 		result.Allowed = false
 		result.ViolatedRules = append(result.ViolatedRules, "HIPAA Security Rule: PHI must be encrypted")
 	}
@@ -448,12 +684,27 @@ type ComplianceOperationRequest struct {
 	Path            string    `json:"path"`
 	Operation       string    `json:"operation"` // read, write, delete
 	Actor           string    `json:"actor"`
+	IPAddress       string    `json:"ip_address"`
+	Region          string    `json:"region"`
+	SubjectID       string    `json:"subject_id"`
+	Purpose         string    `json:"purpose"`
+	BreakGlassRequestID string `json:"break_glass_request_id"`
 	Encrypted       bool      `json:"encrypted"`
+	SystemOperation bool      `json:"system_operation"`
 	MFAVerified     bool      `json:"mfa_verified"`
 	CryptoAlgorithm string    `json:"crypto_algorithm"`
 	Reason          string    `json:"reason"`
 	DataAge         int       `json:"data_age"` // days
 	Timestamp       time.Time `json:"timestamp"`
+}
+
+func containsFramework(frameworks []ComplianceFramework, target ComplianceFramework) bool {
+	for _, f := range frameworks {
+		if f == target {
+			return true
+		}
+	}
+	return false
 }
 
 // ComplianceValidationResult represents the result of compliance validation

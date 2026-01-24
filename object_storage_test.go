@@ -353,7 +353,8 @@ func TestObjectStorage(t *testing.T) {
 		}
 
 		meta, err := db.StoreObject("large/bigfile.bin", "application/octet-stream", "user1", largeData, &ObjectOptions{
-			Encrypt: true,
+			Encrypt:         true,
+			SystemOperation: true,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -363,8 +364,8 @@ func TestObjectStorage(t *testing.T) {
 			t.Errorf("Size mismatch: expected %d, got %d", len(largeData), meta.Size)
 		}
 
-		// Retrieve and verify
-		retrieved, _, err := db.GetObject("large/bigfile.bin", "user1")
+		// Retrieve and verify (use internal API since this is system test)
+		retrieved, _, err := db.GetObjectInternal("large/bigfile.bin", "test_service")
 		if err != nil {
 			t.Fatal(err)
 		}

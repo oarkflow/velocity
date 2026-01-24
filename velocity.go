@@ -52,6 +52,9 @@ type DB struct {
 	cache      *LRUCache
 	crypto     *CryptoProvider
 
+	complianceTagManager *ComplianceTagManager
+	classificationEngine *DataClassificationEngine
+
 	// Configuration
 	memTableSize int64
 	// Files storage
@@ -238,6 +241,10 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		masterKey:        key,
 		shutdownCh:       make(chan struct{}),
 	}
+	// Initialize compliance tag manager
+	db.complianceTagManager = NewComplianceTagManager(db)
+	// Initialize data classification engine
+	db.classificationEngine = NewDataClassificationEngine(db)
 	// Ensure files directory exists for object storage
 	db.filesDir = filepath.Join(db.path, "objects")
 	os.MkdirAll(db.filesDir, 0755)

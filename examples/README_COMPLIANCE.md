@@ -53,6 +53,24 @@ go run tag_update_demo.go
 
 ---
 
+### 4. **enterprise_compliance_demo.go** - Enterprise/Banking Features
+Comprehensive example covering all enterprise features:
+- ✅ Policy packs (GDPR/HIPAA/PCI)
+- ✅ Consent management + retention enforcement
+- ✅ Data residency + break-glass workflow
+- ✅ Compliance-aware DB operations
+- ✅ Object storage enforcement + masking
+- ✅ Key rotation workflows
+- ✅ RBAC + SoD + access reviews
+- ✅ Audit trail + violations + reporting
+
+**Run it:**
+```bash
+go run enterprise_compliance_demo.go
+```
+
+---
+
 ## Key Concepts Demonstrated
 
 ### Folder Tagging (HIPAA/PHI)

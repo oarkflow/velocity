@@ -1,17 +1,13 @@
-//go:build velocity_examples
-// +build velocity_examples
-
 package main
 
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/oarkflow/velocity"
 )
 
-func mai3n() {
+func main() {
 	// Initialize database with encryption
 	db, err := velocity.NewWithConfig(velocity.Config{
 		Path:          "./velocitydb_data",
@@ -29,8 +25,6 @@ func mai3n() {
 
 	// Example 5: List and search objects
 	example5_ListObjects(db)
-	time.Sleep(15 * time.Second)
-	return
 
 	// Example 1: Store a simple object
 	example1_StoreObject(db)

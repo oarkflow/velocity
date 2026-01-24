@@ -1,3 +1,6 @@
+//go:build velocity_examples
+// +build velocity_examples
+
 package main
 
 import (

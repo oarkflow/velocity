@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -134,6 +135,7 @@ type ObjectOptions struct {
 	Encrypt        bool
 	ACL            *ObjectACL
 	StorageClass   string
+	SystemOperation bool // Skip compliance checks for system operations
 }
 
 // StoreObjectStream stores an object from a stream with encryption and versioning
@@ -159,6 +161,11 @@ func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, siz
 		opts.Version = DefaultVersion
 	}
 
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("write", path, user, opts.Encrypt, opts.CustomMetadata, nil, opts.SystemOperation); err != nil {
+		return nil, err
+	}
+
 	// Ensure object storage directory exists
 	if db.filesDir == "" {
 		db.filesDir = filepath.Join(db.path, "files")
@@ -177,7 +184,12 @@ func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, siz
 	// Create folder structure if needed
 	folder := extractFolder(path)
 	if folder != "" {
-		if err := db.CreateFolder(folder, user); err != nil && !errors.Is(err, ErrObjectExists) {
+		// Use system user if this is a system operation to bypass compliance
+		folderUser := user
+		if opts.SystemOperation {
+			folderUser = "system"
+		}
+		if err := db.CreateFolder(folder, folderUser); err != nil && !errors.Is(err, ErrObjectExists) {
 			return nil, err
 		}
 	}
@@ -207,8 +219,18 @@ func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, siz
 			return nil, fmt.Errorf("uploaded object too large")
 		}
 
-		// Encrypt data
+		// Data classification enforcement
 		plaintext := buf.Bytes()
+		if db.classificationEngine != nil {
+			if _, err := db.classifyAndTag(context.Background(), path, plaintext); err != nil {
+				return nil, err
+			}
+			if err := db.classificationEngine.EnforceDataPolicy(context.Background(), plaintext, "write"); err != nil {
+				return nil, err
+			}
+		}
+
+		// Encrypt data
 		nonce, ciphertext, err := db.crypto.Encrypt(plaintext, []byte(objectID))
 		if err != nil {
 			return nil, err
@@ -220,12 +242,28 @@ func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, siz
 			return nil, err
 		}
 	} else {
-		written, err = io.Copy(tmp, io.LimitReader(tee, db.MaxUploadSize+1))
+		buf := new(bytes.Buffer)
+		written, err = io.Copy(buf, io.LimitReader(tee, db.MaxUploadSize+1))
 		if err != nil {
 			return nil, err
 		}
 		if written > db.MaxUploadSize {
 			return nil, fmt.Errorf("uploaded object too large")
+		}
+
+		// Data classification enforcement
+		plaintext := buf.Bytes()
+		if db.classificationEngine != nil {
+			if _, err := db.classifyAndTag(context.Background(), path, plaintext); err != nil {
+				return nil, err
+			}
+			if err := db.classificationEngine.EnforceDataPolicy(context.Background(), plaintext, "write"); err != nil {
+				return nil, err
+			}
+		}
+
+		if _, err := tmp.Write(plaintext); err != nil {
+			return nil, err
 		}
 	}
 
@@ -331,8 +369,25 @@ func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, siz
 }
 
 // GetObject retrieves an object by path
+// GetObjectInternal retrieves an object bypassing compliance checks.
+// This is an internal method for system operations (retention, backups, etc.)
+// and should NOT be exposed to external users.
+func (db *DB) GetObjectInternal(path, user string) ([]byte, *ObjectMetadata, error) {
+	return db.getObjectWithSystemFlag(path, user, true)
+}
+
 func (db *DB) GetObject(path, user string) ([]byte, *ObjectMetadata, error) {
+	return db.getObjectWithSystemFlag(path, user, false)
+}
+
+func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte, *ObjectMetadata, error) {
 	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Compliance validation (bypassed for internal system operations)
+	result, err := db.validateObjectCompliance("read", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, systemOp)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -356,8 +411,8 @@ func (db *DB) GetObject(path, user string) ([]byte, *ObjectMetadata, error) {
 		}
 	}
 
-	// Check permissions
-	if !db.hasPermission(path, user, PermissionRead) {
+	// Check permissions (bypassed for system operations)
+	if !db.hasPermissionInternal(path, user, PermissionRead, systemOp) {
 		return nil, nil, ErrAccessDenied
 	}
 
@@ -386,6 +441,14 @@ func (db *DB) GetObject(path, user string) ([]byte, *ObjectMetadata, error) {
 		data = plaintext
 	}
 
+	// Apply masking if required
+	if result != nil && result.AppliedTag != nil && db.complianceTagManager != nil {
+		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= DataClassConfidential {
+			masked := db.complianceTagManager.maskingEngine.MaskString(string(data), result.AppliedTag.DataClass)
+			data = []byte(masked)
+		}
+	}
+
 	return data, meta, nil
 }
 
@@ -401,6 +464,47 @@ func (db *DB) GetObjectStream(path, user string) (io.ReadCloser, *ObjectMetadata
 	return io.NopCloser(bytes.NewReader(data)), meta, nil
 }
 
+// DeleteObjectInternal deletes an object (soft delete) bypassing compliance checks.
+// This is an internal method for system operations and should NOT be exposed to external users.
+func (db *DB) DeleteObjectInternal(path, user string) error {
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return err
+	}
+
+	// Skip compliance validation for internal operations
+
+	// Create delete marker version
+	versionID := generateVersionID()
+	version := &ObjectVersion{
+		VersionID:    versionID,
+		ObjectID:     meta.ObjectID,
+		Size:         0,
+		Hash:         "",
+		CreatedAt:    time.Now().UTC(),
+		CreatedBy:    user,
+		IsLatest:     true,
+		DeleteMarker: true,
+	}
+
+	// Mark current version as not latest
+	meta.IsLatest = false
+	if err := db.saveObjectMetadata(meta); err != nil {
+		return err
+	}
+
+	// Save delete marker
+	if err := db.saveObjectVersion(path, version); err != nil {
+		return err
+	}
+
+	// Remove index
+	indexKey := []byte(ObjectIndexPrefix + path)
+	_ = db.Delete(indexKey)
+
+	return nil
+}
+
 // DeleteObject deletes an object (soft delete with version marker)
 func (db *DB) DeleteObject(path, user string) error {
 	meta, err := db.GetObjectMetadata(path)
@@ -408,8 +512,13 @@ func (db *DB) DeleteObject(path, user string) error {
 		return err
 	}
 
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("delete", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, false); err != nil {
+		return err
+	}
+
 	// Check permissions
-	if !db.hasPermission(path, user, PermissionDelete) {
+	if !db.hasPermissionInternal(path, user, PermissionDelete, false) {
 		return ErrAccessDenied
 	}
 
@@ -444,6 +553,65 @@ func (db *DB) DeleteObject(path, user string) error {
 	return nil
 }
 
+func (db *DB) validateObjectCompliance(operation, path, user string, encrypted bool, metadata map[string]string, createdAt *time.Time, systemOp bool) (*ComplianceValidationResult, error) {
+	if db.complianceTagManager == nil {
+		return nil, nil
+	}
+
+	req := &ComplianceOperationRequest{
+		Path:      path,
+		Operation: operation,
+		Actor:     user,
+		Encrypted: encrypted,
+		Timestamp: time.Now(),
+	}
+
+	// Check if this is a system operation
+	if systemOp || strings.EqualFold(user, "retention_system") {
+		req.SystemOperation = true
+	}
+
+	if metadata != nil {
+		if sys, ok := metadata["system_operation"]; ok && strings.EqualFold(sys, "true") {
+			req.SystemOperation = true
+		}
+		if region, ok := metadata["region"]; ok {
+			req.Region = region
+		}
+		if subjectID, ok := metadata["subject_id"]; ok {
+			req.SubjectID = subjectID
+		}
+		if purpose, ok := metadata["purpose"]; ok {
+			req.Purpose = purpose
+		}
+		if reqID, ok := metadata["break_glass_request_id"]; ok {
+			req.BreakGlassRequestID = reqID
+		}
+		if mfa, ok := metadata["mfa_verified"]; ok && strings.EqualFold(mfa, "true") {
+			req.MFAVerified = true
+		}
+		if algo, ok := metadata["crypto_algorithm"]; ok {
+			req.CryptoAlgorithm = algo
+		}
+
+		if createdAt != nil && !createdAt.IsZero() {
+			ageDays := int(time.Since(*createdAt).Hours() / 24)
+			if ageDays > 0 {
+				req.DataAge = ageDays
+			}
+		}
+	}
+
+	result, err := db.complianceTagManager.ValidateOperation(context.Background(), req)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Allowed {
+		return nil, ErrAccessDenied
+	}
+	return result, nil
+}
+
 // HardDeleteObject permanently deletes an object and all versions
 func (db *DB) HardDeleteObject(path, user string) error {
 	meta, err := db.GetObjectMetadata(path)
@@ -451,8 +619,13 @@ func (db *DB) HardDeleteObject(path, user string) error {
 		return err
 	}
 
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("delete", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, false); err != nil {
+		return err
+	}
+
 	// Check permissions
-	if !db.hasPermission(path, user, PermissionDelete) {
+	if !db.hasPermissionInternal(path, user, PermissionDelete, false) {
 		return ErrAccessDenied
 	}
 
@@ -548,7 +721,7 @@ func (db *DB) ListObjects(opts ObjectListOptions) ([]ObjectMetadata, error) {
 			}
 
 			// Check permissions if user specified
-			if opts.User != "" && !db.hasPermission(path, opts.User, PermissionRead) {
+			if opts.User != "" && !db.hasPermissionInternal(path, opts.User, PermissionRead, false) {
 				continue
 			}
 
@@ -579,6 +752,12 @@ func (db *DB) CreateFolder(path, user string) error {
 	path = normalizePath(path)
 	if !isValidPath(path) {
 		return ErrInvalidPath
+	}
+
+	// Compliance validation (system users bypass checks)
+	systemOp := strings.EqualFold(user, "system") || strings.HasSuffix(strings.ToLower(user), "_system")
+	if _, err := db.validateObjectCompliance("write", path, user, false, nil, nil, systemOp); err != nil {
+		return err
 	}
 
 	// Check if folder already exists
@@ -618,6 +797,11 @@ func (db *DB) CreateFolder(path, user string) error {
 func (db *DB) DeleteFolder(path, user string) error {
 	path = normalizePath(path)
 
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("delete", path, user, false, nil, nil, false); err != nil {
+		return err
+	}
+
 	// Check if folder exists
 	folderKey := []byte(ObjectFolderPrefix + path)
 	if !db.Has(folderKey) {
@@ -644,6 +828,11 @@ func (db *DB) DeleteFolder(path, user string) error {
 // GetFolder retrieves folder metadata
 func (db *DB) GetFolder(path string) (*FolderMetadata, error) {
 	path = normalizePath(path)
+
+	// Compliance validation (system user)
+	if _, err := db.validateObjectCompliance("read", path, "system", false, nil, nil, true); err != nil {
+		return nil, err
+	}
 
 	folderKey := []byte(ObjectFolderPrefix + path)
 	raw, err := db.Get(folderKey)
@@ -1084,9 +1273,15 @@ func (db *DB) indexObject(path, objectID string) error {
 	return db.PutWithTTL(indexKey, []byte(objectID), 0)
 }
 
-func (db *DB) hasPermission(path, user, permission string) bool {
+// hasPermissionInternal checks permissions with optional system bypass
+func (db *DB) hasPermissionInternal(path, user, permission string, systemOp bool) bool {
 	if user == "" {
 		return false
+	}
+
+	// System operations bypass permission checks (internal use only)
+	if systemOp {
+		return true
 	}
 
 	acl, err := db.GetObjectACL(path)

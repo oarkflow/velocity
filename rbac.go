@@ -100,6 +100,8 @@ type RBACManager struct {
 	sessions map[string]*Session
 	mu       sync.RWMutex
 	db       *DB
+	sodMgr   *SoDManager
+	reviewMgr *AccessReviewManager
 }
 
 // NewRBACManager creates a new RBAC manager
@@ -115,6 +117,16 @@ func NewRBACManager(db *DB) *RBACManager {
 	rbac.initializeDefaultRoles()
 
 	return rbac
+}
+
+// SetSoDManager sets the segregation-of-duties manager.
+func (rbac *RBACManager) SetSoDManager(sm *SoDManager) {
+	rbac.sodMgr = sm
+}
+
+// SetAccessReviewManager sets the access review manager.
+func (rbac *RBACManager) SetAccessReviewManager(arm *AccessReviewManager) {
+	rbac.reviewMgr = arm
 }
 
 // initializeDefaultRoles creates predefined system roles
@@ -534,6 +546,12 @@ func (rbac *RBACManager) AddUser(user *User) error {
 	rbac.mu.Lock()
 	defer rbac.mu.Unlock()
 
+	if rbac.sodMgr != nil {
+		if err := rbac.sodMgr.ValidateAssignment(user.Roles); err != nil {
+			return err
+		}
+	}
+
 	user.UpdatedAt = time.Now()
 	if user.CreatedAt.IsZero() {
 		user.CreatedAt = time.Now()
@@ -541,8 +559,29 @@ func (rbac *RBACManager) AddUser(user *User) error {
 
 	rbac.users[user.ID] = user
 
+	// Request access review for privileged roles
+	if rbac.reviewMgr != nil && requiresAccessReview(user.Roles) {
+		_ = rbac.reviewMgr.CreateReview(context.Background(), &AccessReview{
+			Scope:      "user",
+			Target:     user.ID,
+			Reviewer:   RoleComplianceOfficer,
+			Status:     "pending",
+			Notes:      "Privileged role assignment requires review",
+		})
+	}
+
 	// Persist to database
 	return rbac.saveUser(user)
+}
+
+func requiresAccessReview(roles []string) bool {
+	for _, r := range roles {
+		switch r {
+		case RoleSystemAdmin, RoleSecurityOfficer, RoleComplianceOfficer:
+			return true
+		}
+	}
+	return false
 }
 
 // CreateSession creates a new user session

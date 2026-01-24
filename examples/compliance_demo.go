@@ -12,7 +12,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func main() {
+func mai10n() {
 	// Create database
 	db, err := velocity.New("./compliance_demo_db")
 	if err != nil {
@@ -232,16 +232,21 @@ func main() {
 
 	// Example 8: Update a compliance tag
 	fmt.Println("\n8. Updating compliance tag for /customer-data...")
-	err = ctm.UpdateTag(ctx, "/customer-data", func(tag *velocity.ComplianceTag) error {
+	tags := ctm.GetTags("/customer-data")
+	if len(tags) == 0 {
+		log.Printf("No tags found for /customer-data")
+	} else {
+		err = ctm.UpdateTag(ctx, tags[0].TagID, func(tag *velocity.ComplianceTag) error {
 		// Add SOC2 to existing GDPR compliance
 		tag.Frameworks = append(tag.Frameworks, velocity.FrameworkSOC2)
 		tag.RetentionDays = 1095 // Extend to 3 years
 		fmt.Println("   ✓ Added SOC2 framework")
 		fmt.Println("   ✓ Extended retention to 3 years")
 		return nil
-	})
-	if err != nil {
-		log.Printf("Failed to update tag: %v", err)
+		})
+		if err != nil {
+			log.Printf("Failed to update tag: %v", err)
+		}
 	}
 
 	// Verify update
