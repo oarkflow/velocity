@@ -1,3 +1,4 @@
 *.log
 *.db
 velocitydb_data
+tmpdb_*

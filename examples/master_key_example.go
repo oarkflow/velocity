@@ -1,3 +1,6 @@
+//go:build velocity_examples
+// +build velocity_examples
+
 package main
 
 import (
@@ -8,7 +11,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func main() {
+func mai5n() {
 	// Example 1: Traditional system file approach (default)
 	fmt.Println("=== Example 1: System File Master Key ===")
 	systemFileExample()

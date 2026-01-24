@@ -42,18 +42,10 @@ func TestBatchWriterChecksumAndWALReplay(t *testing.T) {
 		t.Fatalf("db close: %v", err)
 	}
 
-	// Post-close, stat WAL
-	if info, err := os.Stat(walPath); err == nil {
-		log.Printf("DEBUG: wal file after close: size=%d", info.Size())
-	} else {
-		log.Printf("DEBUG: wal file stat error: %v", err)
-	}
-
 	// List directory contents
 	files, _ := os.ReadDir(dir)
 	var sstPath string
 	for _, f := range files {
-		log.Printf("DEBUG: file in dir: %s", f.Name())
 		if strings.HasPrefix(f.Name(), "sst_") {
 			sstPath = filepath.Join(dir, f.Name())
 		}

@@ -488,14 +488,14 @@ func BackupAuditCommand(db *velocity.DB) velocitycli.CommandBuilder {
 
 			// Verify chain if requested
 			if verifyChain {
-				fmt.Println("🔐 Verifying audit chain integrity...\n")
+				fmt.Println("🔐 Verifying audit chain integrity...")
 				valid, issues, err := db.VerifyAuditChain()
 				if err != nil {
 					return fmt.Errorf("failed to verify audit chain: %w", err)
 				}
 
 				if valid {
-					fmt.Println("✅ Audit chain integrity verified - no issues found\n")
+					fmt.Println("✅ Audit chain integrity verified - no issues found")
 				} else {
 					fmt.Printf("❌ Audit chain has %d issue(s):\n", len(issues))
 					for _, issue := range issues {

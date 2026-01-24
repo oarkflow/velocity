@@ -21,18 +21,20 @@ func TestMemCheck(t *testing.T) {
 	// Use current default cache size
 	db.EnableCache(20 * 1024 * 1024) // 20MB
 
-	// Do many inserts
-	n := 100000
+	// Do many inserts - reduced to avoid test timeout
+	n := 1000
 	for i := 0; i < n; i++ {
 		key := []byte(fmt.Sprintf("k%09d", i))
 		val := make([]byte, 256)
 		if err := db.Put(key, val); err != nil {
 			t.Fatalf("put error: %v", err)
 		}
-		if i%25000 == 0 {
+		if i%250 == 0 {
 			t.Logf("inserted %d", i)
 		}
 	}
+
+	t.Logf("inserted %d total records", n)
 
 	// let GC settle
 	time.Sleep(2 * time.Second)

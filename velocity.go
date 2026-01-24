@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -47,6 +46,7 @@ type DB struct {
 	wal        *WAL
 	levels     [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
 	mutex      sync.RWMutex
+	envelopeMu sync.RWMutex
 	compacting atomic.Bool
 	flushing   atomic.Bool // Prevent concurrent flushes
 	cache      *LRUCache
@@ -56,6 +56,7 @@ type DB struct {
 	memTableSize int64
 	// Files storage
 	filesDir      string
+	envelopeDir   string
 	MaxUploadSize int64
 
 	// Master key management
@@ -135,10 +136,10 @@ func init() {
 type Config struct {
 	Path              string
 	EncryptionKey     []byte
-	MasterKey         []byte // If provided and valid, use this as the master key
-	MaxUploadSize     int64  // bytes; 0 means use default
+	MasterKey         []byte          // If provided and valid, use this as the master key
+	MaxUploadSize     int64           // bytes; 0 means use default
 	MasterKeyConfig   MasterKeyConfig // New: flexible master key configuration
-	DeviceFingerprint bool   // Enable device fingerprint validation
+	DeviceFingerprint bool            // Enable device fingerprint validation
 }
 
 const (
@@ -240,6 +241,9 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	// Ensure files directory exists for object storage
 	db.filesDir = filepath.Join(db.path, "objects")
 	os.MkdirAll(db.filesDir, 0755)
+	// Ensure envelope directory exists for JSON-based evidence envelopes
+	db.envelopeDir = filepath.Join(db.path, "envelopes")
+	os.MkdirAll(db.envelopeDir, 0700)
 
 	// Load entries from WAL into memtable
 	if len(entries) > 0 {
@@ -779,9 +783,11 @@ func (db *DB) Keys(pattern string) ([]string, error) {
 
 	seen := make(map[string]bool)
 	var keys []string
+
+	// Simple glob matcher that works with arbitrary strings (including colons and slashes)
+	// path.Match() doesn't work correctly because it treats "/" and ":" as path separators
 	match := func(s string) bool {
-		ok, _ := path.Match(pattern, s)
-		return ok
+		return globMatch(pattern, s)
 	}
 
 	// memtable: recent entries override
@@ -865,6 +871,65 @@ func (db *DB) Keys(pattern string) ([]string, error) {
 
 	sort.Strings(keys)
 	return keys, nil
+}
+
+// globMatch implements simple glob matching for Keys() function
+// Supports * (match any sequence) and ? (match single character)
+// Unlike path.Match, this treats the string as arbitrary bytes, not a filepath
+func globMatch(pattern, str string) bool {
+	// Fast path: exact match or universal match
+	if pattern == "*" {
+		return true
+	}
+	if pattern == str {
+		return true
+	}
+
+	// Handle patterns with wildcards
+	pi, si := 0, 0
+	starIdx, matchIdx := -1, 0
+
+	for si < len(str) {
+		if pi < len(pattern) {
+			switch pattern[pi] {
+			case '*':
+				// Remember star position
+				starIdx = pi
+				matchIdx = si
+				pi++
+				continue
+			case '?':
+				// Match any single character
+				pi++
+				si++
+				continue
+			default:
+				// Must match exactly
+				if pattern[pi] == str[si] {
+					pi++
+					si++
+					continue
+				}
+			}
+		}
+
+		// Mismatch - backtrack to last star if we had one
+		if starIdx != -1 {
+			pi = starIdx + 1
+			matchIdx++
+			si = matchIdx
+			continue
+		}
+
+		return false
+	}
+
+	// Consume remaining stars in pattern
+	for pi < len(pattern) && pattern[pi] == '*' {
+		pi++
+	}
+
+	return pi == len(pattern)
 }
 
 // KeysPage returns a page of keys (offset, limit) without loading the entire dataset into memory.

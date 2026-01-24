@@ -1,3 +1,6 @@
+//go:build velocity_examples
+// +build velocity_examples
+
 package main
 
 import (
@@ -8,7 +11,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func main() {
+func mai3n() {
 	// Initialize database with encryption
 	db, err := velocity.NewWithConfig(velocity.Config{
 		Path:          "./velocitydb_data",
@@ -172,7 +175,7 @@ func example3_ViewSingleFile(db *velocity.DB) {
 		return
 	}
 
-	fmt.Println("\n✓ All file previews completed\n")
+	fmt.Println("\n✓ All file previews completed")
 }
 
 func example2_FolderStructure(db *velocity.DB) {

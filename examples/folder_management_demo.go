@@ -1,3 +1,6 @@
+//go:build velocity_examples
+// +build velocity_examples
+
 package main
 
 import (
@@ -7,7 +10,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func main() {
+func mai1n() {
 	// Initialize database
 	db, err := velocity.NewWithConfig(velocity.Config{
 		Path: "./folder_demo_db",
@@ -21,7 +24,7 @@ func main() {
 	}
 	defer db.Close()
 
-	fmt.Println("=== Velocity DB Folder Management Demo ===\n")
+	fmt.Println("=== Velocity DB Folder Management Demo ===")
 
 	// Example 1: Create folders
 	example1_CreateFolders(db)

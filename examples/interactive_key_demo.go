@@ -1,3 +1,6 @@
+//go:build velocity_examples
+// +build velocity_examples
+
 package main
 
 import (
@@ -7,7 +10,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func main() {
+func mai2n() {
 	config := velocity.Config{
 		Path: "./interactive_demo_db",
 		MasterKeyConfig: velocity.MasterKeyConfig{

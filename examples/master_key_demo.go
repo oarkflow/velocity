@@ -1,3 +1,6 @@
+//go:build velocity_examples
+// +build velocity_examples
+
 package main
 
 import (
@@ -8,8 +11,8 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func main() {
-	fmt.Println("=== Velocity Master Key Management Demo ===\n")
+func mai4n() {
+	fmt.Println("=== Velocity Master Key Management Demo ===")
 
 	// Demo 1: System File (Traditional approach)
 	fmt.Println("1. System File Master Key (Traditional)")
@@ -84,7 +87,7 @@ func demoUserDefined() {
 	defer db.Close()
 
 	fmt.Printf("  ✓ Master key source: %s\n", db.GetMasterKeySource())
-	
+
 	// Check cache status
 	hasCached, expiry, lastAccess := db.GetKeyCacheInfo()
 	fmt.Printf("  ✓ Key cached: %v\n", hasCached)

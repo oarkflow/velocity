@@ -337,6 +337,25 @@ func (db *DB) GetObject(path, user string) ([]byte, *ObjectMetadata, error) {
 		return nil, nil, err
 	}
 
+	// Check if latest version is a delete marker by looking at version info
+	// Version keys are stored as: "obj:version:<path>:<versionID>"
+	versionPrefix := ObjectVersionPrefix + path + ":"
+	versions, err := db.Keys(versionPrefix + "*")
+	if err == nil && len(versions) > 0 {
+		// Check each version to find the latest one
+		for _, versionKey := range versions {
+			versionBytes, err := db.Get([]byte(versionKey))
+			if err == nil {
+				var version ObjectVersion
+				if json.Unmarshal(versionBytes, &version) == nil {
+					if version.IsLatest && version.DeleteMarker {
+						return nil, nil, ErrObjectNotFound
+					}
+				}
+			}
+		}
+	}
+
 	// Check permissions
 	if !db.hasPermission(path, user, PermissionRead) {
 		return nil, nil, ErrAccessDenied
