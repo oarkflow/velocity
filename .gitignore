@@ -2,3 +2,4 @@
 *.db
 velocitydb_data
 tmpdb_*
+entity_demo_data
