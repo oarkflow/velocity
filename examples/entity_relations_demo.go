@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/oarkflow/velocity"
+	velocity "github.com/oarkflow/velocity"
 )
 
 func main() {
@@ -62,8 +62,8 @@ func main() {
 	fmt.Println("\nDemo 10: Encrypted Entities")
 	createEncryptedEntities(ctx, em)
 
-	// Demo 11: Creating Envelopes from Entities
-	fmt.Println("\nDemo 11: Creating Envelopes from Entities")
+	// Demo 11: Creating Envelopes from Entities with Relationships
+	fmt.Println("\nDemo 11: Creating Envelopes from Entities with Relationships")
 	createEnvelopesFromEntities(ctx, db, em)
 
 	fmt.Println("\n=== Demo Complete ===")
@@ -696,6 +696,19 @@ func createEnvelopesFromEntities(ctx context.Context, db *velocity.DB, em *veloc
 		return
 	}
 
+	// Display all entities in table format
+	fmt.Println("\n=== All Entities ===")
+	fmt.Printf("%-10s | %-15s | %-30s | %-8s | %-30s\n", "ID", "Type", "Name", "Version", "Tags")
+	for _, entity := range entities {
+		tagsStr := ""
+		if entity.Tags != nil {
+			for k, v := range entity.Tags {
+				tagsStr += fmt.Sprintf("%s=%s ", k, v)
+			}
+		}
+		fmt.Printf("%-10s | %-15s | %-30s | %-8d | %-30s\n", entity.EntityID, entity.Type, entity.Name, entity.Version, tagsStr)
+	}
+
 	// Find a JSON entity to create an envelope from
 	var jsonEntity *velocity.Entity
 	for _, entity := range entities {
@@ -710,7 +723,64 @@ func createEnvelopesFromEntities(ctx context.Context, db *velocity.DB, em *veloc
 		return
 	}
 
+	// Create relationships between entities first
+	fmt.Println("\n--- Creating Relationships for Envelope ---")
+	for i := 0; i < len(entities)-1; i++ {
+		_, err := em.AddRelation(ctx, &velocity.EntityRelationRequest{
+			SourceEntity:  entities[i].EntityID,
+			TargetEntity:  entities[i+1].EntityID,
+			RelationType:  velocity.RelationTypeRelatedTo,
+			Bidirectional: true,
+			CreatedBy:     "admin",
+		})
+		if err != nil {
+			log.Printf("Warning: Failed to create relationship: %v", err)
+		} else {
+			fmt.Printf("✓ Created relationship: %s -> %s\n", entities[i].Name, entities[i+1].Name)
+		}
+	}
+
+	// Display relationships in table format
+	fmt.Println("\n=== All Relationships ===")
+	fmt.Printf("%-10s | %-40s | %-40s | %-15s | %-15s\n", "Relation ID", "Source", "Target", "Type", "Bidirectional")
+	relations, _ := em.GetRelations(ctx, "", nil)
+	for _, rel := range relations {
+		bidirectional := "No"
+		if rel.Bidirectional {
+			bidirectional = "Yes"
+		}
+		fmt.Printf("%-10s | %-40s | %-40s | %-15s | %-15s\n", rel.RelationID, rel.SourceEntity, rel.TargetEntity, rel.RelationType, bidirectional)
+	}
+
+	// Get entity graph to show related entities
+	graph, err := em.GetEntityGraph(ctx, jsonEntity.EntityID, 2)
+	if err != nil {
+		log.Printf("Warning: Failed to get entity graph: %v", err)
+	} else {
+		fmt.Printf("✓ Entity graph contains %d entities\n", len(graph))
+
+		// Display related entities in table format
+		fmt.Println("\n=== Related Entities ===")
+		fmt.Printf("%-10s | %-15s | %-30s | %-40s | %-8s\n", "ID", "Type", "Name", "Object/Secret", "Version")
+		for entityID, result := range graph {
+			if entityID != jsonEntity.EntityID {
+				objSecret := ""
+				if result.Entity.ObjectPath != "" {
+					objSecret = fmt.Sprintf("Object: %s", result.Entity.ObjectPath)
+				}
+				if result.Entity.SecretRef != "" {
+					if objSecret != "" {
+						objSecret += ", "
+					}
+					objSecret += fmt.Sprintf("Secret: %s", result.Entity.SecretRef)
+				}
+				fmt.Printf("%-10s | %-15s | %-30s | %-40s | %-8d\n", entityID, result.Entity.Type, result.Entity.Name, objSecret, result.Entity.Version)
+			}
+		}
+	}
+
 	// Create a single envelope from the JSON entity
+	fmt.Println("\n--- Creating Envelope from Entity ---")
 	envelope, err := db.CreateEnvelopeFromEntity(ctx, jsonEntity.EntityID, velocity.EnvelopeTypeInvestigationRecord, "admin")
 	if err != nil {
 		log.Fatal(err)
@@ -734,7 +804,7 @@ func createEnvelopesFromEntities(ctx context.Context, db *velocity.DB, em *veloc
 
 	fmt.Printf("✓ Exported envelope to: %s\n", exportPath)
 
-	// Verify entity now references the envelope
+	// Verify the entity now references the envelope
 	updatedEntity, err := em.GetEntity(ctx, jsonEntity.EntityID, false)
 	if err != nil {
 		log.Fatal(err)
@@ -751,11 +821,11 @@ func createEnvelopesFromEntities(ctx context.Context, db *velocity.DB, em *veloc
 	fmt.Printf("✓ Loaded envelope from entity: %s\n", loadedEnvelope.EnvelopeID)
 	fmt.Printf("  Payload Hash: %s\n", loadedEnvelope.Integrity.PayloadHash)
 
-	// Import envelope into another vault (simulated)
+	// Import the envelope into another vault (simulated)
 	fmt.Println("\n--- Importing Envelope into Another Vault ---")
 
 	// Create a new database instance to simulate another vault
-	vault2, err := velocity.New("./entity_demo_data/vault2")
+	vault2, err := velocity.New("./entity_demo_vault2")
 	if err != nil {
 		log.Fatal(err)
 	}
