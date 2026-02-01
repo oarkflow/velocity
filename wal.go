@@ -136,6 +136,48 @@ func (w *WAL) Write(entry *Entry) error {
 	return nil
 }
 
+// WriteBatch writes multiple entries to WAL with a single sync at the end.
+// This is much faster than calling Write() for each entry.
+func (w *WAL) WriteBatch(entries []*Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	for _, entry := range entries {
+		// Encrypt value using AEAD with entry metadata as AAD (including expiry)
+		nonce, ciphertext, err := w.crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.ExpiresAt, entry.Deleted))
+		if err != nil {
+			return err
+		}
+
+		keyLen := uint32(len(entry.Key))
+		nonceLen := uint16(len(nonce))
+		valueLen := uint32(len(ciphertext))
+
+		binary.Write(w.buffer, binary.LittleEndian, keyLen)
+		w.buffer.Write(entry.Key)
+		binary.Write(w.buffer, binary.LittleEndian, nonceLen)
+		w.buffer.Write(nonce)
+		binary.Write(w.buffer, binary.LittleEndian, valueLen)
+		w.buffer.Write(ciphertext)
+		binary.Write(w.buffer, binary.LittleEndian, entry.Timestamp)
+		binary.Write(w.buffer, binary.LittleEndian, entry.ExpiresAt)
+
+		var deleted uint8
+		if entry.Deleted {
+			deleted = 1
+		}
+		binary.Write(w.buffer, binary.LittleEndian, deleted)
+		binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
+	}
+
+	// Single sync after all entries are written
+	return w.syncUnsafe()
+}
+
 func (w *WAL) syncLoop() {
 	for {
 		select {

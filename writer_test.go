@@ -182,39 +182,49 @@ func TestBatchWriterChecksumAndWALReplay(t *testing.T) {
 
 func TestWALWriteAndReplay(t *testing.T) {
 	dir := t.TempDir()
-	db, err := New(dir)
+	walPath := filepath.Join(dir, "wal.log")
+	crypto, err := newCryptoProvider(make([]byte, 32))
 	if err != nil {
-		t.Fatalf("New db: %v", err)
+		t.Fatalf("newCryptoProvider: %v", err)
 	}
-	defer db.Close()
 
-	// Direct WAL write with checksum set
+	wal, err := NewWAL(walPath, crypto)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+
 	entry := &Entry{Key: []byte("wx"), Value: []byte("vy"), Timestamp: uint64(12345), Deleted: false}
 	entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
-	if err := db.wal.Write(entry); err != nil {
+	if err := wal.Write(entry); err != nil {
+		_ = wal.Close()
 		t.Fatalf("wal write: %v", err)
 	}
-
-	if err := db.Close(); err != nil {
-		t.Fatalf("db close: %v", err)
+	if err := wal.Sync(); err != nil {
+		_ = wal.Close()
+		t.Fatalf("wal sync: %v", err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatalf("wal close: %v", err)
 	}
 
-	// Reopen and verify replay
-	db2, err := New(dir)
+	wal2, err := NewWAL(walPath, crypto)
 	if err != nil {
-		t.Fatalf("failed to reopen db: %v", err)
+		t.Fatalf("NewWAL reopen: %v", err)
 	}
-	defer db2.Close()
-
-	val, err := db2.Get([]byte("wx"))
+	entries, err := wal2.Replay()
 	if err != nil {
-		t.Fatalf("Get wx: %v", err)
+		_ = wal2.Close()
+		t.Fatalf("wal replay: %v", err)
 	}
-	if string(val) != "vy" {
-		t.Fatalf("unexpected value wx: %s", string(val))
+	_ = wal2.Close()
+
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
-	ent := db2.memTable.Get([]byte("wx"))
-	if ent == nil || ent.checksum == 0 {
-		t.Fatalf("entry missing or checksum zero after replay")
+	if string(entries[0].Key) != "wx" || string(entries[0].Value) != "vy" {
+		t.Fatalf("unexpected entry: %s -> %s", string(entries[0].Key), string(entries[0].Value))
+	}
+	if entries[0].checksum == 0 {
+		t.Fatalf("checksum zero after replay")
 	}
 }

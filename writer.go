@@ -1,25 +1,28 @@
 package velocity
 
 import (
+	"encoding/json"
 	"hash/crc32"
+	"sort"
 	"sync"
 	"time"
 )
 
-// BatchWriter for high-throughput writes
+// BatchWriter for high-throughput writes with minimal memory allocation
 type BatchWriter struct {
 	db      *DB
-	entries []*Entry
+	entries []Entry // Value type instead of pointer to reduce GC pressure
 	mutex   sync.Mutex
-	size    int
 	maxSize int
+	crcBuf  []byte // Reusable buffer for checksum computation
 }
 
 func (db *DB) NewBatchWriter(maxSize int) *BatchWriter {
 	return &BatchWriter{
 		db:      db,
-		entries: make([]*Entry, 0, maxSize),
+		entries: make([]Entry, 0, maxSize),
 		maxSize: maxSize,
+		crcBuf:  make([]byte, 0, 4096), // Reusable buffer
 	}
 }
 
@@ -27,19 +30,22 @@ func (bw *BatchWriter) Put(key, value []byte) error {
 	bw.mutex.Lock()
 	defer bw.mutex.Unlock()
 
-	entry := &Entry{
-		Key:       append([]byte{}, key...),
-		Value:     append([]byte{}, value...),
+	// Grow slice in-place, avoid pointer allocation
+	bw.entries = append(bw.entries, Entry{
+		Key:       append([]byte(nil), key...),
+		Value:     append([]byte(nil), value...),
 		Timestamp: uint64(time.Now().UnixNano()),
 		Deleted:   false,
-	}
-	// compute checksum early so it's present even if flush occurs immediately
-	entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
+	})
 
-	bw.entries = append(bw.entries, entry)
-	bw.size++
+	// Compute checksum using reusable buffer
+	idx := len(bw.entries) - 1
+	entry := &bw.entries[idx]
+	bw.crcBuf = append(bw.crcBuf[:0], entry.Key...)
+	bw.crcBuf = append(bw.crcBuf, entry.Value...)
+	entry.checksum = crc32.ChecksumIEEE(bw.crcBuf)
 
-	if bw.size >= bw.maxSize {
+	if len(bw.entries) >= bw.maxSize {
 		return bw.flushUnsafe()
 	}
 
@@ -53,40 +59,155 @@ func (bw *BatchWriter) Flush() error {
 }
 
 func (bw *BatchWriter) flushUnsafe() error {
-	if bw.size == 0 {
+	if len(bw.entries) == 0 {
 		return nil
 	}
 
-	// Ensure checksums are computed for each entry before writing to WAL
-	for _, entry := range bw.entries {
-		if entry.checksum == 0 {
-			if entry.Deleted {
-				entry.checksum = crc32.ChecksumIEEE(entry.Key)
-			} else {
-				entry.checksum = crc32.ChecksumIEEE(append(entry.Key, entry.Value...))
-			}
-		}
+	// Convert to pointer slice for WAL (required by interface)
+	ptrs := make([]*Entry, len(bw.entries))
+	for i := range bw.entries {
+		ptrs[i] = &bw.entries[i]
 	}
 
-	// Batch write to WAL
-	for _, entry := range bw.entries {
-		if err := bw.db.wal.Write(entry); err != nil {
-			return err
-		}
-	}
-	// Ensure WAL buffer is flushed to disk before proceeding
-	if err := bw.db.wal.Sync(); err != nil {
+	// Batch write to WAL with single sync
+	if err := bw.db.wal.WriteBatch(ptrs); err != nil {
 		return err
 	}
 
 	// Batch write to memtable
-	for _, entry := range bw.entries {
-		bw.db.memTable.Put(entry.Key, entry.Value)
+	for i := range bw.entries {
+		bw.db.memTable.Put(bw.entries[i].Key, bw.entries[i].Value)
 	}
 
-	// Reset batch
+	// Update search index if enabled
+	if bw.db.searchIndexEnabled {
+		bw.db.mutex.Lock()
+		additions := make(map[string][]uint64)
+		for i := range bw.entries {
+			entry := &bw.entries[i]
+			if isIndexKey(entry.Key) {
+				continue
+			}
+			prefix, schema := bw.db.schemaForKeyLocked(entry.Key)
+			if schema == nil {
+				continue
+			}
+			// Get or allocate docID
+			docID, exists, err := bw.db.getDocIDLocked(entry.Key)
+			if err != nil {
+				bw.db.mutex.Unlock()
+				return err
+			}
+			if exists {
+				if err := bw.db.removeIndexEntriesLocked(docID); err != nil {
+					bw.db.mutex.Unlock()
+					return err
+				}
+			} else {
+				docID, err = bw.db.allocateDocIDLocked(entry.Key)
+				if err != nil {
+					bw.db.mutex.Unlock()
+					return err
+				}
+			}
+			terms, hashes := buildIndexProjections(entry.Value, schema)
+			meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes}
+			metaBytes, err := json.Marshal(meta)
+			if err != nil {
+				bw.db.mutex.Unlock()
+				return err
+			}
+			if err := bw.db.put(indexMetaKey(docID), metaBytes); err != nil {
+				bw.db.mutex.Unlock()
+				return err
+			}
+			for _, term := range terms {
+				k := string(indexTermKey(prefix, term))
+				additions[k] = append(additions[k], docID)
+			}
+			for field, hash := range hashes {
+				k := string(indexHashKey(prefix, field, hash))
+				additions[k] = append(additions[k], docID)
+			}
+		}
+
+		for k, ids := range additions {
+			if len(ids) == 0 {
+				continue
+			}
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			ids = uniqueSorted(ids)
+			existing, _ := bw.db.getPostingListLocked([]byte(k))
+			merged := mergeSortedUnique(existing, ids)
+			if err := bw.db.put([]byte(k), encodePostingList(merged)); err != nil {
+				bw.db.mutex.Unlock()
+				return err
+			}
+		}
+
+		bw.db.mutex.Unlock()
+	}
+
+	// Reset batch - reuse underlying array
 	bw.entries = bw.entries[:0]
-	bw.size = 0
 
 	return nil
+}
+
+func uniqueSorted(ids []uint64) []uint64 {
+	if len(ids) <= 1 {
+		return ids
+	}
+	out := ids[:1]
+	for i := 1; i < len(ids); i++ {
+		if ids[i] != ids[i-1] {
+			out = append(out, ids[i])
+		}
+	}
+	return out
+}
+
+func mergeSortedUnique(a, b []uint64) []uint64 {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]uint64, 0, len(a)+len(b))
+	i, j := 0, 0
+	var last uint64
+	for i < len(a) && j < len(b) {
+		var v uint64
+		if a[i] == b[j] {
+			v = a[i]
+			i++
+			j++
+		} else if a[i] < b[j] {
+			v = a[i]
+			i++
+		} else {
+			v = b[j]
+			j++
+		}
+		if len(out) == 0 || v != last {
+			out = append(out, v)
+			last = v
+		}
+	}
+	for ; i < len(a); i++ {
+		v := a[i]
+		if len(out) == 0 || v != last {
+			out = append(out, v)
+			last = v
+		}
+	}
+	for ; j < len(b); j++ {
+		v := b[j]
+		if len(out) == 0 || v != last {
+			out = append(out, v)
+			last = v
+		}
+	}
+	return out
 }

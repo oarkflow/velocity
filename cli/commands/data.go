@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/oarkflow/velocity"
@@ -232,6 +233,194 @@ func DataExistsCommand(db *velocity.DB) velocitycli.CommandBuilder {
 }
 
 // -----------------------------
+// INDEXED PUT COMMAND
+// -----------------------------
+
+func DataIndexedPutCommand(db *velocity.DB) velocitycli.CommandBuilder {
+	return velocitycli.NewBaseCommand("index", "Store data with search indexing").
+		SetUsage("Store data and build search indexes").
+		SetPermission(velocitycli.PermissionUser).
+		AddFlags(
+			&cli.StringFlag{
+				Name:     "key",
+				Aliases:  []string{"k"},
+				Usage:    "Key name",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "value",
+				Aliases:  []string{"v"},
+				Usage:    "Value to store",
+				Required: true,
+			},
+			&cli.BoolFlag{
+				Name:    "json",
+				Aliases: []string{"j"},
+				Usage:   "Parse value as JSON",
+				Value:   false,
+			},
+			&cli.StringFlag{
+				Name:  "schema",
+				Usage: "JSON schema for indexing (SearchSchema)",
+			},
+			&cli.StringFlag{
+				Name:  "prefix",
+				Usage: "Prefix namespace for schema (e.g. users)",
+			},
+		).
+		SetAction(func(ctx context.Context, c *cli.Command) error {
+			key := c.String("key")
+			value := c.String("value")
+			isJSON := c.Bool("json")
+			schemaRaw := c.String("schema")
+			prefix := c.String("prefix")
+
+			var data []byte
+			if isJSON {
+				if !json.Valid([]byte(value)) {
+					return fmt.Errorf("invalid JSON value")
+				}
+				data = []byte(value)
+			} else {
+				data = []byte(value)
+			}
+
+			var schema *velocity.SearchSchema
+			if strings.TrimSpace(schemaRaw) != "" {
+				var parsed velocity.SearchSchema
+				if err := json.Unmarshal([]byte(schemaRaw), &parsed); err != nil {
+					return fmt.Errorf("invalid schema JSON: %w", err)
+				}
+				schema = &parsed
+			}
+
+			if schema != nil {
+				if strings.TrimSpace(prefix) != "" {
+					db.SetSearchSchemaForPrefix(prefix, schema)
+				} else {
+					db.SetSearchSchema(schema)
+				}
+				db.EnableSearchIndex(true)
+			}
+			if err := db.Put([]byte(key), data); err != nil {
+				return fmt.Errorf("failed to store indexed data: %w", err)
+			}
+
+			fmt.Fprintf(c.Root().Writer, "✓ Indexed key '%s' (size: %d bytes)\n", key, len(data))
+			return nil
+		})
+}
+
+// -----------------------------
+// SEARCH COMMAND
+// -----------------------------
+
+func DataSearchCommand(db *velocity.DB) velocitycli.CommandBuilder {
+	return velocitycli.NewBaseCommand("search", "Search indexed data").
+		SetUsage("Search values using full-text and filters").
+		SetPermission(velocitycli.PermissionUser).
+		AddFlags(
+			&cli.StringFlag{
+				Name:  "text",
+				Usage: "Full-text search query",
+			},
+			&cli.StringFlag{
+				Name:  "prefix",
+				Usage: "Key prefix namespace to search within",
+			},
+			&cli.StringSliceFlag{
+				Name:  "filter",
+				Usage: "Filter expression (field==value, field>=value, etc). Repeatable.",
+			},
+			&cli.StringSliceFlag{
+				Name:  "hash-field",
+				Usage: "Field names to use hash equality index (repeatable)",
+			},
+			&cli.IntFlag{
+				Name:  "limit",
+				Usage: "Maximum results",
+				Value: 100,
+			},
+			&cli.BoolFlag{
+				Name:  "json",
+				Usage: "Output results as JSON",
+				Value: false,
+			},
+		).
+		SetAction(func(ctx context.Context, c *cli.Command) error {
+			text := c.String("text")
+			filters := c.StringSlice("filter")
+			hashFields := map[string]bool{}
+			for _, f := range c.StringSlice("hash-field") {
+				hashFields[f] = true
+			}
+			limit := c.Int("limit")
+			asJSON := c.Bool("json")
+
+			query := velocity.SearchQuery{Prefix: c.String("prefix"), FullText: text, Limit: limit}
+			for _, raw := range filters {
+				field, op, val, err := parseFilterExpr(raw)
+				if err != nil {
+					return err
+				}
+				query.Filters = append(query.Filters, velocity.SearchFilter{
+					Field:    field,
+					Op:       op,
+					Value:    val,
+					HashOnly: hashFields[field],
+				})
+			}
+
+			results, err := db.Search(query)
+			if err != nil {
+				return err
+			}
+
+			if asJSON {
+				out := make([]map[string]string, 0, len(results))
+				for _, r := range results {
+					out = append(out, map[string]string{
+						"key":   string(r.Key),
+						"value": string(r.Value),
+					})
+				}
+				encoded, _ := json.MarshalIndent(out, "", "  ")
+				fmt.Fprintf(c.Root().Writer, "%s\n", string(encoded))
+				return nil
+			}
+
+			fmt.Fprintf(c.Root().Writer, "Found %d results:\n", len(results))
+			for i, r := range results {
+				fmt.Fprintf(c.Root().Writer, "%d. %s => %s\n", i+1, string(r.Key), string(r.Value))
+			}
+			return nil
+		})
+}
+
+func parseFilterExpr(raw string) (string, string, any, error) {
+	ops := []string{"!=", ">=", "<=", "==", "=", ">", "<"}
+	for _, op := range ops {
+		if idx := strings.Index(raw, op); idx > 0 {
+			field := strings.TrimSpace(raw[:idx])
+			valRaw := strings.TrimSpace(raw[idx+len(op):])
+			if field == "" || valRaw == "" {
+				return "", "", nil, fmt.Errorf("invalid filter: %s", raw)
+			}
+			return field, op, parseFilterValue(valRaw), nil
+		}
+	}
+	return "", "", nil, fmt.Errorf("invalid filter: %s", raw)
+}
+
+func parseFilterValue(raw string) any {
+	var v any
+	if json.Unmarshal([]byte(raw), &v) == nil {
+		return v
+	}
+	return raw
+}
+
+// -----------------------------
 // ROOT DATA COMMAND
 // -----------------------------
 
@@ -246,6 +435,8 @@ func DataCommands(db *velocity.DB) velocitycli.CommandBuilder {
 	cmd.AddSubcommand(DataDeleteCommand(db))
 	cmd.AddSubcommand(DataListCommand(db))
 	cmd.AddSubcommand(DataExistsCommand(db))
+	cmd.AddSubcommand(DataIndexedPutCommand(db))
+	cmd.AddSubcommand(DataSearchCommand(db))
 
 	return cmd
 }

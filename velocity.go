@@ -66,6 +66,11 @@ type DB struct {
 	masterKeyManager *MasterKeyManager
 	masterKey        []byte // Store the master key
 
+	// Search indexing
+	searchSchema       *SearchSchema
+	searchIndexEnabled bool
+	searchSchemas      map[string]*SearchSchema
+
 	// Graceful shutdown
 	closed     atomic.Bool
 	shutdownCh chan struct{}
@@ -143,6 +148,9 @@ type Config struct {
 	MaxUploadSize     int64           // bytes; 0 means use default
 	MasterKeyConfig   MasterKeyConfig // New: flexible master key configuration
 	DeviceFingerprint bool            // Enable device fingerprint validation
+	SearchSchema      *SearchSchema   // Optional schema for auto-indexing on Put/Delete
+	SearchIndexEnabled bool           // Enable hybrid index updates on Put/Delete
+	SearchSchemas     map[string]*SearchSchema // Optional per-prefix schemas
 }
 
 const (
@@ -237,9 +245,15 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		cache:            nil,
 		crypto:           cryptoProvider,
 		MaxUploadSize:    cfg.MaxUploadSize,
+		searchSchema:     cfg.SearchSchema,
+		searchIndexEnabled: cfg.SearchIndexEnabled || cfg.SearchSchema != nil,
+		searchSchemas:    cfg.SearchSchemas,
 		masterKeyManager: masterKeyManager,
 		masterKey:        key,
 		shutdownCh:       make(chan struct{}),
+	}
+	if len(db.searchSchemas) > 0 {
+		db.searchIndexEnabled = true
 	}
 	// Initialize compliance tag manager
 	db.complianceTagManager = NewComplianceTagManager(db)
@@ -354,6 +368,12 @@ func (db *DB) SetPerformanceMode(mode string) {
 func (db *DB) Put(key, value []byte) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
+	if db.searchIndexEnabled && !isIndexKey(key) {
+		_, schema := db.schemaForKeyLocked(key)
+		if schema != nil {
+			return db.putIndexedLocked(key, value, schema)
+		}
+	}
 	return db.put(key, value)
 }
 
@@ -517,32 +537,10 @@ func (db *DB) get(key []byte) ([]byte, error) {
 func (db *DB) Delete(key []byte) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
-
-	entry := &Entry{
-		Key:       append([]byte{}, key...),
-		Value:     nil,
-		Timestamp: uint64(time.Now().UnixNano()),
-		Deleted:   true,
+	if db.searchIndexEnabled && !isIndexKey(key) {
+		return db.deleteIndexedLocked(key)
 	}
-
-	// Compute checksum for tombstone
-	entry.checksum = crc32.ChecksumIEEE(entry.Key)
-
-	if db.wal == nil {
-		return fmt.Errorf("WAL is not initialized")
-	}
-	err := db.wal.Write(entry)
-	if err != nil {
-		return err
-	}
-
-	db.memTable.Delete(key)
-
-	if db.cache != nil {
-		db.cache.Remove(string(key))
-	}
-
-	return nil
+	return db.deleteLocked(key)
 }
 
 func (db *DB) flushMemTable() error {
@@ -616,7 +614,9 @@ func (db *DB) Close() error {
 
 	// Flush memtable to ensure all data is persisted
 	if db.memTable != nil && db.wal != nil {
-		db.flushMemTable()
+		if err := db.flushMemTable(); err != nil {
+			log.Printf("velocity: memtable flush failed during close: %v", err)
+		}
 	}
 
 	db.mutex.RLock()

@@ -198,7 +198,89 @@ velocity/
 ├── object_storage.go           # Hierarchical object storage
 ├── backup_security.go          # Secure backup system
 ├── master_key_manager.go       # Flexible key management
-└── ...
+```
+---
+
+## 🔎 Hybrid Full-Text + Equality Search (Usage Example)
+
+```go
+db, _ := velocity.NewWithConfig(velocity.Config{Path: "./vault"})
+defer db.Close()
+
+// Schema: full-text on age/location, hash-only on email
+schema := &velocity.SearchSchema{Fields: []velocity.SearchSchemaField{
+    {Name: "email", Searchable: false, HashSearch: true},
+    {Name: "age", Searchable: true, HashSearch: false},
+    {Name: "location", Searchable: true, HashSearch: true},
+}}
+
+payload := []byte(`{"email":"test@example.com","age":31,"location":"london","name":"John Doe"}`)
+db.SetSearchSchemaForPrefix("users", schema)
+db.EnableSearchIndex(false) // fast ingest mode
+_ = db.Put([]byte("users:1"), payload)
+_ = db.RebuildIndex("users", schema, &velocity.RebuildOptions{BatchSize: 5000})
+db.EnableSearchIndex(true)
+
+// Equality (hash) + full-text search
+results, _ := db.Search(velocity.SearchQuery{
+    Prefix: "users",
+    FullText: "john",
+    Filters: []velocity.SearchFilter{
+        {Field: "email", Op: "==", Value: "test@example.com", HashOnly: true},
+        {Field: "age", Op: ">", Value: 20},
+    },
+    Limit: 50,
+})
+
+for _, r := range results {
+    fmt.Println(string(r.Key), string(r.Value))
+}
+```
+
+CLI:
+
+```
+velocity data index --key users:1 --value '{"email":"test@example.com","age":31,"location":"london","name":"John Doe"}' \
+    --json \
+    --schema '{"fields":[{"name":"email","searchable":false,"hashSearch":true},{"name":"age","searchable":true},{"name":"location","searchable":true,"hashSearch":true}]}' \
+    --prefix users
+
+velocity data search --prefix users --text john --filter 'age>20' --filter 'email==test@example.com' --hash-field email
+```
+
+API:
+
+```
+
+Large-scale example (millions of generated records):
+
+See [examples/search_index_large_demo.go](examples/search_index_large_demo.go). It generates 1,000,000 records by default.
+
+Environment variables:
+- VELOCITY_RECORDS: override record count (e.g. 2000000)
+- VELOCITY_DEMO_DB: override demo DB path
+
+Long-running test (build tag):
+
+See [search_index_large_test.go](search_index_large_test.go). Run with the build tag `velocity_longtests` and optional `VELOCITY_RECORDS`.
+POST /api/indexed
+{
+    "key": "users:1",
+    "prefix": "users",
+    "value": {"email":"test@example.com","age":31,"location":"london","name":"John Doe"},
+    "schema": {"fields":[{"name":"email","searchable":false,"hashSearch":true},{"name":"age","searchable":true},{"name":"location","searchable":true,"hashSearch":true}]}
+}
+
+POST /api/search
+{
+    "prefix": "users",
+    "fullText": "john",
+    "filters": [
+        {"field":"email","op":"==","value":"test@example.com","hashOnly":true},
+        {"field":"age","op":">","value":20}
+    ],
+    "limit": 50
+}
 ```
 
 ---

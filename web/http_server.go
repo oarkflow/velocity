@@ -93,6 +93,8 @@ func (s *HTTPServer) setupRoutes() {
 	api.Post("/put", s.handlePut)
 	api.Get("/get/:key", s.handleGet)
 	api.Delete("/delete/:key", s.handleDelete)
+	api.Post("/indexed", s.handlePutIndexed)
+	api.Post("/search", s.handleSearch)
 
 	api.Post("/put", s.handlePut)
 	api.Get("/get/:key", s.handleGet)
@@ -285,6 +287,105 @@ func (s *HTTPServer) handleDelete(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"status": "ok",
+	})
+}
+
+func (s *HTTPServer) handlePutIndexed(c *fiber.Ctx) error {
+	var req map[string]any
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
+	}
+
+	key, _ := req["key"].(string)
+	if strings.TrimSpace(key) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "Key is required")
+	}
+	prefix, _ := req["prefix"].(string)
+
+	var schema *velocity.SearchSchema
+	if rawSchema, ok := req["schema"]; ok {
+		if b, err := json.Marshal(rawSchema); err == nil {
+			var parsed velocity.SearchSchema
+			if err := json.Unmarshal(b, &parsed); err == nil {
+				schema = &parsed
+			}
+		}
+	}
+
+	valueRaw, ok := req["value"]
+	if !ok {
+		return fiber.NewError(fiber.StatusBadRequest, "Value is required")
+	}
+	var valueBytes []byte
+	switch v := valueRaw.(type) {
+	case string:
+		valueBytes = []byte(v)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "Invalid value")
+		}
+		valueBytes = b
+	}
+
+	if schema != nil {
+		if strings.TrimSpace(prefix) != "" {
+			s.db.SetSearchSchemaForPrefix(prefix, schema)
+		} else {
+			s.db.SetSearchSchema(schema)
+		}
+		s.db.EnableSearchIndex(true)
+	}
+	if err := s.db.Put([]byte(key), valueBytes); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+func (s *HTTPServer) handleSearch(c *fiber.Ctx) error {
+	var req struct {
+		Prefix  string `json:"prefix"`
+		FullText string `json:"fullText"`
+		Filters  []struct {
+			Field    string      `json:"field"`
+			Op       string      `json:"op"`
+			Value    interface{} `json:"value"`
+			HashOnly bool        `json:"hashOnly"`
+		} `json:"filters"`
+		Limit int `json:"limit"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
+	}
+
+	query := velocity.SearchQuery{Prefix: req.Prefix, FullText: req.FullText, Limit: req.Limit}
+	for _, f := range req.Filters {
+		query.Filters = append(query.Filters, velocity.SearchFilter{
+			Field:    f.Field,
+			Op:       f.Op,
+			Value:    f.Value,
+			HashOnly: f.HashOnly,
+		})
+	}
+
+	results, err := s.db.Search(query)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
+	}
+
+	resp := make([]fiber.Map, 0, len(results))
+	for _, r := range results {
+		resp = append(resp, fiber.Map{
+			"key":   string(r.Key),
+			"value": string(r.Value),
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"count":   len(resp),
+		"results": resp,
 	})
 }
 
