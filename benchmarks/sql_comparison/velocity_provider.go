@@ -38,7 +38,8 @@ func (p *VelocityProvider) Setup(ctx context.Context) error {
 	if p.useSQL {
 		// Use the DSN configuration for the SQL driver
 		sqldriver.DSNConfigs[p.path] = velocity.Config{
-			Path: p.path,
+			Path:            p.path,
+			PerformanceMode: "performance",
 			SearchSchemas: map[string]*velocity.SearchSchema{
 				"users": {
 					Fields: []velocity.SearchSchemaField{
@@ -56,7 +57,10 @@ func (p *VelocityProvider) Setup(ctx context.Context) error {
 		}
 		p.sqlDB = db
 	} else {
-		db, err := velocity.New(p.path)
+		db, err := velocity.NewWithConfig(velocity.Config{
+			Path:            p.path,
+			PerformanceMode: "performance",
+		})
 		if err != nil {
 			return err
 		}

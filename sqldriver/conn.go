@@ -3,6 +3,7 @@ package sqldriver
 import (
 	"context"
 	"database/sql/driver"
+	"sync"
 
 	"github.com/oarkflow/velocity"
 	"github.com/xwb1989/sqlparser"
@@ -13,6 +14,9 @@ import (
 type Conn struct {
 	db *velocity.DB
 	tx *velocity.BatchWriter
+
+	stmtMu    sync.RWMutex
+	stmtCache map[string]sqlparser.Statement
 }
 
 // Prepare returns a prepared statement, bound to this connection.
@@ -22,7 +26,7 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 
 // PrepareContext returns a prepared statement, bound to this connection.
 func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
-	stmt, err := sqlparser.Parse(query)
+	stmt, err := c.getOrParseStatement(query)
 	if err != nil {
 		return nil, err
 	}
@@ -34,11 +38,38 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 	}, nil
 }
 
+func (c *Conn) getOrParseStatement(query string) (sqlparser.Statement, error) {
+	c.stmtMu.RLock()
+	if c.stmtCache != nil {
+		if stmt, ok := c.stmtCache[query]; ok {
+			c.stmtMu.RUnlock()
+			return stmt, nil
+		}
+	}
+	c.stmtMu.RUnlock()
+
+	stmt, err := sqlparser.Parse(query)
+	if err != nil {
+		return nil, err
+	}
+
+	c.stmtMu.Lock()
+	if c.stmtCache == nil {
+		c.stmtCache = make(map[string]sqlparser.Statement)
+	}
+	c.stmtCache[query] = stmt
+	c.stmtMu.Unlock()
+	return stmt, nil
+}
+
 // Close invalidates and potentially stops any current
 // prepared statements and transactions, marking this
 // connection as no longer in use.
 func (c *Conn) Close() error {
 	c.db = nil
+	c.stmtMu.Lock()
+	c.stmtCache = nil
+	c.stmtMu.Unlock()
 	return nil
 }
 

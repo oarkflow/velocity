@@ -150,6 +150,7 @@ type Config struct {
 	EncryptionKey      []byte
 	MasterKey          []byte                   // If provided and valid, use this as the master key
 	MaxUploadSize      int64                    // bytes; 0 means use default
+	PerformanceMode    string                   // "performance", "balanced", "aggressive"
 	MasterKeyConfig    MasterKeyConfig          // New: flexible master key configuration
 	DeviceFingerprint  bool                     // Enable device fingerprint validation
 	SearchSchema       *SearchSchema            // Optional schema for auto-indexing on Put/Delete
@@ -324,6 +325,10 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	// Register DB for graceful shutdown on signals
 	registerDB(db)
 
+	if cfg.PerformanceMode != "" {
+		db.SetPerformanceMode(cfg.PerformanceMode)
+	}
+
 	// Start background compaction
 	go db.compactionLoop()
 
@@ -352,6 +357,7 @@ func (db *DB) SetPerformanceMode(mode string) {
 	var cacheMode string
 	var walBuf int
 	var walInterval time.Duration
+	var syncOnWrite bool
 
 	switch mode {
 	case "performance":
@@ -359,22 +365,26 @@ func (db *DB) SetPerformanceMode(mode string) {
 		cacheMode = "performance"
 		walBuf = 8 * 1024 * 1024
 		walInterval = 200 * time.Millisecond
+		syncOnWrite = false
 	case "balanced":
 		memSize = 32 * 1024 * 1024 // 32MB
 		cacheMode = "balanced"
 		walBuf = 1 * 1024 * 1024
 		walInterval = 1 * time.Second
+		syncOnWrite = true
 	case "aggressive":
 		memSize = 16 * 1024 * 1024 // 16MB
 		cacheMode = "aggressive"
 		walBuf = 512 * 1024
 		walInterval = 2 * time.Second
+		syncOnWrite = true
 	default:
 		// fall back to balanced
 		memSize = 32 * 1024 * 1024
 		cacheMode = "balanced"
 		walBuf = 1 * 1024 * 1024
 		walInterval = 1 * time.Second
+		syncOnWrite = true
 	}
 
 	// Apply the memtable sizing under lock
@@ -389,6 +399,7 @@ func (db *DB) SetPerformanceMode(mode string) {
 	if db.wal != nil {
 		db.wal.SetBufferSize(walBuf)
 		db.wal.SetSyncInterval(walInterval)
+		db.wal.SetSyncOnWrite(syncOnWrite)
 	}
 }
 

@@ -24,6 +24,9 @@ type WAL struct {
 	stopChan chan struct{}
 	closed   bool
 	crypto   *CryptoProvider
+	// syncOnWrite enforces fsync on every Write/WriteBatch call.
+	// When false, writes are group-committed by the periodic sync loop.
+	syncOnWrite bool
 
 	// Async flush channel
 	flushChan chan *bytes.Buffer
@@ -50,12 +53,13 @@ func NewWAL(path string, crypto *CryptoProvider) (*WAL, error) {
 	}
 
 	wal := &WAL{
-		file:      file,
-		buffer:    bytes.NewBuffer(make([]byte, 0, WALBufferSize)),
-		ticker:    time.NewTicker(WALSyncInterval),
-		stopChan:  make(chan struct{}),
-		crypto:    crypto,
-		flushChan: make(chan *bytes.Buffer, 2),
+		file:        file,
+		buffer:      bytes.NewBuffer(make([]byte, 0, WALBufferSize)),
+		ticker:      time.NewTicker(WALSyncInterval),
+		stopChan:    make(chan struct{}),
+		crypto:      crypto,
+		flushChan:   make(chan *bytes.Buffer, 2),
+		syncOnWrite: true,
 		// defaults: rotation disabled
 		rotationThreshold: 0,
 		archiveDir:        "",
@@ -125,11 +129,11 @@ func (w *WAL) Write(entry *Entry) error {
 	binary.Write(w.buffer, binary.LittleEndian, deleted)
 	binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
 
-	// Always sync immediately for data safety - ensures durability
-	// This is critical for preventing data loss on unexpected shutdown
-	if err := w.syncUnsafe(); err != nil {
-		w.mutex.Unlock()
-		return err
+	if w.syncOnWrite || w.buffer.Len() >= w.buffer.Cap() {
+		if err := w.syncUnsafe(); err != nil {
+			w.mutex.Unlock()
+			return err
+		}
 	}
 	w.mutex.Unlock()
 
@@ -174,8 +178,10 @@ func (w *WAL) WriteBatch(entries []*Entry) error {
 		binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
 	}
 
-	// Single sync after all entries are written
-	return w.syncUnsafe()
+	if w.syncOnWrite || w.buffer.Len() >= w.buffer.Cap() {
+		return w.syncUnsafe()
+	}
+	return nil
 }
 
 func (w *WAL) syncLoop() {
@@ -346,6 +352,13 @@ func (w *WAL) SetSyncInterval(d time.Duration) {
 		w.ticker.Stop()
 	}
 	w.ticker = time.NewTicker(d)
+}
+
+// SetSyncOnWrite toggles per-write fsync behavior.
+func (w *WAL) SetSyncOnWrite(enabled bool) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.syncOnWrite = enabled
 }
 
 // Truncate truncates the WAL file to zero length after ensuring data has been flushed.

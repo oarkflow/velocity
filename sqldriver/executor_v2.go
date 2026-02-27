@@ -17,6 +17,13 @@ type ExecutorV2 struct {
 	conn *Conn
 }
 
+const maxSearchLimit = int(^uint(0) >> 1)
+
+type putOperation struct {
+	key   []byte
+	value []byte
+}
+
 func (e *ExecutorV2) Execute(ctx context.Context, stmt sqlparser.Statement, args []driver.NamedValue) (driver.Result, error) {
 	switch n := stmt.(type) {
 	case *sqlparser.Insert:
@@ -44,8 +51,9 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *sqlparser.Insert, arg
 
 	eval := &Evaluator{Args: args}
 	inserted := int64(0)
+	puts := make([]putOperation, 0, len(rows))
 
-	for _, row := range rows {
+	for i, row := range rows {
 		data := make(map[string]interface{})
 		for i, expr := range row {
 			if i >= len(cols) {
@@ -63,14 +71,17 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *sqlparser.Insert, arg
 		key := fmt.Sprintf("%s:%d", tableName, time.Now().UnixNano())
 		if id, has := data["id"]; has {
 			key = fmt.Sprintf("%s:%v", tableName, id)
+		} else if len(rows) > 1 {
+			key = fmt.Sprintf("%s:%d:%d", tableName, time.Now().UnixNano(), i)
 		}
 
 		payload, _ := json.Marshal(data)
-		err := e.conn.Put([]byte(key), payload)
-		if err != nil {
-			return nil, err
-		}
+		puts = append(puts, putOperation{key: []byte(key), value: payload})
 		inserted++
+	}
+
+	if err := e.applyPutOperations(puts); err != nil {
+		return nil, err
 	}
 
 	return &Result{rowsAffected: inserted}, nil
@@ -103,6 +114,7 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *sqlparser.Update, arg
 	eval := &Evaluator{Args: args}
 
 	// Apply SET logic across result maps
+	puts := make([]putOperation, 0, len(internalRows.results))
 	for _, res := range internalRows.results {
 		var doc map[string]interface{}
 		if err := json.Unmarshal(res.Value, &doc); err != nil {
@@ -120,10 +132,12 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *sqlparser.Update, arg
 		}
 
 		newPayload, _ := json.Marshal(doc)
-		err = e.conn.Put(res.Key, newPayload)
-		if err == nil {
-			updatedCount++
-		}
+		puts = append(puts, putOperation{key: res.Key, value: newPayload})
+		updatedCount++
+	}
+
+	if err := e.applyPutOperations(puts); err != nil {
+		return nil, err
 	}
 
 	return &Result{rowsAffected: updatedCount}, nil
@@ -148,11 +162,14 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *sqlparser.Delete, arg
 		return nil, err
 	}
 
+	keys := make([][]byte, 0, len(internalRows.results))
 	for _, res := range internalRows.results {
-		err = e.conn.Delete(res.Key)
-		if err == nil {
-			deletedCount++
-		}
+		keys = append(keys, res.Key)
+		deletedCount++
+	}
+
+	if err := e.applyDeleteOperations(keys); err != nil {
+		return nil, err
 	}
 
 	return &Result{rowsAffected: deletedCount}, nil
@@ -216,6 +233,16 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *sqlparser.Sel
 	if sel.Where != nil {
 		filters = e.extractFilters(sel.Where.Expr, args)
 	}
+	if hasJoinTableExpr(sel.From) {
+		// Avoid pushing down mixed-table predicates into each side of a join.
+		// The row-level FilterIterator evaluates the full WHERE clause after join assembly.
+		filters = nil
+	}
+	if rows, ok, err := e.tryFastCountSelect(sel, filters); ok {
+		return rows, err
+	}
+
+	queryLimit := e.extractLimit(sel.Limit, args)
 
 	// 1. Map Table Expressions (FROM ...)
 	var rootIter Iterator
@@ -223,7 +250,7 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *sqlparser.Sel
 
 	// Usually SQL parser returns `TableExprs` slices
 	for _, expr := range sel.From {
-		iter, tableErr := e.buildTableExprIterator(ctx, expr, args, filters)
+		iter, tableErr := e.buildTableExprIterator(ctx, expr, args, filters, queryLimit)
 		if tableErr != nil {
 			return nil, tableErr
 		}
@@ -390,7 +417,7 @@ func rowToJSONBytes(r Row) []byte {
 	return b
 }
 
-func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.TableExpr, args []driver.NamedValue, filters []velocity.SearchFilter) (Iterator, error) {
+func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.TableExpr, args []driver.NamedValue, filters []velocity.SearchFilter, limit int) (Iterator, error) {
 	switch t := expr.(type) {
 	case *sqlparser.AliasedTableExpr:
 		if subq, isSub := t.Expr.(*sqlparser.Subquery); isSub {
@@ -409,16 +436,19 @@ func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.
 
 		// Try to extract velocity parameters if we can, otherwise Scan ALL and rely on Filter Iterator.
 		// For optimal performance, we would inject filters from the AST down into velocity.SearchQuery here.
-		q := velocity.SearchQuery{Prefix: tableName, Limit: 1000, Filters: filters}
+		if limit <= 0 {
+			limit = maxSearchLimit
+		}
+		q := velocity.SearchQuery{Prefix: tableName, Limit: limit, Filters: filters}
 
 		return NewTableScanIterator(e.conn.db, alias, q)
 
 	case *sqlparser.JoinTableExpr:
-		leftIter, err := e.buildTableExprIterator(ctx, t.LeftExpr, args, filters)
+		leftIter, err := e.buildTableExprIterator(ctx, t.LeftExpr, args, filters, limit)
 		if err != nil {
 			return nil, err
 		}
-		rightIter, err := e.buildTableExprIterator(ctx, t.RightExpr, args, filters)
+		rightIter, err := e.buildTableExprIterator(ctx, t.RightExpr, args, filters, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -525,4 +555,167 @@ func (e *ExecutorV2) buildJoinCondition(cond sqlparser.JoinCondition, args []dri
 		}
 		return res
 	}
+}
+
+func hasJoinTableExpr(exprs sqlparser.TableExprs) bool {
+	for _, expr := range exprs {
+		if hasJoinInTableExpr(expr) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasJoinInTableExpr(expr sqlparser.TableExpr) bool {
+	switch t := expr.(type) {
+	case *sqlparser.JoinTableExpr:
+		return true
+	case *sqlparser.ParenTableExpr:
+		for _, inner := range t.Exprs {
+			if hasJoinInTableExpr(inner) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *ExecutorV2) applyPutOperations(ops []putOperation) error {
+	if len(ops) == 0 {
+		return nil
+	}
+
+	if e.conn.tx != nil {
+		for _, op := range ops {
+			if err := e.conn.Put(op.key, op.value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	bw := e.conn.db.NewBatchWriter(len(ops))
+	for _, op := range ops {
+		if err := bw.Put(op.key, op.value); err != nil {
+			return err
+		}
+	}
+	return bw.Flush()
+}
+
+func (e *ExecutorV2) applyDeleteOperations(keys [][]byte) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	if e.conn.tx != nil {
+		for _, key := range keys {
+			if err := e.conn.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	bw := e.conn.db.NewBatchWriter(len(keys))
+	for _, key := range keys {
+		if err := bw.Delete(key); err != nil {
+			return err
+		}
+	}
+	return bw.Flush()
+}
+
+func (e *ExecutorV2) extractLimit(limit *sqlparser.Limit, args []driver.NamedValue) int {
+	if limit == nil || limit.Rowcount == nil {
+		return maxSearchLimit
+	}
+
+	eval := &Evaluator{Args: args}
+	raw, err := eval.Eval(limit.Rowcount, nil)
+	if err != nil {
+		return maxSearchLimit
+	}
+
+	switch v := raw.(type) {
+	case int:
+		if v > 0 {
+			return v
+		}
+	case int32:
+		if v > 0 {
+			return int(v)
+		}
+	case int64:
+		if v > 0 && v <= int64(maxSearchLimit) {
+			return int(v)
+		}
+	case float64:
+		if v > 0 && v <= float64(maxSearchLimit) {
+			return int(v)
+		}
+	}
+	return maxSearchLimit
+}
+
+func (e *ExecutorV2) tryFastCountSelect(sel *sqlparser.Select, filters []velocity.SearchFilter) (*Rows, bool, error) {
+	if hasJoinTableExpr(sel.From) || len(sel.From) != 1 {
+		return nil, false, nil
+	}
+
+	var colName string
+	if !isCountOnlySelect(sel.SelectExprs, &colName) {
+		return nil, false, nil
+	}
+
+	tableName, ok := tableNameFromExpr(sel.From[0])
+	if !ok {
+		return nil, false, nil
+	}
+
+	results, err := e.conn.db.Search(velocity.SearchQuery{
+		Prefix:  tableName,
+		Filters: filters,
+		Limit:   maxSearchLimit,
+	})
+	if err != nil {
+		return nil, true, err
+	}
+
+	return &Rows{
+		columns: []string{colName},
+		rowMaps: []Row{{colName: int64(len(results))}},
+		cursor:  0,
+	}, true, nil
+}
+
+func isCountOnlySelect(exprs sqlparser.SelectExprs, colName *string) bool {
+	if len(exprs) != 1 {
+		return false
+	}
+	aliased, ok := exprs[0].(*sqlparser.AliasedExpr)
+	if !ok {
+		return false
+	}
+	fn, ok := aliased.Expr.(*sqlparser.FuncExpr)
+	if !ok || !strings.EqualFold(fn.Name.String(), "count") {
+		return false
+	}
+	if !aliased.As.IsEmpty() {
+		*colName = aliased.As.String()
+	} else {
+		*colName = sqlparser.String(aliased.Expr)
+	}
+	return true
+}
+
+func tableNameFromExpr(expr sqlparser.TableExpr) (string, bool) {
+	aliased, ok := expr.(*sqlparser.AliasedTableExpr)
+	if !ok {
+		return "", false
+	}
+	if _, isSub := aliased.Expr.(*sqlparser.Subquery); isSub {
+		return "", false
+	}
+	return sqlparser.String(aliased.Expr), true
 }

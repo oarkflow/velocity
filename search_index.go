@@ -531,7 +531,9 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 					return nil, err
 				}
 				if ids == nil {
-					return nil, nil
+					// Hash index is not available for this field/value.
+					// Fall back to scan-based evaluation instead of returning an empty result set.
+					continue
 				}
 				if candidates == nil {
 					candidates = ids
@@ -578,28 +580,69 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 
 func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 	results := make([]SearchResult, 0, min(q.Limit, 100))
-	pattern := q.Prefix + "*"
-	if q.Prefix == "" {
-		pattern = "*"
-	}
-	keys, _ := db.keysLocked(pattern)
 
-	for _, k := range keys {
-		kb := []byte(k)
-		if bytes.HasPrefix(kb, []byte(indexPrefix)) {
-			continue
+	seen := make(map[string]struct{})
+	now := time.Now().UnixNano()
+
+	addCandidate := func(key, value []byte) bool {
+		if bytes.HasPrefix(key, []byte(indexPrefix)) {
+			return false
 		}
-		if q.Prefix != "" && !prefixMatch(k, q.Prefix) {
-			continue
+		keyStr := string(key)
+		if q.Prefix != "" && !prefixMatch(keyStr, q.Prefix) {
+			return false
 		}
-		value, err := db.get(kb)
-		if err != nil {
-			continue
+		if _, exists := seen[keyStr]; exists {
+			return false
 		}
-		if matchesQuery(value, q) {
-			results = append(results, SearchResult{Key: append([]byte{}, kb...), Value: append([]byte{}, value...)})
-			if len(results) >= q.Limit {
-				return results, nil
+		seen[keyStr] = struct{}{}
+		if !matchesQuery(value, q) {
+			return false
+		}
+		results = append(results, SearchResult{
+			Key:   append([]byte{}, key...),
+			Value: append([]byte{}, value...),
+		})
+		return len(results) >= q.Limit
+	}
+
+	// Scan memtable first: most recent values take precedence.
+	db.memTable.entries.Range(func(k, v any) bool {
+		e := v.(*Entry)
+		if e.Deleted {
+			return true
+		}
+		if e.ExpiresAt != 0 && now > int64(e.ExpiresAt) {
+			return true
+		}
+		return !addCandidate(e.Key, e.Value)
+	})
+	if len(results) >= q.Limit {
+		return results, nil
+	}
+
+	// Scan SSTables without materializing/sorting all keys.
+	for _, level := range db.levels {
+		for _, sst := range level {
+			idxPos := uint32(0)
+			for i := 0; i < sst.entryCount; i++ {
+				entry, err := sst.readIndexEntryAt(idxPos)
+				if err != nil {
+					break
+				}
+				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				idxPos += uint32(idxEntrySize)
+
+				if entryIsDeletedInMemTable(db.memTable, entry.Key) {
+					continue
+				}
+				value, err := db.get(entry.Key)
+				if err != nil {
+					continue
+				}
+				if addCandidate(entry.Key, value) {
+					return results, nil
+				}
 			}
 		}
 	}

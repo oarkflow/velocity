@@ -74,11 +74,20 @@ func (r *Result) RowsAffected() (int64, error) {
 type Rows struct {
 	columns []string
 	results []velocity.SearchResult
+	rowMaps []Row
 	cursor  int
 }
 
 func (r *Rows) Columns() []string {
 	if len(r.columns) == 1 && r.columns[0] == "*" {
+		if len(r.rowMaps) > 0 {
+			var cols []string
+			for k := range r.rowMaps[0] {
+				cols = append(cols, k)
+			}
+			r.columns = cols
+			return r.columns
+		}
 		if len(r.results) > 0 {
 			var data map[string]interface{}
 			if err := json.Unmarshal(r.results[0].Value, &data); err == nil {
@@ -103,6 +112,23 @@ func (r *Rows) Close() error {
 }
 
 func (r *Rows) Next(dest []driver.Value) error {
+	if len(r.rowMaps) > 0 {
+		if r.cursor >= len(r.rowMaps) {
+			return fmt.Errorf("EOF")
+		}
+		row := r.rowMaps[r.cursor]
+		r.cursor++
+		for i, col := range r.columns {
+			val, ok := row[col]
+			if !ok {
+				dest[i] = nil
+			} else {
+				dest[i] = val
+			}
+		}
+		return nil
+	}
+
 	if r.cursor >= len(r.results) {
 		return fmt.Errorf("EOF")
 	}
