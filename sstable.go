@@ -61,7 +61,7 @@ func NewSSTable(path string, entries []*Entry, crypto *CryptoProvider) (*SSTable
 		_ = os.Remove(tmpFile.Name())
 	}()
 
-	// Write header placeholder
+	// Reserve space for the sstable header
 	header := struct {
 		Magic       uint32
 		Version     uint32

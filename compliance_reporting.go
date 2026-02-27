@@ -11,17 +11,17 @@ import (
 
 // ComplianceReport represents a comprehensive compliance report
 type ComplianceReport struct {
-	ReportID       string                `json:"report_id"`
-	GeneratedAt    time.Time             `json:"generated_at"`
-	GeneratedBy    string                `json:"generated_by"`
-	ReportType     string                `json:"report_type"` // hipaa, gdpr, pci_dss, sox, all
-	Period         ReportPeriod          `json:"period"`
-	Summary        *ComplianceSummary    `json:"summary"`
-	AuditStats     *AuditStatsSummary    `json:"audit_stats"`
-	ViolationStats *ViolationStats       `json:"violation_stats"`
-	DataInventory  *DataInventorySummary `json:"data_inventory"`
-	Recommendations []string             `json:"recommendations"`
-	ExportFormat   string                `json:"export_format"` // json, pdf, csv
+	ReportID        string                `json:"report_id"`
+	GeneratedAt     time.Time             `json:"generated_at"`
+	GeneratedBy     string                `json:"generated_by"`
+	ReportType      string                `json:"report_type"` // hipaa, gdpr, pci_dss, sox, all
+	Period          ReportPeriod          `json:"period"`
+	Summary         *ComplianceSummary    `json:"summary"`
+	AuditStats      *AuditStatsSummary    `json:"audit_stats"`
+	ViolationStats  *ViolationStats       `json:"violation_stats"`
+	DataInventory   *DataInventorySummary `json:"data_inventory"`
+	Recommendations []string              `json:"recommendations"`
+	ExportFormat    string                `json:"export_format"` // json, pdf, csv
 }
 
 // ReportPeriod defines the time period for a report
@@ -33,45 +33,45 @@ type ReportPeriod struct {
 
 // ComplianceSummary provides high-level compliance metrics
 type ComplianceSummary struct {
-	TotalOperations       int                `json:"total_operations"`
-	AllowedOperations     int                `json:"allowed_operations"`
-	DeniedOperations      int                `json:"denied_operations"`
-	ComplianceRate        float64            `json:"compliance_rate"` // percentage
-	FrameworkBreakdown    map[string]int     `json:"framework_breakdown"`
-	DataClassBreakdown    map[string]int     `json:"data_class_breakdown"`
-	EncryptedOperations   int                `json:"encrypted_operations"`
-	MFAVerifiedOperations int                `json:"mfa_verified_operations"`
-	TopPaths              []PathAccess       `json:"top_paths"`
+	TotalOperations       int            `json:"total_operations"`
+	AllowedOperations     int            `json:"allowed_operations"`
+	DeniedOperations      int            `json:"denied_operations"`
+	ComplianceRate        float64        `json:"compliance_rate"` // percentage
+	FrameworkBreakdown    map[string]int `json:"framework_breakdown"`
+	DataClassBreakdown    map[string]int `json:"data_class_breakdown"`
+	EncryptedOperations   int            `json:"encrypted_operations"`
+	MFAVerifiedOperations int            `json:"mfa_verified_operations"`
+	TopPaths              []PathAccess   `json:"top_paths"`
 }
 
 // AuditStatsSummary summarizes audit trail data
 type AuditStatsSummary struct {
-	TotalEvents       int                `json:"total_events"`
-	ByAction          map[string]int     `json:"by_action"`
-	ByOutcome         map[string]int     `json:"by_outcome"`
-	UniqueActors      int                `json:"unique_actors"`
-	TopActors         []ActorActivity    `json:"top_actors"`
-	AverageDuration   float64            `json:"average_duration_ms"`
-	IntegrityVerified bool               `json:"integrity_verified"`
+	TotalEvents       int             `json:"total_events"`
+	ByAction          map[string]int  `json:"by_action"`
+	ByOutcome         map[string]int  `json:"by_outcome"`
+	UniqueActors      int             `json:"unique_actors"`
+	TopActors         []ActorActivity `json:"top_actors"`
+	AverageDuration   float64         `json:"average_duration_ms"`
+	IntegrityVerified bool            `json:"integrity_verified"`
 }
 
 // DataInventorySummary provides inventory of classified data
 type DataInventorySummary struct {
-	TotalRecords       int                `json:"total_records"`
-	ByDataClass        map[string]int     `json:"by_data_class"`
-	ByFramework        map[string]int     `json:"by_framework"`
-	TaggedFolders      int                `json:"tagged_folders"`
-	TaggedKeys         int                `json:"tagged_keys"`
-	UntaggedRecords    int                `json:"untagged_records"`
-	RetentionExpiring  []RetentionAlert   `json:"retention_expiring"`
+	TotalRecords      int              `json:"total_records"`
+	ByDataClass       map[string]int   `json:"by_data_class"`
+	ByFramework       map[string]int   `json:"by_framework"`
+	TaggedFolders     int              `json:"tagged_folders"`
+	TaggedKeys        int              `json:"tagged_keys"`
+	UntaggedRecords   int              `json:"untagged_records"`
+	RetentionExpiring []RetentionAlert `json:"retention_expiring"`
 }
 
 // PathAccess represents access statistics for a path
 type PathAccess struct {
-	Path          string `json:"path"`
-	AccessCount   int    `json:"access_count"`
-	LastAccessed  time.Time `json:"last_accessed"`
-	DataClass     string `json:"data_class"`
+	Path         string    `json:"path"`
+	AccessCount  int       `json:"access_count"`
+	LastAccessed time.Time `json:"last_accessed"`
+	DataClass    string    `json:"data_class"`
 }
 
 // ActorActivity represents activity statistics for an actor
@@ -83,12 +83,12 @@ type ActorActivity struct {
 
 // RetentionAlert represents data approaching retention limits
 type RetentionAlert struct {
-	Path           string    `json:"path"`
-	DataClass      string    `json:"data_class"`
-	Framework      string    `json:"framework"`
-	RetentionDays  int       `json:"retention_days"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	DaysRemaining  int       `json:"days_remaining"`
+	Path          string    `json:"path"`
+	DataClass     string    `json:"data_class"`
+	Framework     string    `json:"framework"`
+	RetentionDays int       `json:"retention_days"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	DaysRemaining int       `json:"days_remaining"`
 }
 
 // ReportingManager manages compliance reporting
@@ -123,11 +123,11 @@ func (rm *ReportingManager) GenerateReport(
 	defer rm.mu.RUnlock()
 
 	report := &ComplianceReport{
-		ReportID:    fmt.Sprintf("report:%d", time.Now().UnixNano()),
-		GeneratedAt: time.Now(),
-		GeneratedBy: generatedBy,
-		ReportType:  reportType,
-		Period:      period,
+		ReportID:     fmt.Sprintf("report:%d", time.Now().UnixNano()),
+		GeneratedAt:  time.Now(),
+		GeneratedBy:  generatedBy,
+		ReportType:   reportType,
+		Period:       period,
 		ExportFormat: "json",
 	}
 
@@ -221,8 +221,7 @@ func (rm *ReportingManager) generateComplianceSummary(
 			summary.DataClassBreakdown[string(log.Classification)]++
 		}
 
-		// Encryption and MFA tracking would require additional metadata
-		// For now, we'll estimate from the audit event metadata
+		// Encryption and MFA tracking
 		if log.Metadata != nil {
 			if encrypted, ok := log.Metadata["encrypted"].(bool); ok && encrypted {
 				summary.EncryptedOperations++
@@ -236,9 +235,9 @@ func (rm *ReportingManager) generateComplianceSummary(
 		if log.Resource != "" {
 			if pathAccessMap[log.Resource] == nil {
 				pathAccessMap[log.Resource] = &PathAccess{
-					Path:         log.Resource,
-					AccessCount:  0,
-					DataClass:    string(log.Classification),
+					Path:        log.Resource,
+					AccessCount: 0,
+					DataClass:   string(log.Classification),
 				}
 			}
 			pathAccessMap[log.Resource].AccessCount++
@@ -589,12 +588,17 @@ func (rm *ReportingManager) ScheduleReport(
 	recipient string,
 ) error {
 	// This would implement scheduled reporting
-	// For now, just store the schedule config
-	config := map[string]interface{}{
-		"report_type": reportType,
-		"frequency":   frequency,
-		"recipient":   recipient,
-		"created_at":  time.Now(),
+	// Persist the reporting schedule configuration.
+	config := struct {
+		ReportType string    `json:"report_type"`
+		Frequency  string    `json:"frequency"`
+		Recipient  string    `json:"recipient"`
+		CreatedAt  time.Time `json:"created_at"`
+	}{
+		ReportType: reportType,
+		Frequency:  frequency,
+		Recipient:  recipient,
+		CreatedAt:  time.Now(),
 	}
 
 	data, err := json.Marshal(config)

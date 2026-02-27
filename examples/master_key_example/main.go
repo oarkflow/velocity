@@ -118,7 +118,7 @@ func shamirExample() {
 	// 1. Create new Shamir shares if none exist
 	// 2. Prompt user to select shares for key reconstruction
 
-	fmt.Printf("Shamir configuration:\n")
+	fmt.Printf("Shamir configuration:")
 	fmt.Printf("  Threshold: %d shares needed\n", config.MasterKeyConfig.ShamirConfig.Threshold)
 	fmt.Printf("  Total shares: %d\n", config.MasterKeyConfig.ShamirConfig.TotalShares)
 	fmt.Printf("  Shares path: %s\n", config.MasterKeyConfig.ShamirConfig.SharesPath)

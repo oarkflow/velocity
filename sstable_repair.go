@@ -64,7 +64,7 @@ func RepairSSTable(inPath, outPath string, crypto *CryptoProvider) (int, error) 
 	}
 	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
-	// Write header placeholder
+	// Reserve space for the sstable header
 	header = struct {
 		Magic       uint32
 		Version     uint32

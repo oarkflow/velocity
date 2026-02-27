@@ -73,7 +73,7 @@ func main() {
 	// GetTag returns a merged view
 	mergedTag := ctm.GetTag("/customer-data")
 	if mergedTag != nil {
-		fmt.Printf("   Merged Tag:\n")
+		fmt.Printf("   Merged Tag:")
 		fmt.Printf("   - Frameworks: %v\n", mergedTag.Frameworks)
 		fmt.Printf("   - Data Class: %v\n", mergedTag.DataClass)
 		fmt.Printf("   - Encryption Required: %v\n", mergedTag.EncryptionReq)

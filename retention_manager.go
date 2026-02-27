@@ -70,7 +70,7 @@ func (rm *RetentionManager) EvaluateRetention(ctx context.Context, dataType stri
 
 // EnforceRetentionActions scans objects and applies retention actions.
 func (rm *RetentionManager) EnforceRetentionActions(ctx context.Context) (int, error) {
-	// Only enforce on object storage for now
+	// Currently enforcing retention on object storage.
 	objects, err := rm.db.ListObjects(ObjectListOptions{Folder: "", Recursive: true, MaxKeys: 10000})
 	if err != nil {
 		return 0, err

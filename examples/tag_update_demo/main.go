@@ -26,10 +26,10 @@ func main() {
 	ctm := velocity.NewComplianceTagManager(db)
 	ctx := context.Background()
 
-	fmt.Println("=== Compliance Tag Update Methods Demo ===\n")
+	fmt.Println("=== Compliance Tag Update Methods Demo ===")
 
 	// Apply multiple tags to same path
-	fmt.Println("1. Creating multiple tags for /customer-data...\n")
+	fmt.Println("1. Creating multiple tags for /customer-data...")
 
 	gdprTag := &velocity.ComplianceTag{
 		Path:          "/customer-data",
@@ -92,7 +92,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("   ✓ SOC2 tag updated with high audit level and access policy\n")
+	fmt.Println("   ✓ SOC2 tag updated with high audit level and access policy")
 
 	// Show individual tags
 	allTags = ctm.GetTags("/customer-data")
@@ -118,7 +118,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("   ✓ All tags updated with custodian\n")
+	fmt.Println("   ✓ All tags updated with custodian")
 
 	// Verify
 	allTags = ctm.GetTags("/customer-data")

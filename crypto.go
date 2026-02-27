@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/hkdf"
 )
 
 const (
@@ -26,7 +27,8 @@ const (
 
 // CryptoProvider wraps an AEAD cipher for encrypting values at rest.
 type CryptoProvider struct {
-	aead cipher.AEAD
+	aead      cipher.AEAD
+	masterKey []byte
 }
 
 func newCryptoProvider(key []byte) (*CryptoProvider, error) {
@@ -39,7 +41,10 @@ func newCryptoProvider(key []byte) (*CryptoProvider, error) {
 		return nil, err
 	}
 
-	return &CryptoProvider{aead: aead}, nil
+	return &CryptoProvider{
+		aead:      aead,
+		masterKey: key,
+	}, nil
 }
 
 func (cp *CryptoProvider) Encrypt(plaintext, aad []byte) (nonce, ciphertext []byte, err error) {
@@ -160,7 +165,6 @@ func ParseKeyString(value string) ([]byte, error) {
 	return nil, fmt.Errorf("expected 32-byte key (raw/base64/hex), got %d bytes", len(value))
 }
 
-// DeriveObjectKey derives a unique encryption key for an object using HKDF
 func (cp *CryptoProvider) DeriveObjectKey(objectID string, salt []byte) ([]byte, error) {
 	if len(salt) == 0 {
 		salt = make([]byte, 32)
@@ -169,24 +173,25 @@ func (cp *CryptoProvider) DeriveObjectKey(objectID string, salt []byte) ([]byte,
 		}
 	}
 
-	// Use the AEAD key as the master key for derivation
-	// In a real implementation, you'd use HKDF here
-	// For now, we'll use a simple hash-based approach
-	h := make([]byte, 0, len(salt)+len(objectID))
-	h = append(h, salt...)
-	h = append(h, []byte(objectID)...)
+	// Use HKDF to derive a unique 32-byte key for the object
+	// The underlying AEAD's key is used as the PRK (pseudo-random key)
+	// and the objectID as info.
+	hash := sha256.New
+	kdf := hkdf.New(hash, cp.aeadKey(), salt, []byte(objectID))
 
-	// This is simplified - in production use proper HKDF
 	derived := make([]byte, chacha20poly1305.KeySize)
-	copy(derived, h)
-	if len(h) < chacha20poly1305.KeySize {
-		// Pad if needed
-		for i := len(h); i < chacha20poly1305.KeySize; i++ {
-			derived[i] = byte(i)
-		}
+	if _, err := io.ReadFull(kdf, derived); err != nil {
+		return nil, fmt.Errorf("key derivation failed: %w", err)
 	}
 
-	return derived[:chacha20poly1305.KeySize], nil
+	return derived, nil
+}
+
+// AEAD keys are not exposed by the interface, so we need a way to get it
+// or store it in the provider. Let's update the provider.
+func (cp *CryptoProvider) aeadKey() []byte {
+	// Refactor: We need the original key for HKDF
+	return cp.masterKey
 }
 
 // EncryptStream encrypts data in chunks for streaming
@@ -214,6 +219,132 @@ func (cp *CryptoProvider) DecryptStream(data []byte, aad []byte) ([]byte, error)
 	ciphertext := data[chacha20poly1305.NonceSizeX:]
 
 	return cp.Decrypt(nonce, ciphertext, aad)
+}
+
+const ChunkSize = 64 * 1024 // 64KB chunks
+
+type EncryptReader struct {
+	cp     *CryptoProvider
+	r      io.Reader
+	aad    []byte
+	buf    []byte
+	chunk  []byte
+	err    error
+	eof    bool
+	header bool
+	nonce  []byte
+}
+
+func (cp *CryptoProvider) NewEncryptReader(r io.Reader, aad []byte) *EncryptReader {
+	return &EncryptReader{
+		cp:    cp,
+		r:     r,
+		aad:   aad,
+		buf:   make([]byte, 0, ChunkSize+chacha20poly1305.Overhead),
+		chunk: make([]byte, ChunkSize),
+	}
+}
+
+func (er *EncryptReader) Read(p []byte) (n int, err error) {
+	if er.err != nil {
+		return 0, er.err
+	}
+
+	if len(er.buf) == 0 {
+		if er.eof {
+			return 0, io.EOF
+		}
+
+		// Read next chunk
+		nr, rerr := io.ReadFull(er.r, er.chunk)
+		if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+			er.err = rerr
+			return 0, rerr
+		}
+		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+			er.eof = true
+		}
+
+		if nr > 0 {
+			nonce, ciphertext, cerr := er.cp.Encrypt(er.chunk[:nr], er.aad)
+			if cerr != nil {
+				er.err = cerr
+				return 0, cerr
+			}
+			// For simplicity in this implementation, we prepend the nonce to every chunk
+			// In a more advanced version, we'd use a single nonce and increment a counter
+			er.buf = append(er.buf, nonce...)
+			er.buf = append(er.buf, ciphertext...)
+		} else if er.eof {
+			return 0, io.EOF
+		}
+	}
+
+	n = copy(p, er.buf)
+	er.buf = er.buf[n:]
+	return n, nil
+}
+
+type DecryptReader struct {
+	cp    *CryptoProvider
+	r     io.Reader
+	aad   []byte
+	buf   []byte
+	chunk []byte // Full chunk: NonceSizeX + ChunkSize + Overhead
+	err   error
+	eof   bool
+}
+
+func (cp *CryptoProvider) NewDecryptReader(r io.Reader, aad []byte) *DecryptReader {
+	return &DecryptReader{
+		cp:    cp,
+		r:     r,
+		aad:   aad,
+		buf:   make([]byte, 0, ChunkSize),
+		chunk: make([]byte, chacha20poly1305.NonceSizeX+ChunkSize+chacha20poly1305.Overhead),
+	}
+}
+
+func (dr *DecryptReader) Read(p []byte) (n int, err error) {
+	if dr.err != nil {
+		return 0, dr.err
+	}
+
+	if len(dr.buf) == 0 {
+		if dr.eof {
+			return 0, io.EOF
+		}
+
+		// Read fixed-size encrypted chunks.
+		nr, rerr := io.ReadFull(dr.r, dr.chunk)
+		if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+			dr.err = rerr
+			return 0, rerr
+		}
+
+		if nr < chacha20poly1305.NonceSizeX+1 {
+			dr.eof = true
+			return 0, io.EOF
+		}
+
+		nonce := dr.chunk[:chacha20poly1305.NonceSizeX]
+		ciphertext := dr.chunk[chacha20poly1305.NonceSizeX:nr]
+
+		plaintext, derr := dr.cp.Decrypt(nonce, ciphertext, dr.aad)
+		if derr != nil {
+			dr.err = derr
+			return 0, derr
+		}
+
+		dr.buf = plaintext
+		if rerr == io.EOF || rerr == io.ErrUnexpectedEOF {
+			dr.eof = true
+		}
+	}
+
+	n = copy(p, dr.buf)
+	dr.buf = dr.buf[n:]
+	return n, nil
 }
 
 // KeyVerificationError indicates the provided key doesn't match the stored key marker

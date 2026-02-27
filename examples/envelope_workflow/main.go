@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Velocity Secure Envelope System Demo ===\n")
+	fmt.Println("=== Velocity Secure Envelope System Demo ===")
 
 	// SENDER SIDE: Initialize sender's database
 	fmt.Println("📤 SENDER: Creating Court Evidence Envelope")
@@ -152,7 +152,7 @@ func senderCreateEvidence(db *velocity.DB) string {
 		log.Fatalf("Failed to create envelope: %v", err)
 	}
 
-	fmt.Printf("✅ Envelope Created\n")
+	fmt.Printf("✅ Envelope Created")
 	fmt.Printf("   ID: %s\n", envelope.EnvelopeID)
 	fmt.Printf("   Label: %s\n", envelope.Label)
 	fmt.Printf("   Status: %s\n", envelope.Status)
@@ -166,9 +166,9 @@ func senderCreateEvidence(db *velocity.DB) string {
 		log.Fatalf("Failed to export envelope: %v", err)
 	}
 
-	fmt.Printf("\n📦 Envelope Exported\n")
+	fmt.Printf("\n📦 Envelope Exported")
 	fmt.Printf("   File: %s\n", exportPath)
-	fmt.Printf("   Ready to share with recipients\n")
+	fmt.Printf("   Ready to share with recipients")
 
 	return exportPath
 }
@@ -183,7 +183,7 @@ func recipientImportAndAccessEvidence(db *velocity.DB, envelopeFile string) stri
 		log.Fatalf("Failed to import envelope: %v", err)
 	}
 
-	fmt.Printf("📦 Envelope Imported from File\n")
+	fmt.Printf("📦 Envelope Imported from File")
 	fmt.Printf("   Source: %s\n", envelopeFile)
 	fmt.Printf("   ID: %s\n", envelope.EnvelopeID)
 	fmt.Printf("   Label: %s\n", envelope.Label)
@@ -193,21 +193,21 @@ func recipientImportAndAccessEvidence(db *velocity.DB, envelopeFile string) stri
 
 	// Step 2: Check time-lock status
 	if envelope.TimeLockStatus.Active {
-		fmt.Printf("\n⏰ TIME-LOCK ACTIVE\n")
+		fmt.Printf("\n⏰ TIME-LOCK ACTIVE")
 		fmt.Printf("   Unlock Not Before: %s\n", envelope.TimeLockStatus.UnlockNotBefore.Format("2006-01-02 15:04:05"))
 		fmt.Printf("   Legal Condition: %s\n", envelope.Policies.TimeLock.LegalCondition)
-		fmt.Printf("   ⚠️  Cannot access payload until time-lock is released\n")
+		fmt.Printf("   ⚠️  Cannot access payload until time-lock is released")
 	}
 
 	// Step 3: Check fingerprint requirements
 	if envelope.Policies.Fingerprint.Required {
-		fmt.Printf("\n🔐 FINGERPRINT VERIFICATION REQUIRED\n")
+		fmt.Printf("\n🔐 FINGERPRINT VERIFICATION REQUIRED")
 		fmt.Printf("   Strategy: %s\n", envelope.Policies.Fingerprint.MatchingStrategy)
 		fmt.Printf("   Authorized: %d fingerprints\n", len(envelope.Policies.Fingerprint.AuthorizedFingerprints))
 	}
 
 	// Step 4: Verify integrity
-	fmt.Printf("\n🔒 INTEGRITY VERIFICATION\n")
+	fmt.Printf("\n🔒 INTEGRITY VERIFICATION")
 	fmt.Printf("   Payload Hash: %s\n", envelope.Integrity.PayloadHash[:16]+"...")
 	fmt.Printf("   Ledger Root: %s\n", envelope.Integrity.LedgerRoot[:16]+"...")
 	fmt.Printf("   Time Seal: %s\n", envelope.Integrity.TimeSeal.Hash[:16]+"...")
@@ -226,7 +226,7 @@ func recipientImportAndAccessEvidence(db *velocity.DB, envelopeFile string) stri
 		log.Fatalf("Failed to append custody event: %v", err)
 	}
 
-	fmt.Printf("\n📝 Custody Event Recorded\n")
+	fmt.Printf("\n📝 Custody Event Recorded")
 	fmt.Printf("   Total Events: %d\n", len(envelope.CustodyLedger))
 	fmt.Printf("   Latest Action: %s by %s\n", accessEvent.Action, accessEvent.Actor)
 
@@ -322,7 +322,7 @@ func senderCreateAndExportEvidence(db *velocity.DB) string {
 		log.Fatalf("Failed to create envelope: %v", err)
 	}
 
-	fmt.Printf("✅ Envelope Created\n")
+	fmt.Printf("✅ Envelope Created")
 	fmt.Printf("   ID: %s\n", envelope.EnvelopeID)
 	fmt.Printf("   Label: %s\n", envelope.Label)
 	fmt.Printf("   Status: %s\n", envelope.Status)
@@ -336,9 +336,9 @@ func senderCreateAndExportEvidence(db *velocity.DB) string {
 		log.Fatalf("Failed to export envelope: %v", err)
 	}
 
-	fmt.Printf("\n📦 Envelope Exported\n")
+	fmt.Printf("\n📦 Envelope Exported")
 	fmt.Printf("   File: %s\n", exportPath)
-	fmt.Printf("   Ready to share with recipients\n")
+	fmt.Printf("   Ready to share with recipients")
 
 	return exportPath
 }
@@ -353,7 +353,7 @@ func recipientAccessEvidence(db *velocity.DB, envelopeID string) {
 		log.Fatalf("Failed to load envelope: %v", err)
 	}
 
-	fmt.Printf("📦 Envelope Retrieved\n")
+	fmt.Printf("📦 Envelope Retrieved")
 	fmt.Printf("   Label: %s\n", envelope.Label)
 	fmt.Printf("   Type: %s\n", envelope.Type)
 	fmt.Printf("   Created: %s\n", envelope.CreatedAt.Format("2006-01-02 15:04:05"))
@@ -361,21 +361,21 @@ func recipientAccessEvidence(db *velocity.DB, envelopeID string) {
 
 	// Step 2: Check time-lock status
 	if envelope.TimeLockStatus.Active {
-		fmt.Printf("\n⏰ TIME-LOCK ACTIVE\n")
+		fmt.Printf("\n⏰ TIME-LOCK ACTIVE")
 		fmt.Printf("   Unlock Not Before: %s\n", envelope.TimeLockStatus.UnlockNotBefore.Format("2006-01-02 15:04:05"))
 		fmt.Printf("   Legal Condition: %s\n", envelope.Policies.TimeLock.LegalCondition)
-		fmt.Printf("   ⚠️  Cannot access payload until time-lock is released\n")
+		fmt.Printf("   ⚠️  Cannot access payload until time-lock is released")
 	}
 
 	// Step 3: Check fingerprint requirements
 	if envelope.Policies.Fingerprint.Required {
-		fmt.Printf("\n🔐 FINGERPRINT VERIFICATION REQUIRED\n")
+		fmt.Printf("\n🔐 FINGERPRINT VERIFICATION REQUIRED")
 		fmt.Printf("   Strategy: %s\n", envelope.Policies.Fingerprint.MatchingStrategy)
 		fmt.Printf("   Authorized: %d fingerprints\n", len(envelope.Policies.Fingerprint.AuthorizedFingerprints))
 	}
 
 	// Step 4: Verify integrity
-	fmt.Printf("\n🔒 INTEGRITY VERIFICATION\n")
+	fmt.Printf("\n🔒 INTEGRITY VERIFICATION")
 	fmt.Printf("   Payload Hash: %s\n", envelope.Integrity.PayloadHash[:16]+"...")
 	fmt.Printf("   Ledger Root: %s\n", envelope.Integrity.LedgerRoot[:16]+"...")
 	fmt.Printf("   Time Seal: %s\n", envelope.Integrity.TimeSeal.Hash[:16]+"...")
@@ -394,7 +394,7 @@ func recipientAccessEvidence(db *velocity.DB, envelopeID string) {
 		log.Fatalf("Failed to append custody event: %v", err)
 	}
 
-	fmt.Printf("\n📝 Custody Event Recorded\n")
+	fmt.Printf("\n📝 Custody Event Recorded")
 	fmt.Printf("   Total Events: %d\n", len(envelope.CustodyLedger))
 	fmt.Printf("   Latest Action: %s by %s\n", accessEvent.Action, accessEvent.Actor)
 }
@@ -423,7 +423,7 @@ func investigatorAnalyze(db *velocity.DB, envelopeID string) {
 		log.Fatalf("Failed to record tamper signal: %v", err)
 	}
 
-	fmt.Printf("✅ Tamper Analysis Complete\n")
+	fmt.Printf("✅ Tamper Analysis Complete")
 	fmt.Printf("   Analyzer: %s v%s\n", tamperSignal.Analyzer, tamperSignal.AnalyzerVersion)
 	fmt.Printf("   Score: %.2f / %.2f threshold\n", tamperSignal.Score, tamperSignal.Threshold)
 	fmt.Printf("   Status: %s\n", func() string {
@@ -452,15 +452,15 @@ func legalAuthorityUnlock(db *velocity.DB, envelopeID string) {
 	// Note: This will fail if time-lock constraints aren't met
 	if err != nil {
 		fmt.Printf("⚠️  Time-Lock Release Failed: %v\n", err)
-		fmt.Printf("   (This is expected if unlock time hasn't been reached)\n")
+		fmt.Printf("   (This is expected if unlock time hasn't been reached)")
 		return
 	}
 
-	fmt.Printf("✅ Time-Lock Released\n")
+	fmt.Printf("✅ Time-Lock Released")
 	fmt.Printf("   Approved By: %s\n", envelope.TimeLockStatus.UnlockApprovedBy)
 	fmt.Printf("   Reason: %s\n", envelope.TimeLockStatus.UnlockReason)
 	fmt.Printf("   Approved At: %s\n", envelope.TimeLockStatus.UnlockApprovedAt.Format("2006-01-02 15:04:05"))
-	fmt.Printf("   Status: PAYLOAD NOW ACCESSIBLE\n")
+	fmt.Printf("   Status: PAYLOAD NOW ACCESSIBLE")
 }
 
 // auditorReview demonstrates full custody chain review
@@ -472,7 +472,7 @@ func auditorReview(db *velocity.DB, envelopeID string) {
 		log.Fatalf("Failed to load envelope: %v", err)
 	}
 
-	fmt.Printf("📋 CHAIN OF CUSTODY AUDIT\n\n")
+	fmt.Printf("📋 CHAIN OF CUSTODY AUDIT\n")
 
 	// Review custody chain
 	fmt.Printf("🔗 Custody Ledger (%d events):\n", len(envelope.CustodyLedger))
@@ -519,7 +519,7 @@ func auditorReview(db *velocity.DB, envelopeID string) {
 	}
 
 	// Integrity summary
-	fmt.Printf("\n🔐 Integrity Status:\n")
+	fmt.Printf("\n🔐 Integrity Status:")
 	fmt.Printf("   Payload Hash: %s\n", envelope.Integrity.PayloadHash[:24]+"...")
 	fmt.Printf("   Ledger Root: %s\n", envelope.Integrity.LedgerRoot[:24]+"...")
 	fmt.Printf("   Audit Root: %s\n", envelope.Integrity.AuditRoot[:24]+"...")

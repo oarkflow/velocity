@@ -74,6 +74,10 @@ type DB struct {
 	// Graceful shutdown
 	closed     atomic.Bool
 	shutdownCh chan struct{}
+
+	// Production configuration
+	nodeID    string
+	jwtSecret string
 }
 
 var defaultPath = "./data/velocity"
@@ -142,15 +146,17 @@ func init() {
 }
 
 type Config struct {
-	Path              string
-	EncryptionKey     []byte
-	MasterKey         []byte          // If provided and valid, use this as the master key
-	MaxUploadSize     int64           // bytes; 0 means use default
-	MasterKeyConfig   MasterKeyConfig // New: flexible master key configuration
-	DeviceFingerprint bool            // Enable device fingerprint validation
-	SearchSchema      *SearchSchema   // Optional schema for auto-indexing on Put/Delete
-	SearchIndexEnabled bool           // Enable hybrid index updates on Put/Delete
-	SearchSchemas     map[string]*SearchSchema // Optional per-prefix schemas
+	Path               string
+	EncryptionKey      []byte
+	MasterKey          []byte                   // If provided and valid, use this as the master key
+	MaxUploadSize      int64                    // bytes; 0 means use default
+	MasterKeyConfig    MasterKeyConfig          // New: flexible master key configuration
+	DeviceFingerprint  bool                     // Enable device fingerprint validation
+	SearchSchema       *SearchSchema            // Optional schema for auto-indexing on Put/Delete
+	SearchIndexEnabled bool                     // Enable hybrid index updates on Put/Delete
+	SearchSchemas      map[string]*SearchSchema // Optional per-prefix schemas
+	NodeID             string                   // Unique identifier for this node
+	JWTSecret          string                   // Secret for API authentication
 }
 
 const (
@@ -237,20 +243,33 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		path:             currentPath,
-		memTable:         NewMemTable(),
-		wal:              wal,
-		levels:           make([][]*SSTable, MaxLevels),
-		memTableSize:     DefaultMemTableSize,
-		cache:            nil,
-		crypto:           cryptoProvider,
-		MaxUploadSize:    cfg.MaxUploadSize,
-		searchSchema:     cfg.SearchSchema,
+		path:               currentPath,
+		memTable:           NewMemTable(),
+		wal:                wal,
+		levels:             make([][]*SSTable, MaxLevels),
+		memTableSize:       DefaultMemTableSize,
+		cache:              nil,
+		crypto:             cryptoProvider,
+		MaxUploadSize:      cfg.MaxUploadSize,
+		searchSchema:       cfg.SearchSchema,
 		searchIndexEnabled: cfg.SearchIndexEnabled || cfg.SearchSchema != nil,
-		searchSchemas:    cfg.SearchSchemas,
-		masterKeyManager: masterKeyManager,
-		masterKey:        key,
-		shutdownCh:       make(chan struct{}),
+		searchSchemas:      cfg.SearchSchemas,
+		masterKey:          key,
+		masterKeyManager:   masterKeyManager,
+		shutdownCh:         make(chan struct{}),
+		nodeID:             cfg.NodeID,
+		jwtSecret:          cfg.JWTSecret,
+	}
+	if db.nodeID == "" {
+		host, _ := os.Hostname()
+		if host != "" {
+			db.nodeID = host
+		} else {
+			db.nodeID = "node-001"
+		}
+	}
+	if db.jwtSecret == "" {
+		db.jwtSecret = "velocity-default-secret-change-it"
 	}
 	if len(db.searchSchemas) > 0 {
 		db.searchIndexEnabled = true
@@ -313,6 +332,14 @@ func NewWithConfig(cfg Config) (*DB, error) {
 
 func (db *DB) MasterKey() []byte {
 	return db.masterKey
+}
+
+func (db *DB) NodeID() string {
+	return db.nodeID
+}
+
+func (db *DB) JWTSecret() string {
+	return db.jwtSecret
 }
 
 // SetPerformanceMode toggles high-level performance profiles for the DB.

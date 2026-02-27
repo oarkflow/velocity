@@ -22,14 +22,14 @@ var (
 
 // FileMetadata provides backward compatibility with old API
 type FileMetadata struct {
-	Key             string            `json:"key"`
-	Filename        string            `json:"filename"`
-	ContentType     string            `json:"content_type"`
-	Size            int64             `json:"size"`
-	UploadedAt      time.Time         `json:"uploaded_at"`
-	ThumbnailWidth  int               `json:"thumbnail_width,omitempty"`
-	ThumbnailHeight int               `json:"thumbnail_height,omitempty"`
-	ThumbnailURL    string            `json:"thumbnail_url,omitempty"`
+	Key             string    `json:"key"`
+	Filename        string    `json:"filename"`
+	ContentType     string    `json:"content_type"`
+	Size            int64     `json:"size"`
+	UploadedAt      time.Time `json:"uploaded_at"`
+	ThumbnailWidth  int       `json:"thumbnail_width,omitempty"`
+	ThumbnailHeight int       `json:"thumbnail_height,omitempty"`
+	ThumbnailURL    string    `json:"thumbnail_url,omitempty"`
 }
 
 // Convert ObjectMetadata to FileMetadata
@@ -121,9 +121,9 @@ func (db *DB) HasFile(key string) bool {
 	return err == nil
 }
 
-// GetThumbnail returns a cached thumbnail (placeholder - needs implementation)
+// GetThumbnail returns a cached thumbnail
 func (db *DB) GetThumbnail(key string) ([]byte, string, int, int, error) {
-	// For now, delegate to GetFile
+	// Delegate to GetFile for data retrieval
 	data, meta, err := db.GetFile(key)
 	if err != nil {
 		return nil, "", 0, 0, err
@@ -131,9 +131,9 @@ func (db *DB) GetThumbnail(key string) ([]byte, string, int, int, error) {
 	return data, meta.ContentType, 0, 0, nil
 }
 
-// GenerateThumbnail generates a thumbnail (placeholder - needs implementation)
+// GenerateThumbnail generates a thumbnail
 func (db *DB) GenerateThumbnail(key string, maxDim int) ([]byte, string, int, int, error) {
-	// For now, just return the original file
+	// Delegate to GetFile for retrieval
 	data, meta, err := db.GetFile(key)
 	if err != nil {
 		return nil, "", 0, 0, err

@@ -200,7 +200,7 @@ func TestEntityManager_UpdateEntity(t *testing.T) {
 	updateReq := &EntityRequest{
 		Name:      "updated-entity-name",
 		Data:      updatedData,
-		CreatedBy:  "update-user",
+		CreatedBy: "update-user",
 	}
 
 	updated, err := em.UpdateEntity(ctx, created.EntityID, updateReq)
@@ -265,7 +265,7 @@ func TestEntityManager_QueryEntities(t *testing.T) {
 			Type:      EntityTypeJSON,
 			Name:      fmt.Sprintf("entity-%d", i),
 			Data:      json.RawMessage(fmt.Sprintf(`{"id": %d}`, i)),
-			CreatedBy:  "test-user",
+			CreatedBy: "test-user",
 			Tags:      map[string]string{"group": fmt.Sprintf("group-%d", i%2)},
 		}
 		if _, err := em.CreateEntity(ctx, req); err != nil {
@@ -434,10 +434,10 @@ func TestEntityManager_AddRelationCircular(t *testing.T) {
 
 	// Try to add circular relation
 	relReq := &EntityRelationRequest{
-		SourceEntity:  entity.EntityID,
-		TargetEntity:  entity.EntityID,
-		RelationType:  RelationTypeContains,
-		CreatedBy:     "test-user",
+		SourceEntity: entity.EntityID,
+		TargetEntity: entity.EntityID,
+		RelationType: RelationTypeContains,
+		CreatedBy:    "test-user",
 	}
 
 	_, err := em.AddRelation(ctx, relReq)
@@ -833,8 +833,8 @@ func TestEntityManager_GetEntityEnvelope(t *testing.T) {
 		Type:      EnvelopeTypeCourtEvidence,
 		CreatedBy: "test-user",
 		Payload: EnvelopePayload{
-			Kind: "kv",
-			Key:  "test-key",
+			Kind:  "kv",
+			Key:   "test-key",
 			Value: json.RawMessage(`{"test": "value"}`),
 		},
 	}
@@ -892,8 +892,8 @@ func TestEntityManager_EntityEncryption(t *testing.T) {
 		t.Error("Entity should be marked as encrypted")
 	}
 
-	// Retrieve and verify data is decrypted
-	result, err := em.GetEntity(ctx, entity.EntityID, false)
+	// Retrieve and verify data is decrypted (use GetEntityWithForce to bypass redaction)
+	result, err := em.GetEntityWithForce(ctx, entity.EntityID, false, true)
 	if err != nil {
 		t.Fatalf("Failed to get encrypted entity: %v", err)
 	}

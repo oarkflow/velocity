@@ -2,12 +2,17 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	v2 "github.com/oarkflow/cas"
 	"github.com/oarkflow/squealx"
+	"golang.org/x/crypto/argon2"
 )
 
 // User represents a user in the system
@@ -156,12 +161,19 @@ func (s *SQLiteUserStorage) CreateUser(ctx context.Context, user *User) error {
 	user.CreatedAt = now
 	user.UpdatedAt = now
 
+	// Securely hash password before storage using Argon2id
+	hashed, err := hashPassword(user.Password)
+	if err != nil {
+		return fmt.Errorf("failed to hash password: %w", err)
+	}
+	user.Password = hashed
+
 	query := `
 		INSERT INTO users (username, email, password, role, tenant, namespace, scope, created_at, updated_at)
 		VALUES (:username, :email, :password, :role, :tenant, :namespace, :scope, :created_at, :updated_at)
 	`
 
-	_, err := s.db.NamedExecContext(ctx, query, user)
+	_, err = s.db.NamedExecContext(ctx, query, user)
 	if err != nil {
 		return fmt.Errorf("failed to create user: %w", err)
 	}
@@ -285,9 +297,9 @@ func (s *SQLiteUserStorage) AuthenticateUser(ctx context.Context, username, pass
 		return nil, err
 	}
 
-	// In a real implementation, you should hash and compare passwords properly
-	// For now, we'll do a simple comparison (NOT SECURE FOR PRODUCTION)
-	if user.Password != password {
+	// Secure authentication via Argon2id hash comparison
+	match, err := verifyPassword(password, user.Password)
+	if err != nil || !match {
 		return nil, fmt.Errorf("invalid password")
 	}
 
@@ -303,10 +315,68 @@ func (s *SQLiteUserStorage) Authorize(ctx context.Context, principal, tenant, re
 		Action:    action,
 	}
 
-	return s.auth.Authorize(request)
+	return s.auth.Authorize(ctx, request)
 }
 
 // Close closes the database connection
 func (s *SQLiteUserStorage) Close() error {
 	return s.db.Close()
+}
+
+// Helper functions for Argon2id hashing
+
+func hashPassword(password string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+
+	time := uint32(1)
+	memory := uint32(64 * 1024)
+	threads := uint8(4)
+	keyLen := uint32(32)
+
+	hash := argon2.IDKey([]byte(password), salt, time, memory, threads, keyLen)
+
+	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
+	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
+
+	encoded := fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version, memory, time, threads, b64Salt, b64Hash)
+
+	return encoded, nil
+}
+
+func verifyPassword(password, encodedHash string) (bool, error) {
+	parts := strings.Split(encodedHash, "$")
+	if len(parts) != 6 {
+		return false, fmt.Errorf("invalid hash format")
+	}
+
+	var version int
+	_, err := fmt.Sscanf(parts[2], "v=%d", &version)
+	if err != nil {
+		return false, err
+	}
+
+	var memory, time uint32
+	var threads uint8
+	_, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads)
+	if err != nil {
+		return false, err
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return false, err
+	}
+
+	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return false, err
+	}
+
+	otherHash := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(hash)))
+
+	return subtle.ConstantTimeCompare(hash, otherHash) == 1, nil
 }

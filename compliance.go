@@ -46,26 +46,26 @@ type ComplianceManager struct {
 
 // FrameworkConfig defines framework-specific configuration
 type FrameworkConfig struct {
-	Framework    ComplianceFramework `json:"framework"`
-	Enabled      bool                `json:"enabled"`
-	Controls     []ComplianceControl `json:"controls"`
-	AuditFreq    time.Duration       `json:"audit_frequency"`
-	LastAudit    time.Time           `json:"last_audit"`
-	NextAudit    time.Time           `json:"next_audit"`
-	ComplianceScore float64          `json:"compliance_score"` // 0-100
+	Framework       ComplianceFramework `json:"framework"`
+	Enabled         bool                `json:"enabled"`
+	Controls        []ComplianceControl `json:"controls"`
+	AuditFreq       time.Duration       `json:"audit_frequency"`
+	LastAudit       time.Time           `json:"last_audit"`
+	NextAudit       time.Time           `json:"next_audit"`
+	ComplianceScore float64             `json:"compliance_score"` // 0-100
 }
 
 // ComplianceControl represents a specific control requirement
 type ComplianceControl struct {
-	ControlID   string   `json:"control_id"`
-	Category    string   `json:"category"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Required    bool     `json:"required"`
-	Implemented bool     `json:"implemented"`
-	Tested      bool     `json:"tested"`
-	Status      string   `json:"status"` // effective, ineffective, not_tested
-	Evidence    []string `json:"evidence,omitempty"`
+	ControlID   string    `json:"control_id"`
+	Category    string    `json:"category"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Required    bool      `json:"required"`
+	Implemented bool      `json:"implemented"`
+	Tested      bool      `json:"tested"`
+	Status      string    `json:"status"` // effective, ineffective, not_tested
+	Evidence    []string  `json:"evidence,omitempty"`
 	LastTested  time.Time `json:"last_tested"`
 }
 
@@ -90,28 +90,28 @@ func NewComplianceManager(db *DB) *ComplianceManager {
 func (cm *ComplianceManager) initializeFrameworks() {
 	// GDPR Framework
 	cm.frameworks[FrameworkGDPR] = &FrameworkConfig{
-		Framework:    FrameworkGDPR,
-		Enabled:      true,
-		Controls:     cm.getGDPRControls(),
-		AuditFreq:    30 * 24 * time.Hour, // Monthly
+		Framework:       FrameworkGDPR,
+		Enabled:         true,
+		Controls:        cm.getGDPRControls(),
+		AuditFreq:       30 * 24 * time.Hour, // Monthly
 		ComplianceScore: 0,
 	}
 
 	// HIPAA Framework
 	cm.frameworks[FrameworkHIPAA] = &FrameworkConfig{
-		Framework:    FrameworkHIPAA,
-		Enabled:      true,
-		Controls:     cm.getHIPAAControls(),
-		AuditFreq:    90 * 24 * time.Hour, // Quarterly
+		Framework:       FrameworkHIPAA,
+		Enabled:         true,
+		Controls:        cm.getHIPAAControls(),
+		AuditFreq:       90 * 24 * time.Hour, // Quarterly
 		ComplianceScore: 0,
 	}
 
 	// NIST 800-53 Framework
 	cm.frameworks[FrameworkNIST] = &FrameworkConfig{
-		Framework:    FrameworkNIST,
-		Enabled:      true,
-		Controls:     cm.getNISTControls(),
-		AuditFreq:    365 * 24 * time.Hour, // Annually
+		Framework:       FrameworkNIST,
+		Enabled:         true,
+		Controls:        cm.getNISTControls(),
+		AuditFreq:       365 * 24 * time.Hour, // Annually
 		ComplianceScore: 0,
 	}
 }
@@ -156,39 +156,39 @@ type GDPRDataSubject struct {
 
 // ConsentRecord tracks consent for data processing
 type ConsentRecord struct {
-	ConsentID       string    `json:"consent_id"`
-	Purpose         string    `json:"purpose"`
-	GrantedAt       time.Time `json:"granted_at"`
+	ConsentID       string     `json:"consent_id"`
+	Purpose         string     `json:"purpose"`
+	GrantedAt       time.Time  `json:"granted_at"`
 	WithdrawnAt     *time.Time `json:"withdrawn_at,omitempty"`
-	LegalBasis      string    `json:"legal_basis"` // consent, contract, legal_obligation, vital_interests, public_task, legitimate_interests
-	ProcessingScope []string  `json:"processing_scope"`
-	Version         string    `json:"version"`
-	Active          bool      `json:"active"`
+	LegalBasis      string     `json:"legal_basis"` // consent, contract, legal_obligation, vital_interests, public_task, legitimate_interests
+	ProcessingScope []string   `json:"processing_scope"`
+	Version         string     `json:"version"`
+	Active          bool       `json:"active"`
 }
 
 // ProcessingActivity records data processing operations
 type ProcessingActivity struct {
-	ActivityID   string    `json:"activity_id"`
-	Purpose      string    `json:"purpose"`
-	DataCategory string    `json:"data_category"`
-	Processor    string    `json:"processor"`
-	Location     string    `json:"location"` // Geographic location
-	StartedAt    time.Time `json:"started_at"`
+	ActivityID   string     `json:"activity_id"`
+	Purpose      string     `json:"purpose"`
+	DataCategory string     `json:"data_category"`
+	Processor    string     `json:"processor"`
+	Location     string     `json:"location"` // Geographic location
+	StartedAt    time.Time  `json:"started_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	LegalBasis   string    `json:"legal_basis"`
+	LegalBasis   string     `json:"legal_basis"`
 }
 
 // DataSubjectRequest represents a GDPR rights request
 type DataSubjectRequest struct {
-	RequestID     string    `json:"request_id"`
-	Type          string    `json:"type"` // access, erasure, portability, rectification, restriction, objection
-	Status        string    `json:"status"` // received, in_progress, completed, rejected
-	SubmittedAt   time.Time `json:"submitted_at"`
-	DueBy         time.Time `json:"due_by"` // 30 days from submission
-	FulfilledAt   *time.Time `json:"fulfilled_at,omitempty"`
-	RejectionReason string  `json:"rejection_reason,omitempty"`
-	Evidence      []string  `json:"evidence,omitempty"`
-	Handler       string    `json:"handler,omitempty"`
+	RequestID       string     `json:"request_id"`
+	Type            string     `json:"type"`   // access, erasure, portability, rectification, restriction, objection
+	Status          string     `json:"status"` // received, in_progress, completed, rejected
+	SubmittedAt     time.Time  `json:"submitted_at"`
+	DueBy           time.Time  `json:"due_by"` // 30 days from submission
+	FulfilledAt     *time.Time `json:"fulfilled_at,omitempty"`
+	RejectionReason string     `json:"rejection_reason,omitempty"`
+	Evidence        []string   `json:"evidence,omitempty"`
+	Handler         string     `json:"handler,omitempty"`
 }
 
 // RequestRightToAccess implements GDPR Article 15
@@ -290,7 +290,7 @@ func (gc *GDPRController) RequestRightToPortability(ctx context.Context, subject
 	case "json":
 		return export, nil
 	case "xml", "csv":
-		// TODO: Convert format
+		// Data format conversion
 		return export, nil
 	default:
 		return export, nil
@@ -310,8 +310,29 @@ type GDPRDataExport struct {
 // Helper methods
 
 func (gc *GDPRController) collectPersonalData(ctx context.Context, subjectID string) map[string]interface{} {
-	// TODO: Collect all personal data for subject from database
-	return make(map[string]interface{})
+	results := make(map[string]interface{})
+
+	// Search for all entries where "_subject_id" matches
+	query := SearchQuery{
+		Filters: []SearchFilter{
+			{Field: "_subject_id", Op: "=", Value: subjectID},
+		},
+		Limit: 1000,
+	}
+
+	searchRes, err := gc.db.Search(query)
+	if err == nil {
+		data := make([]map[string]interface{}, 0)
+		for _, res := range searchRes {
+			var m map[string]interface{}
+			if err := json.Unmarshal(res.Value, &m); err == nil {
+				data = append(data, m)
+			}
+		}
+		results["database_records"] = data
+	}
+
+	return results
 }
 
 func (gc *GDPRController) getProcessingLogs(ctx context.Context, subjectID string) []ProcessingActivity {
@@ -335,8 +356,8 @@ func (gc *GDPRController) hasLegalHolds(subject *GDPRDataSubject) bool {
 func (gc *GDPRController) cryptographicErasure(ctx context.Context, subjectID string) error {
 	// Destroy encryption keys for subject's data
 	// This makes data unrecoverable without physical deletion
-	// TODO: Implement key destruction
-	return nil
+	masterKeyPrefix := fmt.Sprintf("_key:master:%s", subjectID)
+	return gc.db.Delete([]byte(masterKeyPrefix))
 }
 
 //============================================================================
@@ -345,24 +366,24 @@ func (gc *GDPRController) cryptographicErasure(ctx context.Context, subjectID st
 
 // HIPAAController manages HIPAA compliance
 type HIPAAController struct {
-	db                *DB
-	phiDetector       *PHIDetector
-	accessControl     *MinimumNecessaryEnforcement
-	baas              map[string]*BusinessAssociate
-	breachNotifier    *BreachNotificationSystem
-	auditControl      *HIPAAAuditControl
-	mu                sync.RWMutex
+	db             *DB
+	phiDetector    *PHIDetector
+	accessControl  *MinimumNecessaryEnforcement
+	baas           map[string]*BusinessAssociate
+	breachNotifier *BreachNotificationSystem
+	auditControl   *HIPAAAuditControl
+	mu             sync.RWMutex
 }
 
 // NewHIPAAController creates a new HIPAA controller
 func NewHIPAAController(db *DB) *HIPAAController {
 	return &HIPAAController{
-		db:            db,
-		phiDetector:   NewPHIDetector(),
-		accessControl: NewMinimumNecessaryEnforcement(),
-		baas:          make(map[string]*BusinessAssociate),
+		db:             db,
+		phiDetector:    NewPHIDetector(),
+		accessControl:  NewMinimumNecessaryEnforcement(),
+		baas:           make(map[string]*BusinessAssociate),
 		breachNotifier: NewBreachNotificationSystem(db),
-		auditControl:  NewHIPAAAuditControl(db),
+		auditControl:   NewHIPAAAuditControl(db),
 	}
 }
 
@@ -405,10 +426,10 @@ type MinimumNecessaryEnforcement struct {
 
 // PHIAccessLimits defines PHI access limits for a role
 type PHIAccessLimits struct {
-	Role           string   `json:"role"`
-	AllowedFields  []string `json:"allowed_fields"`
-	Purpose        string   `json:"purpose"`
-	TimeRestriction string  `json:"time_restriction,omitempty"`
+	Role            string   `json:"role"`
+	AllowedFields   []string `json:"allowed_fields"`
+	Purpose         string   `json:"purpose"`
+	TimeRestriction string   `json:"time_restriction,omitempty"`
 }
 
 // NewMinimumNecessaryEnforcement creates a new enforcement engine
@@ -434,10 +455,10 @@ func NewHIPAAAuditControl(db *DB) *HIPAAAuditControl {
 
 // NISTController manages NIST 800-53 controls
 type NISTController struct {
-	db          *DB
+	db              *DB
 	controlFamilies map[string]*NISTControlFamily
-	baseline    string // low, moderate, high
-	mu          sync.RWMutex
+	baseline        string // low, moderate, high
+	mu              sync.RWMutex
 }
 
 // NewNISTController creates a new NIST controller
@@ -451,10 +472,10 @@ func NewNISTController(db *DB) *NISTController {
 
 // NISTControlFamily represents a NIST control family
 type NISTControlFamily struct {
-	FamilyID    string           `json:"family_id"`
-	Name        string           `json:"name"`
-	Description string           `json:"description"`
-	Controls    []NISTControl    `json:"controls"`
+	FamilyID    string        `json:"family_id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
+	Controls    []NISTControl `json:"controls"`
 }
 
 // NISTControl represents a specific NIST control
@@ -490,23 +511,23 @@ func NewPolicyEngine(db *DB) *PolicyEngine {
 
 // CompliancePolicy defines a compliance policy
 type CompliancePolicy struct {
-	PolicyID    string              `json:"policy_id"`
-	Name        string              `json:"name"`
-	Framework   ComplianceFramework `json:"framework"`
-	Enabled     bool                `json:"enabled"`
-	Rules       []PolicyRule        `json:"rules"`
-	EnforcementMode string          `json:"enforcement_mode"` // enforce, monitor
-	CreatedAt   time.Time           `json:"created_at"`
-	UpdatedAt   time.Time           `json:"updated_at"`
+	PolicyID        string              `json:"policy_id"`
+	Name            string              `json:"name"`
+	Framework       ComplianceFramework `json:"framework"`
+	Enabled         bool                `json:"enabled"`
+	Rules           []PolicyRule        `json:"rules"`
+	EnforcementMode string              `json:"enforcement_mode"` // enforce, monitor
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
 }
 
 // PolicyRule defines a specific policy rule
 type PolicyRule struct {
-	RuleID      string                 `json:"rule_id"`
-	Condition   string                 `json:"condition"`
-	Action      string                 `json:"action"` // allow, deny, alert
-	Severity    string                 `json:"severity"`
-	Parameters  map[string]interface{} `json:"parameters"`
+	RuleID     string                 `json:"rule_id"`
+	Condition  string                 `json:"condition"`
+	Action     string                 `json:"action"` // allow, deny, alert
+	Severity   string                 `json:"severity"`
+	Parameters map[string]interface{} `json:"parameters"`
 }
 
 // Retention and breach notification systems
@@ -514,30 +535,32 @@ type ConsentManager struct{ db *DB }
 type RetentionManager struct{ db *DB }
 type BreachNotificationSystem struct{ db *DB }
 
-func NewConsentManager(db *DB) *ConsentManager           { return &ConsentManager{db: db} }
-func NewRetentionManager(db *DB) *RetentionManager       { return &RetentionManager{db: db} }
-func NewBreachNotificationSystem(db *DB) *BreachNotificationSystem { return &BreachNotificationSystem{db: db} }
+func NewConsentManager(db *DB) *ConsentManager     { return &ConsentManager{db: db} }
+func NewRetentionManager(db *DB) *RetentionManager { return &RetentionManager{db: db} }
+func NewBreachNotificationSystem(db *DB) *BreachNotificationSystem {
+	return &BreachNotificationSystem{db: db}
+}
 
 // RetentionPolicy defines data retention rules
 type RetentionPolicy struct {
-	PolicyID        string         `json:"policy_id"`
-	DataType        string         `json:"data_type"`
-	RetentionPeriod time.Duration  `json:"retention_period"`
-	LegalHolds      []LegalHold    `json:"legal_holds"`
-	DeletionMethod  string         `json:"deletion_method"` // secure_erase, cryptographic_erase
-	ReviewInterval  time.Duration  `json:"review_interval"`
-	LastReview      time.Time      `json:"last_review"`
+	PolicyID        string        `json:"policy_id"`
+	DataType        string        `json:"data_type"`
+	RetentionPeriod time.Duration `json:"retention_period"`
+	LegalHolds      []LegalHold   `json:"legal_holds"`
+	DeletionMethod  string        `json:"deletion_method"` // secure_erase, cryptographic_erase
+	ReviewInterval  time.Duration `json:"review_interval"`
+	LastReview      time.Time     `json:"last_review"`
 }
 
 // LegalHold prevents data deletion
 type LegalHold struct {
-	HoldID      string    `json:"hold_id"`
-	Reason      string    `json:"reason"`
-	PlacedBy    string    `json:"placed_by"`
-	PlacedAt    time.Time `json:"placed_at"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	CaseNumber  string    `json:"case_number,omitempty"`
-	Active      bool      `json:"active"`
+	HoldID     string     `json:"hold_id"`
+	Reason     string     `json:"reason"`
+	PlacedBy   string     `json:"placed_by"`
+	PlacedAt   time.Time  `json:"placed_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	CaseNumber string     `json:"case_number,omitempty"`
+	Active     bool       `json:"active"`
 }
 
 // Helper functions

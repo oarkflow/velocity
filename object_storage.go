@@ -22,12 +22,12 @@ import (
 
 const (
 	// Object storage prefixes
-	ObjectDataPrefix      = "obj:data:"
-	ObjectMetaPrefix      = "obj:meta:"
-	ObjectVersionPrefix   = "obj:version:"
-	ObjectACLPrefix       = "obj:acl:"
-	ObjectFolderPrefix    = "obj:folder:"
-	ObjectIndexPrefix     = "obj:index:"
+	ObjectDataPrefix    = "obj:data:"
+	ObjectMetaPrefix    = "obj:meta:"
+	ObjectVersionPrefix = "obj:version:"
+	ObjectACLPrefix     = "obj:acl:"
+	ObjectFolderPrefix  = "obj:folder:"
+	ObjectIndexPrefix   = "obj:index:"
 
 	// Folder separator
 	FolderSeparator = "/"
@@ -37,36 +37,36 @@ const (
 )
 
 var (
-	ErrObjectNotFound      = errors.New("object not found")
-	ErrObjectExists        = errors.New("object already exists")
-	ErrInvalidPath         = errors.New("invalid object path")
-	ErrAccessDenied        = errors.New("access denied")
-	ErrInvalidVersion      = errors.New("invalid version")
-	ErrFolderNotEmpty      = errors.New("folder not empty")
+	ErrObjectNotFound = errors.New("object not found")
+	ErrObjectExists   = errors.New("object already exists")
+	ErrInvalidPath    = errors.New("invalid object path")
+	ErrAccessDenied   = errors.New("access denied")
+	ErrInvalidVersion = errors.New("invalid version")
+	ErrFolderNotEmpty = errors.New("folder not empty")
 )
 
 // ObjectMetadata represents metadata for a stored object
 type ObjectMetadata struct {
-	ObjectID        string            `json:"object_id"`
-	Path            string            `json:"path"`
-	Folder          string            `json:"folder"`
-	Name            string            `json:"name"`
-	ContentType     string            `json:"content_type"`
-	Size            int64             `json:"size"`
-	Hash            string            `json:"hash"`            // SHA256 hash
-	Encrypted       bool              `json:"encrypted"`
-	EncryptionAlgo  string            `json:"encryption_algo,omitempty"`
-	Version         string            `json:"version"`
-	VersionID       string            `json:"version_id"`
-	IsLatest        bool              `json:"is_latest"`
-	CreatedAt       time.Time         `json:"created_at"`
-	ModifiedAt      time.Time         `json:"modified_at"`
-	CreatedBy       string            `json:"created_by"`
-	ModifiedBy      string            `json:"modified_by"`
-	Tags            map[string]string `json:"tags,omitempty"`
-	CustomMetadata  map[string]string `json:"custom_metadata,omitempty"`
-	Checksum        string            `json:"checksum"`
-	StorageClass    string            `json:"storage_class"`
+	ObjectID       string            `json:"object_id"`
+	Path           string            `json:"path"`
+	Folder         string            `json:"folder"`
+	Name           string            `json:"name"`
+	ContentType    string            `json:"content_type"`
+	Size           int64             `json:"size"`
+	Hash           string            `json:"hash"` // SHA256 hash
+	Encrypted      bool              `json:"encrypted"`
+	EncryptionAlgo string            `json:"encryption_algo,omitempty"`
+	Version        string            `json:"version"`
+	VersionID      string            `json:"version_id"`
+	IsLatest       bool              `json:"is_latest"`
+	CreatedAt      time.Time         `json:"created_at"`
+	ModifiedAt     time.Time         `json:"modified_at"`
+	CreatedBy      string            `json:"created_by"`
+	ModifiedBy     string            `json:"modified_by"`
+	Tags           map[string]string `json:"tags,omitempty"`
+	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+	Checksum       string            `json:"checksum"`
+	StorageClass   string            `json:"storage_class"`
 }
 
 // ObjectACL represents access control for an object
@@ -90,14 +90,14 @@ const (
 
 // ObjectVersion represents a version of an object
 type ObjectVersion struct {
-	VersionID   string    `json:"version_id"`
-	ObjectID    string    `json:"object_id"`
-	Size        int64     `json:"size"`
-	Hash        string    `json:"hash"`
-	CreatedAt   time.Time `json:"created_at"`
-	CreatedBy   string    `json:"created_by"`
-	IsLatest    bool      `json:"is_latest"`
-	DeleteMarker bool     `json:"delete_marker"`
+	VersionID    string    `json:"version_id"`
+	ObjectID     string    `json:"object_id"`
+	Size         int64     `json:"size"`
+	Hash         string    `json:"hash"`
+	CreatedAt    time.Time `json:"created_at"`
+	CreatedBy    string    `json:"created_by"`
+	IsLatest     bool      `json:"is_latest"`
+	DeleteMarker bool      `json:"delete_marker"`
 }
 
 // FolderMetadata represents a folder/directory
@@ -113,13 +113,13 @@ type FolderMetadata struct {
 
 // ObjectListOptions for filtering and pagination
 type ObjectListOptions struct {
-	Prefix      string
-	Folder      string
-	MaxKeys     int
-	StartAfter  string
-	Recursive   bool
-	IncludeACL  bool
-	User        string // for permission filtering
+	Prefix     string
+	Folder     string
+	MaxKeys    int
+	StartAfter string
+	Recursive  bool
+	IncludeACL bool
+	User       string // for permission filtering
 }
 
 // StoreObject stores an object with zero-trust security
@@ -129,12 +129,12 @@ func (db *DB) StoreObject(path, contentType, user string, data []byte, opts *Obj
 
 // ObjectOptions for storing objects
 type ObjectOptions struct {
-	Version        string
-	Tags           map[string]string
-	CustomMetadata map[string]string
-	Encrypt        bool
-	ACL            *ObjectACL
-	StorageClass   string
+	Version         string
+	Tags            map[string]string
+	CustomMetadata  map[string]string
+	Encrypt         bool
+	ACL             *ObjectACL
+	StorageClass    string
 	SystemOperation bool // Skip compliance checks for system operations
 }
 
@@ -203,70 +203,26 @@ func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, siz
 
 	// Compute hash while copying
 	hash := sha256.New()
-	tee := io.TeeReader(r, hash)
-
-	var written int64
-	var finalData []byte
+	// Track plaintext bytes read
+	var plaintextBytes int64
+	cr := &countReader{R: r, Count: &plaintextBytes}
+	tee := io.TeeReader(cr, hash)
 
 	if opts.Encrypt && db.crypto != nil {
-		// Read all data for encryption (for streaming encryption, we'd need a different approach)
-		buf := new(bytes.Buffer)
-		written, err = io.Copy(buf, io.LimitReader(tee, db.MaxUploadSize+1))
+		// Securely derive key if needed or use objectID
+		encryptedReader := db.crypto.NewEncryptReader(tee, []byte(objectID))
+		_, err = io.Copy(tmp, encryptedReader)
 		if err != nil {
-			return nil, err
-		}
-		if written > db.MaxUploadSize {
-			return nil, fmt.Errorf("uploaded object too large")
-		}
-
-		// Data classification enforcement
-		plaintext := buf.Bytes()
-		if db.classificationEngine != nil {
-			if _, err := db.classifyAndTag(context.Background(), path, plaintext); err != nil {
-				return nil, err
-			}
-			if err := db.classificationEngine.EnforceDataPolicy(context.Background(), plaintext, "write"); err != nil {
-				return nil, err
-			}
-		}
-
-		// Encrypt data
-		nonce, ciphertext, err := db.crypto.Encrypt(plaintext, []byte(objectID))
-		if err != nil {
-			return nil, err
-		}
-
-		// Combine nonce and ciphertext
-		finalData = append(nonce, ciphertext...)
-		if _, err := tmp.Write(finalData); err != nil {
 			return nil, err
 		}
 	} else {
-		buf := new(bytes.Buffer)
-		written, err = io.Copy(buf, io.LimitReader(tee, db.MaxUploadSize+1))
+		_, err = io.Copy(tmp, tee)
 		if err != nil {
-			return nil, err
-		}
-		if written > db.MaxUploadSize {
-			return nil, fmt.Errorf("uploaded object too large")
-		}
-
-		// Data classification enforcement
-		plaintext := buf.Bytes()
-		if db.classificationEngine != nil {
-			if _, err := db.classifyAndTag(context.Background(), path, plaintext); err != nil {
-				return nil, err
-			}
-			if err := db.classificationEngine.EnforceDataPolicy(context.Background(), plaintext, "write"); err != nil {
-				return nil, err
-			}
-		}
-
-		if _, err := tmp.Write(plaintext); err != nil {
 			return nil, err
 		}
 	}
 
+	size = plaintextBytes
 	hashStr := hex.EncodeToString(hash.Sum(nil))
 
 	// Create metadata
@@ -420,25 +376,24 @@ func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte,
 	objectsDir := filepath.Join(db.filesDir, "objects")
 	filePath := filepath.Join(objectsDir, meta.ObjectID, meta.VersionID)
 
-	data, err := os.ReadFile(filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, nil, err
 	}
+	defer f.Close()
 
-	// Decrypt if necessary
+	var data []byte
 	if meta.Encrypted && db.crypto != nil {
-		// Extract nonce and ciphertext
-		if len(data) < 24 {
-			return nil, nil, fmt.Errorf("invalid encrypted data")
-		}
-		nonce := data[:24]
-		ciphertext := data[24:]
-
-		plaintext, err := db.crypto.Decrypt(nonce, ciphertext, []byte(meta.ObjectID))
+		dr := db.crypto.NewDecryptReader(f, []byte(meta.ObjectID))
+		data, err = io.ReadAll(dr)
 		if err != nil {
 			return nil, nil, err
 		}
-		data = plaintext
+	} else {
+		data, err = io.ReadAll(f)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Apply masking if required
@@ -454,14 +409,35 @@ func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte,
 
 // GetObjectStream retrieves an object as a stream
 func (db *DB) GetObjectStream(path, user string) (io.ReadCloser, *ObjectMetadata, error) {
-	// For now, read all data and return as reader
-	// TODO: Implement true streaming with chunked encryption
-	data, meta, err := db.GetObject(path, user)
+	meta, err := db.GetObjectMetadata(path)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return io.NopCloser(bytes.NewReader(data)), meta, nil
+	// Compliance and permissions check
+	if !db.hasPermissionInternal(path, user, PermissionRead, false) {
+		return nil, nil, ErrAccessDenied
+	}
+
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	filePath := filepath.Join(objectsDir, meta.ObjectID, meta.VersionID)
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if meta.Encrypted && db.crypto != nil {
+		dr := db.crypto.NewDecryptReader(f, []byte(meta.ObjectID))
+		return &readCloserWrapper{Reader: dr, Closer: f}, meta, nil
+	}
+
+	return f, meta, nil
+}
+
+type readCloserWrapper struct {
+	io.Reader
+	io.Closer
 }
 
 // DeleteObjectInternal deletes an object (soft delete) bypassing compliance checks.
@@ -1438,25 +1414,25 @@ func (db *DB) ViewObjectLegacy(path, userID string) error {
 // getExtensionFromContentType maps common content types to file extensions
 func getExtensionFromContentType(contentType string) string {
 	extensionMap := map[string]string{
-		"text/plain":              ".txt",
-		"text/html":               ".html",
-		"text/css":                ".css",
-		"text/javascript":         ".js",
-		"text/markdown":           ".md",
-		"application/json":        ".json",
-		"application/xml":         ".xml",
-		"application/pdf":         ".pdf",
-		"application/zip":         ".zip",
-		"image/png":               ".png",
-		"image/jpeg":              ".jpg",
-		"image/gif":               ".gif",
-		"image/svg+xml":           ".svg",
-		"video/mp4":               ".mp4",
-		"audio/mpeg":              ".mp3",
-		"text/x-shellscript":      ".sh",
-		"application/x-sh":        ".sh",
-		"text/x-python":           ".py",
-		"text/x-go":               ".go",
+		"text/plain":               ".txt",
+		"text/html":                ".html",
+		"text/css":                 ".css",
+		"text/javascript":          ".js",
+		"text/markdown":            ".md",
+		"application/json":         ".json",
+		"application/xml":          ".xml",
+		"application/pdf":          ".pdf",
+		"application/zip":          ".zip",
+		"image/png":                ".png",
+		"image/jpeg":               ".jpg",
+		"image/gif":                ".gif",
+		"image/svg+xml":            ".svg",
+		"video/mp4":                ".mp4",
+		"audio/mpeg":               ".mp3",
+		"text/x-shellscript":       ".sh",
+		"application/x-sh":         ".sh",
+		"text/x-python":            ".py",
+		"text/x-go":                ".go",
 		"application/octet-stream": ".bin",
 	}
 
@@ -1464,4 +1440,104 @@ func getExtensionFromContentType(contentType string) string {
 		return ext
 	}
 	return ".txt" // Default extension
+}
+
+// ListObjectVersions lists all versions of an object
+func (db *DB) ListObjectVersions(path string) ([]ObjectVersion, error) {
+	path = normalizePath(path)
+	versionPrefix := ObjectVersionPrefix + path + ":"
+	keys, err := db.Keys(versionPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+
+	versions := make([]ObjectVersion, 0, len(keys))
+	for _, key := range keys {
+		val, err := db.Get([]byte(key))
+		if err != nil {
+			continue
+		}
+		var v ObjectVersion
+		if err := json.Unmarshal(val, &v); err == nil {
+			versions = append(versions, v)
+		}
+	}
+
+	// Sort versions by creation date (newest first)
+	sort.Slice(versions, func(i, j int) bool {
+		return versions[i].CreatedAt.After(versions[j].CreatedAt)
+	})
+
+	return versions, nil
+}
+
+// GetObjectVersion retrieves a specific version of an object
+func (db *DB) GetObjectVersion(path, versionID, user string) ([]byte, *ObjectMetadata, error) {
+	path = normalizePath(path)
+
+	// Get version info to find the ObjectID
+	versionKey := ObjectVersionPrefix + path + ":" + versionID
+	versionBytes, err := db.Get([]byte(versionKey))
+	if err != nil {
+		return nil, nil, ErrInvalidVersion
+	}
+
+	var version ObjectVersion
+	if err := json.Unmarshal(versionBytes, &version); err != nil {
+		return nil, nil, err
+	}
+
+	// Reconstruct metadata for this specific version.
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	meta.VersionID = version.VersionID
+	meta.Size = version.Size
+	meta.Hash = version.Hash
+	meta.IsLatest = version.IsLatest
+
+	// Check permissions
+	if !db.hasPermissionInternal(path, user, PermissionRead, false) {
+		return nil, nil, ErrAccessDenied
+	}
+
+	// Read from filesystem
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	filePath := filepath.Join(objectsDir, version.ObjectID, version.VersionID)
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Decrypt if necessary
+	if meta.Encrypted && db.crypto != nil {
+		if len(data) < 24 {
+			return nil, nil, fmt.Errorf("invalid encrypted data")
+		}
+		nonce := data[:24]
+		ciphertext := data[24:]
+		plaintext, err := db.crypto.Decrypt(nonce, ciphertext, []byte(version.ObjectID))
+		if err != nil {
+			return nil, nil, err
+		}
+		data = plaintext
+	}
+
+	return data, meta, nil
+}
+
+type countReader struct {
+	R     io.Reader
+	Count *int64
+}
+
+func (c *countReader) Read(p []byte) (n int, err error) {
+	n, err = c.R.Read(p)
+	if n > 0 {
+		*c.Count += int64(n)
+	}
+	return
 }

@@ -113,7 +113,7 @@ func example2_StoreMultipleFiles(db *velocity.DB) {
 			contentType: "text/markdown",
 		},
 		"scripts/deploy.sh": {
-			content:     []byte("#!/bin/bash\necho 'Deploying application...'\n"),
+			content:     []byte("#!/bin/bash\necho 'Deploying application...'"),
 			contentType: "text/x-shellscript",
 		},
 	}
@@ -344,7 +344,7 @@ func example5_ListObjects(db *velocity.DB) {
 		return
 	}
 
-	fmt.Printf("\nDirect children of projects/ folder:\n")
+	fmt.Printf("\nDirect children of projects/ folder:")
 	for _, obj := range objects2 {
 		fmt.Printf("  - %s\n", obj.Name)
 	}

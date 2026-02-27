@@ -24,7 +24,7 @@ func mai10n() {
 	ctm := velocity.NewComplianceTagManager(db)
 	ctx := context.Background()
 
-	fmt.Println("=== Velocity Database Compliance Tagging Demo ===\n")
+	fmt.Println("=== Velocity Database Compliance Tagging Demo ===")
 
 	// Example 1: Tag a folder with GDPR compliance
 	fmt.Println("1. Tagging /customer-data folder with GDPR compliance...")
@@ -264,7 +264,7 @@ func mai10n() {
 	fmt.Println("\n9. Demonstrating tag removal...")
 	fmt.Println("   (Skipped in demo - use ctm.RemoveTag(ctx, path) to remove)")
 
-	fmt.Println("\n=== Demo Complete! ===\n")
+	fmt.Println("\n=== Demo Complete! ===")
 	fmt.Println("Key Features Demonstrated:")
 	fmt.Println("  ✓ Path-based compliance tagging (folders, files, keys)")
 	fmt.Println("  ✓ Multiple framework support (GDPR, HIPAA, PCI DSS, FIPS, NIST, SOC2)")

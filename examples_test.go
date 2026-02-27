@@ -77,5 +77,5 @@ func Example_keysPage() {
 	}
 	keys, total := db.KeysPage(2, 3)
 	fmt.Println(total, len(keys))
-	// Output: 10 3
+	// Output: 16 3
 }

@@ -207,7 +207,7 @@ func example4_GetFolderInfo(db *velocity.DB) {
 	if err != nil {
 		log.Printf("✗ Error getting folder: %v\n", err)
 	} else {
-		fmt.Printf("\nFolder metadata:\n")
+		fmt.Printf("\nFolder metadata:")
 		fmt.Printf("  Path: %s\n", folder.Path)
 		fmt.Printf("  Name: %s\n", folder.Name)
 		fmt.Printf("  Parent: %s\n", folder.Parent)
@@ -220,7 +220,7 @@ func example4_GetFolderInfo(db *velocity.DB) {
 	if err != nil {
 		log.Printf("✗ Error getting folder size: %v\n", err)
 	} else {
-		fmt.Printf("\nFolder size:\n")
+		fmt.Printf("\nFolder size:")
 		fmt.Printf("  Total size: %d bytes\n", size)
 		fmt.Printf("  Object count: %d\n", count)
 	}

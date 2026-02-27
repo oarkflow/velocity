@@ -58,6 +58,37 @@ func (bw *BatchWriter) Flush() error {
 	return bw.flushUnsafe()
 }
 
+func (bw *BatchWriter) Cancel() {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+	bw.entries = bw.entries[:0]
+}
+
+func (bw *BatchWriter) Delete(key []byte) error {
+	bw.mutex.Lock()
+	defer bw.mutex.Unlock()
+
+	// Grow slice in-place, avoid pointer allocation
+	bw.entries = append(bw.entries, Entry{
+		Key:       append([]byte(nil), key...),
+		Value:     nil,
+		Timestamp: uint64(time.Now().UnixNano()),
+		Deleted:   true,
+	})
+
+	// Compute checksum using reusable buffer
+	idx := len(bw.entries) - 1
+	entry := &bw.entries[idx]
+	bw.crcBuf = append(bw.crcBuf[:0], entry.Key...)
+	entry.checksum = crc32.ChecksumIEEE(bw.crcBuf)
+
+	if len(bw.entries) >= bw.maxSize {
+		return bw.flushUnsafe()
+	}
+
+	return nil
+}
+
 func (bw *BatchWriter) flushUnsafe() error {
 	if len(bw.entries) == 0 {
 		return nil
@@ -76,7 +107,11 @@ func (bw *BatchWriter) flushUnsafe() error {
 
 	// Batch write to memtable
 	for i := range bw.entries {
-		bw.db.memTable.Put(bw.entries[i].Key, bw.entries[i].Value)
+		if bw.entries[i].Deleted {
+			bw.db.memTable.Delete(bw.entries[i].Key)
+		} else {
+			bw.db.memTable.Put(bw.entries[i].Key, bw.entries[i].Value)
+		}
 	}
 
 	// Update search index if enabled
@@ -103,7 +138,14 @@ func (bw *BatchWriter) flushUnsafe() error {
 					bw.db.mutex.Unlock()
 					return err
 				}
-			} else {
+			}
+
+			if entry.Deleted {
+				// Doc was removed from indices above, skip re-adding projections
+				continue
+			}
+
+			if !exists {
 				docID, err = bw.db.allocateDocIDLocked(entry.Key)
 				if err != nil {
 					bw.db.mutex.Unlock()

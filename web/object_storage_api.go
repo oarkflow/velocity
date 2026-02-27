@@ -419,17 +419,23 @@ func (s *HTTPServer) handleListVersions(c *fiber.Ctx) error {
 		})
 	}
 
-	// TODO: Implement version listing
-	// For now, return placeholder
+	versions, err := s.db.ListObjectVersions(path)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
 	return c.JSON(fiber.Map{
-		"message":  "Version listing not yet implemented",
 		"path":     path,
-		"versions": []string{},
+		"versions": versions,
+		"count":    len(versions),
 	})
 }
 
 // handleGetVersion retrieves a specific version of an object
 func (s *HTTPServer) handleGetVersion(c *fiber.Ctx) error {
+	username := c.Locals("username").(string)
 	versionID := c.Params("versionId")
 	path := c.Params("*")
 
@@ -439,13 +445,32 @@ func (s *HTTPServer) handleGetVersion(c *fiber.Ctx) error {
 		})
 	}
 
-	// TODO: Implement version retrieval
-	// For now, return placeholder
-	return c.JSON(fiber.Map{
-		"message":    "Version retrieval not yet implemented",
-		"path":       path,
-		"version_id": versionID,
-	})
+	data, meta, err := s.db.GetObjectVersion(path, versionID, username)
+	if err != nil {
+		if err == velocity.ErrObjectNotFound || err == velocity.ErrInvalidVersion {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Object version not found",
+			})
+		}
+		if err == velocity.ErrAccessDenied {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "Access denied",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	// Set headers
+	c.Set("Content-Type", meta.ContentType)
+	c.Set("Content-Length", strconv.FormatInt(meta.Size, 10))
+	c.Set("X-Object-ID", meta.ObjectID)
+	c.Set("X-Version-ID", meta.VersionID)
+	c.Set("X-Object-Hash", meta.Hash)
+	c.Set("ETag", meta.Hash)
+
+	return c.Send(data)
 }
 
 // Helper functions

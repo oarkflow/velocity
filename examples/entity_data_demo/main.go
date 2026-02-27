@@ -20,7 +20,7 @@ func main() {
 	ctx := context.Background()
 	em := db.EntityManager()
 
-	fmt.Println("=== Velocity Entity Relations Demo - JSON Data & Objects ===\n")
+	fmt.Println("=== Velocity Entity Relations Demo - JSON Data & Objects ===")
 
 	// Demo 1: Create JSON entities and show data
 	fmt.Println("Demo 1: Creating JSON Entities with Data")
@@ -61,7 +61,7 @@ func createJSONEntities(ctx context.Context, em *velocity.EntityManager) {
 		Name:        "user-profile-john-doe",
 		Description: "User profile for John Doe",
 		Data:        userProfile,
-		CreatedBy:    "admin",
+		CreatedBy:   "admin",
 		Tags: map[string]string{
 			"type":       "user",
 			"department": "engineering",
@@ -86,7 +86,7 @@ func createJSONEntities(ctx context.Context, em *velocity.EntityManager) {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\n  JSON Data:\n")
+	fmt.Printf("\n  JSON Data:")
 	var userData map[string]interface{}
 	if err := json.Unmarshal(result.Entity.Data, &userData); err == nil {
 		prettyJSON, _ := json.MarshalIndent(userData, "    ", "  ")
@@ -126,7 +126,7 @@ func createJSONEntities(ctx context.Context, em *velocity.EntityManager) {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\n  Project JSON Data:\n")
+	fmt.Printf("\n  Project JSON Data:")
 	var projectData map[string]interface{}
 	if err := json.Unmarshal(projectResult.Entity.Data, &projectData); err == nil {
 		prettyJSON, _ := json.MarshalIndent(projectData, "    ", "  ")
@@ -148,7 +148,7 @@ func createSecretEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		Name:        "production-api-credentials",
 		Description: "API credentials for production environment",
 		SecretRef:   "api-production-key",
-		CreatedBy:    "admin",
+		CreatedBy:   "admin",
 		Tags: map[string]string{
 			"type":    "secret",
 			"env":     "production",
@@ -172,7 +172,7 @@ func createSecretEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\n  Retrieved Secret Value:\n")
+	fmt.Printf("\n  Retrieved Secret Value:")
 	fmt.Printf("    %s\n", string(retrievedSecret))
 
 	// Store another secret
@@ -186,7 +186,7 @@ func createSecretEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		Name:        "database-connection-string",
 		Description: "Database connection string",
 		SecretRef:   "database-connection-string",
-		CreatedBy:    "admin",
+		CreatedBy:   "admin",
 		Tags: map[string]string{
 			"type":    "secret",
 			"service": "database",
@@ -195,7 +195,7 @@ func createSecretEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 
 	fmt.Printf("\n✓ Created database secret entity: %s\n", dbSecretEntity.EntityID)
 	dbSecret, _ := em.GetEntitySecret(ctx, dbSecretEntity.EntityID)
-	fmt.Printf("  Database Connection String:\n")
+	fmt.Printf("  Database Connection String:")
 	fmt.Printf("    %s\n", string(dbSecret))
 }
 
@@ -229,7 +229,7 @@ func createObjectEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		Tags: map[string]string{
 			"type":           "document",
 			"classification": "confidential",
-			"year":          "2024",
+			"year":           "2024",
 		},
 	})
 	if err != nil {
@@ -246,13 +246,13 @@ func createObjectEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\n  Retrieved Object Metadata:\n")
+	fmt.Printf("\n  Retrieved Object Metadata:")
 	fmt.Printf("    Name: %s\n", retrievedMeta.Name)
 	fmt.Printf("    Size: %d bytes\n", retrievedMeta.Size)
 	fmt.Printf("    Content Type: %s\n", retrievedMeta.ContentType)
 	fmt.Printf("    Created: %s\n", retrievedMeta.CreatedAt.Format("2006-01-02 15:04:05"))
 
-	fmt.Printf("\n  Object Content:\n")
+	fmt.Printf("\n  Object Content:")
 	fmt.Printf("    %s\n", string(data))
 
 	// Store another object
@@ -281,14 +281,14 @@ func createObjectEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		ObjectPath: configMeta.Path,
 		CreatedBy:  "admin",
 		Tags: map[string]string{
-			"type":  "config",
-			"env":   "production",
+			"type": "config",
+			"env":  "production",
 		},
 	})
 
 	fmt.Printf("\n✓ Created config object entity: %s\n", configEntity.EntityID)
 	configData, _, _ := em.GetEntityObject(ctx, configEntity.EntityID, "admin")
-	fmt.Printf("  Config Content:\n")
+	fmt.Printf("  Config Content:")
 	fmt.Printf("    %s\n", string(configData))
 }
 
@@ -329,7 +329,7 @@ func createRelationshipsAndShowData(ctx context.Context, db *velocity.DB, em *ve
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\n  Related Entities (depth 2):\n")
+	fmt.Printf("\n  Related Entities (depth 2):")
 	for entityID, result := range graph {
 		if entityID != rootEntity.EntityID {
 			fmt.Printf("\n  Entity: %s\n", result.Entity.Name)
@@ -339,7 +339,7 @@ func createRelationshipsAndShowData(ctx context.Context, db *velocity.DB, em *ve
 
 			// Show relationships
 			if len(result.Relationships) > 0 {
-				fmt.Printf("    Relationships:\n")
+				fmt.Printf("    Relationships:")
 				for _, rel := range result.Relationships {
 					fmt.Printf("      - %s -> %s (%s)\n", rel.SourceEntity, rel.TargetEntity, rel.RelationType)
 				}
@@ -347,7 +347,7 @@ func createRelationshipsAndShowData(ctx context.Context, db *velocity.DB, em *ve
 
 			// Show JSON data if available
 			if result.Entity.Type == velocity.EntityTypeJSON && len(result.Entity.Data) > 0 {
-				fmt.Printf("    JSON Data:\n")
+				fmt.Printf("    JSON Data:")
 				var data map[string]interface{}
 				if err := json.Unmarshal(result.Entity.Data, &data); err == nil {
 					prettyJSON, _ := json.MarshalIndent(data, "      ", "  ")
@@ -407,7 +407,7 @@ func createEnvelopeWithRelationships(ctx context.Context, db *velocity.DB, em *v
 		log.Fatal(err)
 	}
 
-	fmt.Printf("\n  Entity Data:\n")
+	fmt.Printf("\n  Entity Data:")
 	var entityData map[string]interface{}
 	if err := json.Unmarshal(entityResult.Entity.Data, &entityData); err == nil {
 		prettyJSON, _ := json.MarshalIndent(entityData, "    ", "  ")
@@ -417,7 +417,7 @@ func createEnvelopeWithRelationships(ctx context.Context, db *velocity.DB, em *v
 	// Get related entities
 	graph, err := em.GetEntityGraph(ctx, jsonEntity.EntityID, 2)
 	if err == nil {
-		fmt.Printf("\n  Related Entities in Envelope:\n")
+		fmt.Printf("\n  Related Entities in Envelope:")
 		for entityID, result := range graph {
 			if entityID != jsonEntity.EntityID {
 				fmt.Printf("    - %s (%s)\n", result.Entity.Name, result.Entity.Type)
@@ -444,14 +444,14 @@ func createEnvelopeWithRelationships(ctx context.Context, db *velocity.DB, em *v
 	fmt.Printf("  Payload Kind: %s\n", envelope.Payload.Kind)
 
 	// Show envelope metadata
-	fmt.Printf("\n  Envelope Metadata:\n")
+	fmt.Printf("\n  Envelope Metadata:")
 	for k, v := range envelope.Payload.Metadata {
 		fmt.Printf("    %s: %s\n", k, v)
 	}
 
 	// Show envelope payload data
 	if len(envelope.Payload.Value) > 0 {
-		fmt.Printf("\n  Envelope Payload Data:\n")
+		fmt.Printf("\n  Envelope Payload Data:")
 		var payloadData map[string]interface{}
 		if err := json.Unmarshal(envelope.Payload.Value, &payloadData); err == nil {
 			prettyJSON, _ := json.MarshalIndent(payloadData, "    ", "  ")
@@ -489,7 +489,7 @@ func createEnvelopeWithRelationships(ctx context.Context, db *velocity.DB, em *v
 
 	// Verify payload data matches
 	if len(importedEnvelope.Payload.Value) > 0 {
-		fmt.Printf("\n  Imported Envelope Payload Data:\n")
+		fmt.Printf("\n  Imported Envelope Payload Data:")
 		var importedData map[string]interface{}
 		if err := json.Unmarshal(importedEnvelope.Payload.Value, &importedData); err == nil {
 			prettyJSON, _ := json.MarshalIndent(importedData, "    ", "  ")

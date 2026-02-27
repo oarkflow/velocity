@@ -20,7 +20,7 @@ func main() {
 	ctx := context.Background()
 	em := db.EntityManager()
 
-	fmt.Println("=== Velocity Entity Relations Demo ===\n")
+	fmt.Println("=== Velocity Entity Relations Demo ===")
 
 	// Demo 1: Creating JSON Entities
 	fmt.Println("Demo 1: Creating JSON Entities")
@@ -81,9 +81,9 @@ func createJSONEntities(ctx context.Context, em *velocity.EntityManager) {
 	userEntity, err := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:        velocity.EntityTypeJSON,
 		Name:        "user-profile-john-doe",
-		Description:  "User profile for John Doe",
+		Description: "User profile for John Doe",
 		Data:        userProfile,
-		CreatedBy:    "admin",
+		CreatedBy:   "admin",
 		Tags: map[string]string{
 			"type":       "user",
 			"department": "engineering",
@@ -141,13 +141,13 @@ func createSecretEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 	secretEntity, err := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:        velocity.EntityTypeSecret,
 		Name:        "production-api-credentials",
-		Description:  "API credentials for production environment",
+		Description: "API credentials for production environment",
 		SecretRef:   "api-production-key",
-		CreatedBy:    "admin",
+		CreatedBy:   "admin",
 		Tags: map[string]string{
-			"type":     "secret",
-			"env":      "production",
-			"service":  "api",
+			"type":    "secret",
+			"env":     "production",
+			"service": "api",
 		},
 		Metadata: map[string]string{
 			"rotation": "monthly",
@@ -180,7 +180,7 @@ func createObjectEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 		&velocity.ObjectOptions{
 			Encrypt: true,
 			Tags: map[string]string{
-				"type":        "report",
+				"type":           "report",
 				"classification": "confidential",
 			},
 		},
@@ -193,13 +193,13 @@ func createObjectEntities(ctx context.Context, db *velocity.DB, em *velocity.Ent
 	objectEntity, err := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:        velocity.EntityTypeObject,
 		Name:        "confidential-report-entity",
-		Description:  "Confidential annual report",
-		ObjectPath:   meta.Path,
-		CreatedBy:    "admin",
+		Description: "Confidential annual report",
+		ObjectPath:  meta.Path,
+		CreatedBy:   "admin",
 		Tags: map[string]string{
 			"type":           "document",
 			"classification": "confidential",
-			"year":          "2024",
+			"year":           "2024",
 		},
 	})
 	if err != nil {
@@ -308,7 +308,7 @@ func queryEntities(ctx context.Context, em *velocity.EntityManager) {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("✓ Sorted entities (by name):\n")
+	fmt.Printf("✓ Sorted entities (by name):")
 	for _, entity := range sortedEntities {
 		fmt.Printf("  - %s\n", entity.Name)
 	}
@@ -363,7 +363,7 @@ func buildDocumentManagement(ctx context.Context, db *velocity.DB, em *velocity.
 	rootFolder, err := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:      velocity.EntityTypeFolder,
 		Name:      "documents",
-		CreatedBy:  "admin",
+		CreatedBy: "admin",
 		Tags: map[string]string{
 			"type": "folder",
 		},
@@ -375,7 +375,7 @@ func buildDocumentManagement(ctx context.Context, db *velocity.DB, em *velocity.
 	reportsFolder, err := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:      velocity.EntityTypeFolder,
 		Name:      "reports",
-		CreatedBy:  "admin",
+		CreatedBy: "admin",
 		Tags: map[string]string{
 			"type": "folder",
 		},
@@ -386,10 +386,10 @@ func buildDocumentManagement(ctx context.Context, db *velocity.DB, em *velocity.
 
 	// Create folder relationships
 	_, err = em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  rootFolder.EntityID,
-		TargetEntity:  reportsFolder.EntityID,
-		RelationType:  velocity.RelationTypeContains,
-		CreatedBy:     "admin",
+		SourceEntity: rootFolder.EntityID,
+		TargetEntity: reportsFolder.EntityID,
+		RelationType: velocity.RelationTypeContains,
+		CreatedBy:    "admin",
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -418,10 +418,10 @@ func buildDocumentManagement(ctx context.Context, db *velocity.DB, em *velocity.
 	doc1Entity, _ := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:       velocity.EntityTypeObject,
 		Name:       "q1-financial-report",
-		ObjectPath:  meta1.Path,
-		CreatedBy:   "admin",
+		ObjectPath: meta1.Path,
+		CreatedBy:  "admin",
 		Tags: map[string]string{
-			"type":  "document",
+			"type":    "document",
 			"quarter": "Q1",
 		},
 	})
@@ -429,30 +429,30 @@ func buildDocumentManagement(ctx context.Context, db *velocity.DB, em *velocity.
 	doc2Entity, _ := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:       velocity.EntityTypeObject,
 		Name:       "q2-financial-report",
-		ObjectPath:  meta2.Path,
-		CreatedBy:   "admin",
+		ObjectPath: meta2.Path,
+		CreatedBy:  "admin",
 		Tags: map[string]string{
-			"type":  "document",
+			"type":    "document",
 			"quarter": "Q2",
 		},
 	})
 
 	// Link documents to folder
 	em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  reportsFolder.EntityID,
-		TargetEntity:  doc1Entity.EntityID,
-		RelationType:  velocity.RelationTypeContains,
-		CreatedBy:     "admin",
+		SourceEntity: reportsFolder.EntityID,
+		TargetEntity: doc1Entity.EntityID,
+		RelationType: velocity.RelationTypeContains,
+		CreatedBy:    "admin",
 	})
 
 	em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  reportsFolder.EntityID,
-		TargetEntity:  doc2Entity.EntityID,
-		RelationType:  velocity.RelationTypeContains,
-		CreatedBy:     "admin",
+		SourceEntity: reportsFolder.EntityID,
+		TargetEntity: doc2Entity.EntityID,
+		RelationType: velocity.RelationTypeContains,
+		CreatedBy:    "admin",
 	})
 
-	fmt.Printf("✓ Created document management structure\n")
+	fmt.Printf("✓ Created document management structure")
 	fmt.Printf("  Root folder: %s\n", rootFolder.Name)
 	fmt.Printf("  Reports folder: %s\n", reportsFolder.Name)
 	fmt.Printf("  Documents: %d\n", 2)
@@ -506,10 +506,10 @@ func buildConfigurationSystem(ctx context.Context, db *velocity.DB, em *velocity
 
 	// Create dependency relationship
 	em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  prodEntity.EntityID,
-		TargetEntity:  baseEntity.EntityID,
-		RelationType:  velocity.RelationTypeDependsOn,
-		CreatedBy:     "system",
+		SourceEntity: prodEntity.EntityID,
+		TargetEntity: baseEntity.EntityID,
+		RelationType: velocity.RelationTypeDependsOn,
+		CreatedBy:    "system",
 	})
 
 	// Store API secret
@@ -531,13 +531,13 @@ func buildConfigurationSystem(ctx context.Context, db *velocity.DB, em *velocity
 
 	// Link secret to production config
 	em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  prodEntity.EntityID,
-		TargetEntity:  secretEntity.EntityID,
-		RelationType:  velocity.RelationTypeReferences,
-		CreatedBy:     "system",
+		SourceEntity: prodEntity.EntityID,
+		TargetEntity: secretEntity.EntityID,
+		RelationType: velocity.RelationTypeReferences,
+		CreatedBy:    "system",
 	})
 
-	fmt.Printf("✓ Created configuration system\n")
+	fmt.Printf("✓ Created configuration system")
 	fmt.Printf("  Base config: %s\n", baseEntity.Name)
 	fmt.Printf("  Production config: %s\n", prodEntity.Name)
 	fmt.Printf("  API secret: %s\n", secretEntity.Name)
@@ -613,26 +613,26 @@ func buildVersionControl(ctx context.Context, em *velocity.EntityManager) {
 
 	// Create version relationships
 	em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  version2Entity.EntityID,
-		TargetEntity:  originalEntity.EntityID,
-		RelationType:  velocity.RelationTypeVersionOf,
-		CreatedBy:     "user-123",
+		SourceEntity: version2Entity.EntityID,
+		TargetEntity: originalEntity.EntityID,
+		RelationType: velocity.RelationTypeVersionOf,
+		CreatedBy:    "user-123",
 		Metadata: map[string]string{
 			"version": "2.0",
 		},
 	})
 
 	em.AddRelation(ctx, &velocity.EntityRelationRequest{
-		SourceEntity:  version3Entity.EntityID,
-		TargetEntity:  version2Entity.EntityID,
-		RelationType:  velocity.RelationTypeVersionOf,
-		CreatedBy:     "user-123",
+		SourceEntity: version3Entity.EntityID,
+		TargetEntity: version2Entity.EntityID,
+		RelationType: velocity.RelationTypeVersionOf,
+		CreatedBy:    "user-123",
 		Metadata: map[string]string{
 			"version": "3.0",
 		},
 	})
 
-	fmt.Printf("✓ Created version control system\n")
+	fmt.Printf("✓ Created version control system")
 	fmt.Printf("  Original: %s\n", originalEntity.Name)
 	fmt.Printf("  Version 2: %s\n", version2Entity.Name)
 	fmt.Printf("  Version 3: %s\n", version3Entity.Name)
@@ -653,10 +653,10 @@ func createEncryptedEntities(ctx context.Context, em *velocity.EntityManager) {
 	encryptedEntity, err := em.CreateEntity(ctx, &velocity.EntityRequest{
 		Type:        velocity.EntityTypeJSON,
 		Name:        "sensitive-pii-data",
-		Description:  "Personally Identifiable Information",
+		Description: "Personally Identifiable Information",
 		Data:        sensitiveData,
 		Encrypt:     true,
-		CreatedBy:    "admin",
+		CreatedBy:   "admin",
 		Tags: map[string]string{
 			"type":           "pii",
 			"classification": "confidential",
@@ -677,7 +677,7 @@ func createEncryptedEntities(ctx context.Context, em *velocity.EntityManager) {
 	}
 
 	// The data should be decrypted now
-	fmt.Printf("  Decrypted data retrieved successfully\n")
+	fmt.Printf("  Decrypted data retrieved successfully")
 	fmt.Printf("  Data length: %d bytes\n", len(result.Entity.Data))
 	if len(result.Entity.Data) > 0 {
 		previewLen := 50
@@ -857,7 +857,7 @@ func createEnvelopesFromEntities(ctx context.Context, db *velocity.DB, em *veloc
 		log.Fatal(err)
 	}
 
-	fmt.Printf("✓ Verified imported envelope is accessible\n")
+	fmt.Printf("✓ Verified imported envelope is accessible")
 	fmt.Printf("  Custody events: %d\n", len(verifiedEnvelope.CustodyLedger))
 	fmt.Printf("  Audit entries: %d\n", len(verifiedEnvelope.AuditLog))
 

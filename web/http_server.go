@@ -164,7 +164,7 @@ func (s *HTTPServer) jwtAuthMiddleware() fiber.Handler {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fiber.NewError(fiber.StatusUnauthorized, "Unexpected signing method")
 			}
-			return []byte("your-secret-key-change-this-in-production"), nil // TODO: Make configurable
+			return []byte(s.db.JWTSecret()), nil
 		})
 
 		if err != nil || !token.Valid {
@@ -213,7 +213,7 @@ func (s *HTTPServer) handleLogin(c *fiber.Ctx) error {
 		"iat":      time.Now().Unix(),
 	})
 
-	tokenString, err := token.SignedString([]byte("your-secret-key-change-this-in-production"))
+	tokenString, err := token.SignedString([]byte(s.db.JWTSecret()))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to generate token",
@@ -345,7 +345,7 @@ func (s *HTTPServer) handlePutIndexed(c *fiber.Ctx) error {
 
 func (s *HTTPServer) handleSearch(c *fiber.Ctx) error {
 	var req struct {
-		Prefix  string `json:"prefix"`
+		Prefix   string `json:"prefix"`
 		FullText string `json:"fullText"`
 		Filters  []struct {
 			Field    string      `json:"field"`

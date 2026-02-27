@@ -29,14 +29,14 @@ func main() {
 
 	fmt.Println("=======================================================================")
 	fmt.Println("    COMPREHENSIVE COMPLIANCE TAGGING DEMONSTRATION")
-	fmt.Println("=======================================================================\n")
+	fmt.Println("=======================================================================")
 
 	// ========================================================================
 	// SCENARIO 1: TAG A FOLDER WITH COMPLIANCE (HIPAA/PHI)
 	// ========================================================================
 	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 	fmt.Println("SCENARIO 1: Folder Tagged with HIPAA Compliance (PHI Data)")
-	fmt.Println("═══════════════════════════════════════════════════════════════════════\n")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
 	// Tag the /healthcare folder with HIPAA compliance
 	healthcareTag := &velocity.ComplianceTag{
@@ -174,7 +174,7 @@ func main() {
 	// ========================================================================
 	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
 	fmt.Println("SCENARIO 2: Key-Value Tagged with GDPR Compliance (PII Data)")
-	fmt.Println("═══════════════════════════════════════════════════════════════════════\n")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
 	// Tag a specific key-value with GDPR compliance
 	userKeyTag := &velocity.ComplianceTag{
@@ -280,7 +280,7 @@ func main() {
 	// ========================================================================
 	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
 	fmt.Println("SCENARIO 3: File Tagged with PCI DSS Compliance (Credit Card Data)")
-	fmt.Println("═══════════════════════════════════════════════════════════════════════\n")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
 	// Tag file storage area with PCI DSS compliance
 	paymentFileTag := &velocity.ComplianceTag{
@@ -400,7 +400,7 @@ func main() {
 	// ========================================================================
 	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
 	fmt.Println("                            KEY INSIGHTS")
-	fmt.Println("═══════════════════════════════════════════════════════════════════════\n")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
 	fmt.Println("1. FOLDER TAGGING (HIPAA/PHI):")
 	fmt.Println("   • Tags apply to ALL data under that folder path")

@@ -6,68 +6,69 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
 
 // ImmutableAuditLog represents a tamper-proof audit trail using Merkle trees
 type ImmutableAuditLog struct {
-	ChainID       string       `json:"chain_id"`
-	BlockHeight   int          `json:"block_height"`
-	PreviousBlock string       `json:"previous_block"` // Hash of previous block
-	Timestamp     time.Time    `json:"timestamp"`
-	Events        []AuditEvent `json:"events"`
-	MerkleRoot    string       `json:"merkle_root"`     // Root of Merkle tree for events
-	Signature     string       `json:"signature"`       // Cryptographic signature
+	ChainID       string        `json:"chain_id"`
+	BlockHeight   int           `json:"block_height"`
+	PreviousBlock string        `json:"previous_block"` // Hash of previous block
+	Timestamp     time.Time     `json:"timestamp"`
+	Events        []AuditEvent  `json:"events"`
+	MerkleRoot    string        `json:"merkle_root"` // Root of Merkle tree for events
+	Signature     string        `json:"signature"`   // Cryptographic signature
 	Metadata      BlockMetadata `json:"metadata"`
 }
 
 // AuditEvent represents a single auditable action
 type AuditEvent struct {
-	EventID           string                 `json:"event_id"`
-	Timestamp         time.Time              `json:"timestamp"`
-	Actor             string                 `json:"actor"`
-	ActorRole         string                 `json:"actor_role,omitempty"`
-	Action            string                 `json:"action"`
-	Resource          string                 `json:"resource"`
-	ResourceID        string                 `json:"resource_id,omitempty"`
-	Result            string                 `json:"result"` // success, failure, denied
-	IPAddress         string                 `json:"ip_address,omitempty"`
-	SessionID         string                 `json:"session_id,omitempty"`
-	DataHash          string                 `json:"data_hash,omitempty"` // Hash of affected data
-	BeforeState       string                 `json:"before_state,omitempty"`
-	AfterState        string                 `json:"after_state,omitempty"`
-	Reason            string                 `json:"reason,omitempty"`
-	Classification    DataClassification     `json:"classification"`
-	ComplianceTags    []ComplianceFramework  `json:"compliance_tags,omitempty"`
-	Severity          string                 `json:"severity"` // low, medium, high, critical
-	MerkleProof       []string               `json:"merkle_proof,omitempty"` // Proof of inclusion
-	EventHash         string                 `json:"event_hash"` // SHA-256 of event data
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	EventID        string                 `json:"event_id"`
+	Timestamp      time.Time              `json:"timestamp"`
+	Actor          string                 `json:"actor"`
+	ActorRole      string                 `json:"actor_role,omitempty"`
+	Action         string                 `json:"action"`
+	Resource       string                 `json:"resource"`
+	ResourceID     string                 `json:"resource_id,omitempty"`
+	Result         string                 `json:"result"` // success, failure, denied
+	IPAddress      string                 `json:"ip_address,omitempty"`
+	SessionID      string                 `json:"session_id,omitempty"`
+	DataHash       string                 `json:"data_hash,omitempty"` // Hash of affected data
+	BeforeState    string                 `json:"before_state,omitempty"`
+	AfterState     string                 `json:"after_state,omitempty"`
+	Reason         string                 `json:"reason,omitempty"`
+	Classification DataClassification     `json:"classification"`
+	ComplianceTags []ComplianceFramework  `json:"compliance_tags,omitempty"`
+	Severity       string                 `json:"severity"`               // low, medium, high, critical
+	MerkleProof    []string               `json:"merkle_proof,omitempty"` // Proof of inclusion
+	EventHash      string                 `json:"event_hash"`             // SHA-256 of event data
+	Metadata       map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // BlockMetadata contains block-level information
 type BlockMetadata struct {
-	NodeID       string `json:"node_id"`
-	Version      string `json:"version"`
-	EventCount   int    `json:"event_count"`
-	CreatedBy    string `json:"created_by"`
-	Sealed       bool   `json:"sealed"`       // Immutable once sealed
+	NodeID       string    `json:"node_id"`
+	Version      string    `json:"version"`
+	EventCount   int       `json:"event_count"`
+	CreatedBy    string    `json:"created_by"`
+	Sealed       bool      `json:"sealed"` // Immutable once sealed
 	SealedAt     time.Time `json:"sealed_at,omitempty"`
 	RetentionEnd time.Time `json:"retention_end"` // When this can be archived
 }
 
 // AuditLogManager manages the immutable audit trail
 type AuditLogManager struct {
-	db               *DB
-	currentBlock     *ImmutableAuditLog
-	blocks           []*ImmutableAuditLog
-	pendingEvents    []AuditEvent
-	mu               sync.RWMutex
-	blockSize        int // Max events per block
-	autoSeal         bool
-	retentionPeriod  time.Duration
-	chainID          string
+	db              *DB
+	currentBlock    *ImmutableAuditLog
+	blocks          []*ImmutableAuditLog
+	pendingEvents   []AuditEvent
+	mu              sync.RWMutex
+	blockSize       int // Max events per block
+	autoSeal        bool
+	retentionPeriod time.Duration
+	chainID         string
 }
 
 // NewAuditLogManager creates a new audit log manager
@@ -124,7 +125,7 @@ func (alm *AuditLogManager) sealBlockLocked() error {
 		Timestamp:   time.Now(),
 		Events:      make([]AuditEvent, len(alm.pendingEvents)),
 		Metadata: BlockMetadata{
-			NodeID:       "node-001", // TODO: Get from config
+			NodeID:       alm.db.NodeID(),
 			Version:      "2.0.0",
 			EventCount:   len(alm.pendingEvents),
 			CreatedBy:    "audit_system",
@@ -456,9 +457,10 @@ func (alm *AuditLogManager) ExportForensics(outputPath string) error {
 		return fmt.Errorf("failed to marshal forensic export: %w", err)
 	}
 
-	// TODO: Write to file
-	_ = data
-	_ = outputPath
+	// Write to file
+	if err := os.WriteFile(outputPath, data, 0600); err != nil {
+		return fmt.Errorf("failed to write forensic export to %s: %w", outputPath, err)
+	}
 
 	return nil
 }
@@ -541,11 +543,11 @@ func (alm *AuditLogManager) DetectTampering() ([]TamperingIndicator, error) {
 
 // TamperingIndicator represents a potential tampering event
 type TamperingIndicator struct {
-	Type        string    `json:"type"`
-	Severity    string    `json:"severity"`
-	Description string    `json:"description"`
-	BlockHeight int       `json:"block_height,omitempty"`
-	DetectedAt  time.Time `json:"detected_at"`
+	Type        string                 `json:"type"`
+	Severity    string                 `json:"severity"`
+	Description string                 `json:"description"`
+	BlockHeight int                    `json:"block_height,omitempty"`
+	DetectedAt  time.Time              `json:"detected_at"`
 	Evidence    map[string]interface{} `json:"evidence,omitempty"`
 }
 
@@ -586,13 +588,13 @@ func (alm *AuditLogManager) GetAuditStatistics() AuditStatistics {
 
 // AuditStatistics provides summary statistics
 type AuditStatistics struct {
-	TotalBlocks    int               `json:"total_blocks"`
-	TotalEvents    int               `json:"total_events"`
-	PendingEvents  int               `json:"pending_events"`
-	ChainID        string            `json:"chain_id"`
-	OldestEvent    time.Time         `json:"oldest_event"`
-	NewestEvent    time.Time         `json:"newest_event"`
-	EventsByAction map[string]int    `json:"events_by_action"`
-	EventsByActor  map[string]int    `json:"events_by_actor"`
-	EventsByResult map[string]int    `json:"events_by_result"`
+	TotalBlocks    int            `json:"total_blocks"`
+	TotalEvents    int            `json:"total_events"`
+	PendingEvents  int            `json:"pending_events"`
+	ChainID        string         `json:"chain_id"`
+	OldestEvent    time.Time      `json:"oldest_event"`
+	NewestEvent    time.Time      `json:"newest_event"`
+	EventsByAction map[string]int `json:"events_by_action"`
+	EventsByActor  map[string]int `json:"events_by_actor"`
+	EventsByResult map[string]int `json:"events_by_result"`
 }

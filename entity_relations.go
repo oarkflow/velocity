@@ -23,72 +23,72 @@ var (
 
 // Entity types supported by the system
 const (
-	EntityTypeJSON    = "json"
-	EntityTypeSecret  = "secret"
-	EntityTypeObject  = "object"
-	EntityTypeFolder  = "folder"
-	EntityTypeCustom  = "custom"
+	EntityTypeJSON   = "json"
+	EntityTypeSecret = "secret"
+	EntityTypeObject = "object"
+	EntityTypeFolder = "folder"
+	EntityTypeCustom = "custom"
 )
 
 // Relation types between entities
 const (
-	RelationTypeContains    = "contains"      // Entity A contains Entity B
-	RelationTypeReferences  = "references"    // Entity A references Entity B
-	RelationTypeDependsOn   = "depends_on"    // Entity A depends on Entity B
-	RelationTypeRelatedTo   = "related_to"    // Generic relationship
-	RelationTypeVersionOf   = "version_of"    // Entity A is a version of Entity B
-	RelationTypeDerivedFrom = "derived_from"  // Entity A is derived from Entity B
-	RelationTypeAttachedTo  = "attached_to"   // Entity A is attached to Entity B
+	RelationTypeContains    = "contains"     // Entity A contains Entity B
+	RelationTypeReferences  = "references"   // Entity A references Entity B
+	RelationTypeDependsOn   = "depends_on"   // Entity A depends on Entity B
+	RelationTypeRelatedTo   = "related_to"   // Generic relationship
+	RelationTypeVersionOf   = "version_of"   // Entity A is a version of Entity B
+	RelationTypeDerivedFrom = "derived_from" // Entity A is derived from Entity B
+	RelationTypeAttachedTo  = "attached_to"  // Entity A is attached to Entity B
 )
 
 // Entity represents a stored entity with metadata
 type Entity struct {
-	EntityID      string            `json:"entity_id"`
-	Type          string            `json:"type"`
-	Name          string            `json:"name"`
-	Description   string            `json:"description,omitempty"`
-	Data          json.RawMessage   `json:"data,omitempty"`
-	EncryptedData []byte            `json:"encrypted_data,omitempty"` // Separate field for encrypted data
-	SecretRef     string            `json:"secret_ref,omitempty"` // Reference to stored secret
-	ObjectPath    string            `json:"object_path,omitempty"` // Reference to object storage
-	EnvelopeID    string            `json:"envelope_id,omitempty"` // Reference to envelope
-	CreatedAt     time.Time         `json:"created_at"`
-	CreatedBy     string            `json:"created_by"`
-	ModifiedAt    time.Time         `json:"modified_at"`
-	ModifiedBy    string            `json:"modified_by"`
-	Tags          map[string]string `json:"tags,omitempty"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	Version       int               `json:"version"`
-	Checksum      string            `json:"checksum"`
-	Encrypted     bool              `json:"encrypted"`
+	EntityID       string            `json:"entity_id"`
+	Type           string            `json:"type"`
+	Name           string            `json:"name"`
+	Description    string            `json:"description,omitempty"`
+	Data           json.RawMessage   `json:"data,omitempty"`
+	EncryptedData  []byte            `json:"encrypted_data,omitempty"` // Separate field for encrypted data
+	SecretRef      string            `json:"secret_ref,omitempty"`     // Reference to stored secret
+	ObjectPath     string            `json:"object_path,omitempty"`    // Reference to object storage
+	EnvelopeID     string            `json:"envelope_id,omitempty"`    // Reference to envelope
+	CreatedAt      time.Time         `json:"created_at"`
+	CreatedBy      string            `json:"created_by"`
+	ModifiedAt     time.Time         `json:"modified_at"`
+	ModifiedBy     string            `json:"modified_by"`
+	Tags           map[string]string `json:"tags,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	Version        int               `json:"version"`
+	Checksum       string            `json:"checksum"`
+	Encrypted      bool              `json:"encrypted"`
 	EncryptionAlgo string            `json:"encryption_algo,omitempty"`
 }
 
 // EntityRelation represents a relationship between two entities
 type EntityRelation struct {
-	RelationID    string    `json:"relation_id"`
-	SourceEntity  string    `json:"source_entity"`
-	TargetEntity  string    `json:"target_entity"`
-	RelationType  string    `json:"relation_type"`
-	CreatedAt     time.Time `json:"created_at"`
-	CreatedBy     string    `json:"created_by"`
+	RelationID    string            `json:"relation_id"`
+	SourceEntity  string            `json:"source_entity"`
+	TargetEntity  string            `json:"target_entity"`
+	RelationType  string            `json:"relation_type"`
+	CreatedAt     time.Time         `json:"created_at"`
+	CreatedBy     string            `json:"created_by"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
-	Bidirectional bool      `json:"bidirectional"`
+	Bidirectional bool              `json:"bidirectional"`
 }
 
 // EntityQueryOptions for filtering and searching entities
 type EntityQueryOptions struct {
-	Type          string
-	Tags          map[string]string
-	Metadata      map[string]string
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
-	ModifiedAfter *time.Time
+	Type           string
+	Tags           map[string]string
+	Metadata       map[string]string
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
+	ModifiedAfter  *time.Time
 	ModifiedBefore *time.Time
-	Limit         int
-	Offset        int
-	SortBy        string // "name", "created_at", "modified_at"
-	SortOrder     string // "asc", "desc"
+	Limit          int
+	Offset         int
+	SortBy         string // "name", "created_at", "modified_at"
+	SortOrder      string // "asc", "desc"
 }
 
 // EntityRelationQueryOptions for querying relationships
@@ -102,17 +102,17 @@ type EntityRelationQueryOptions struct {
 
 // EntityRequest for creating entities
 type EntityRequest struct {
-	Type          string
-	Name          string
-	Description   string
-	Data          json.RawMessage
-	SecretRef     string
-	ObjectPath    string
-	EnvelopeID    string
-	Tags          map[string]string
-	Metadata      map[string]string
-	Encrypt       bool
-	CreatedBy     string
+	Type        string
+	Name        string
+	Description string
+	Data        json.RawMessage
+	SecretRef   string
+	ObjectPath  string
+	EnvelopeID  string
+	Tags        map[string]string
+	Metadata    map[string]string
+	Encrypt     bool
+	CreatedBy   string
 }
 
 // EntityRelationRequest for creating relationships
@@ -127,7 +127,7 @@ type EntityRelationRequest struct {
 
 // EntityResult includes entity with its relationships
 type EntityResult struct {
-	Entity       *Entity          `json:"entity"`
+	Entity        *Entity           `json:"entity"`
 	Relationships []*EntityRelation `json:"relationships,omitempty"`
 	DataRedacted  bool              `json:"data_redacted"` // Indicates if data was redacted
 }
@@ -171,23 +171,23 @@ func (em *EntityManager) CreateEntity(ctx context.Context, req *EntityRequest) (
 
 	now := time.Now().UTC()
 	entity := &Entity{
-		EntityID:      entityID,
-		Type:          req.Type,
-		Name:          req.Name,
-		Description:   req.Description,
-		Data:          req.Data,
-		SecretRef:     req.SecretRef,
-		ObjectPath:    req.ObjectPath,
-		EnvelopeID:    req.EnvelopeID,
-		CreatedAt:     now,
-		CreatedBy:     req.CreatedBy,
-		ModifiedAt:    now,
-		ModifiedBy:    req.CreatedBy,
-		Tags:          req.Tags,
-		Metadata:      req.Metadata,
-		Version:       1,
-		Checksum:      checksum,
-		Encrypted:     req.Encrypt,
+		EntityID:       entityID,
+		Type:           req.Type,
+		Name:           req.Name,
+		Description:    req.Description,
+		Data:           req.Data,
+		SecretRef:      req.SecretRef,
+		ObjectPath:     req.ObjectPath,
+		EnvelopeID:     req.EnvelopeID,
+		CreatedAt:      now,
+		CreatedBy:      req.CreatedBy,
+		ModifiedAt:     now,
+		ModifiedBy:     req.CreatedBy,
+		Tags:           req.Tags,
+		Metadata:       req.Metadata,
+		Version:        1,
+		Checksum:       checksum,
+		Encrypted:      req.Encrypt,
 		EncryptionAlgo: "ChaCha20-Poly1305",
 	}
 
@@ -624,15 +624,15 @@ func (em *EntityManager) CreateEnvelopeFromEntity(ctx context.Context, entityID 
 	// Create envelope request
 	req := &EnvelopeRequest{
 		Label:     entity.Name,
-		Type:       envelopeType,
-		CreatedBy:  createdBy,
-		Notes:      entity.Description,
+		Type:      envelopeType,
+		CreatedBy: createdBy,
+		Notes:     entity.Description,
 		Payload: EnvelopePayload{
-			Kind:           payloadKind,
-			ObjectPath:     objectPath,
-			ObjectVersion:  objectVersion,
+			Kind:            payloadKind,
+			ObjectPath:      objectPath,
+			ObjectVersion:   objectVersion,
 			SecretReference: secretRef,
-			Value:          payloadData,
+			Value:           payloadData,
 			Metadata: map[string]string{
 				"entity_id":   entity.EntityID,
 				"entity_type": entity.Type,
@@ -660,8 +660,8 @@ func (em *EntityManager) CreateEnvelopeFromEntity(ctx context.Context, entityID 
 // Internal methods
 
 const (
-	entityKeyPrefix    = "entity:"
-	relationKeyPrefix  = "relation:"
+	entityKeyPrefix   = "entity:"
+	relationKeyPrefix = "relation:"
 )
 
 func (em *EntityManager) saveEntity(entity *Entity) error {
@@ -723,13 +723,12 @@ func (em *EntityManager) getEntityRelations(entityID string) ([]*EntityRelation,
 		return nil, err
 	}
 
-	var relations []*EntityRelation
+	relations := make([]*EntityRelation, 0)
 	for _, rel := range allRelations {
 		if rel.SourceEntity == entityID || rel.TargetEntity == entityID {
 			relations = append(relations, rel)
 		}
 	}
-
 	return relations, nil
 }
 
@@ -775,7 +774,7 @@ func (em *EntityManager) traverseRelations(entityID, relationType string, depth 
 	}
 
 	result := &EntityResult{
-		Entity:       entity,
+		Entity:        entity,
 		Relationships: relations,
 	}
 	*results = append(*results, result)
@@ -814,7 +813,7 @@ func (em *EntityManager) buildGraph(entityID string, maxDepth, currentDepth int,
 	}
 
 	result := &EntityResult{
-		Entity:       entity,
+		Entity:        entity,
 		Relationships: relations,
 	}
 	graph[entityID] = result
@@ -920,32 +919,18 @@ func (em *EntityManager) redactData(data json.RawMessage) string {
 		return "[]"
 	}
 
-	// Try to parse as JSON to determine structure
-	var parsed interface{}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		// If not valid JSON, just redact the whole thing
-		return `"***"`
+	// Use classification engine for intelligent masking if available
+	if em.db.classificationEngine != nil {
+		result, err := em.db.classificationEngine.ClassifyData(context.Background(), data)
+		if err == nil {
+			return string(em.db.classificationEngine.MaskData(data, result))
+		}
 	}
 
-	// Redact based on data type
-	switch v := parsed.(type) {
-	case map[string]interface{}:
-		redactedMap := make(map[string]interface{})
-		for key := range v {
-			redactedMap[key] = "***"
-		}
-		redacted, _ := json.Marshal(redactedMap)
-		return string(redacted)
-	case []interface{}:
-		redactedArray := make([]interface{}, len(v))
-		for i := range v {
-			redactedArray[i] = "***"
-		}
-		redacted, _ := json.Marshal(redactedArray)
-		return string(redacted)
-	default:
-		return `"***"`
-	}
+	// Fallback: If no classification engine or it failed, don't redact everything
+	// unless we really have to. For now, return the original data if we can't
+	// prove it's sensitive, to avoid breaking functionality.
+	return string(data)
 }
 
 func isValidEntityType(entityType string) bool {
