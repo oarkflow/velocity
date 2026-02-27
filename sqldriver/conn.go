@@ -38,11 +38,7 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 // prepared statements and transactions, marking this
 // connection as no longer in use.
 func (c *Conn) Close() error {
-	if c.db != nil {
-		err := c.db.Close()
-		c.db = nil
-		return err
-	}
+	c.db = nil
 	return nil
 }
 

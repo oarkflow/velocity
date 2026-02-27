@@ -211,13 +211,19 @@ func distinctResults(results []velocity.SearchResult) []velocity.SearchResult {
 
 func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *sqlparser.Select, args []driver.NamedValue) (*Rows, error) {
 
+	// 2. Map WHERE clause (if not optimized into the Search filter earlier)
+	var filters []velocity.SearchFilter
+	if sel.Where != nil {
+		filters = e.extractFilters(sel.Where.Expr, args)
+	}
+
 	// 1. Map Table Expressions (FROM ...)
 	var rootIter Iterator
 	var err error
 
 	// Usually SQL parser returns `TableExprs` slices
 	for _, expr := range sel.From {
-		iter, tableErr := e.buildTableExprIterator(ctx, expr, args)
+		iter, tableErr := e.buildTableExprIterator(ctx, expr, args, filters)
 		if tableErr != nil {
 			return nil, tableErr
 		}
@@ -237,7 +243,7 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *sqlparser.Sel
 		return nil, fmt.Errorf("velocity driver: no valid FROM clause found")
 	}
 
-	// 2. Map WHERE clause (if not optimized into the Search filter earlier)
+	// 3. APPLY Re-filtering for anything not pushed down
 	if sel.Where != nil {
 		rootIter = &FilterIterator{
 			next: rootIter,
@@ -384,7 +390,7 @@ func rowToJSONBytes(r Row) []byte {
 	return b
 }
 
-func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.TableExpr, args []driver.NamedValue) (Iterator, error) {
+func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.TableExpr, args []driver.NamedValue, filters []velocity.SearchFilter) (Iterator, error) {
 	switch t := expr.(type) {
 	case *sqlparser.AliasedTableExpr:
 		if subq, isSub := t.Expr.(*sqlparser.Subquery); isSub {
@@ -403,16 +409,16 @@ func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.
 
 		// Try to extract velocity parameters if we can, otherwise Scan ALL and rely on Filter Iterator.
 		// For optimal performance, we would inject filters from the AST down into velocity.SearchQuery here.
-		q := velocity.SearchQuery{Prefix: tableName, Limit: 1000} // Capped scan
+		q := velocity.SearchQuery{Prefix: tableName, Limit: 1000, Filters: filters}
 
 		return NewTableScanIterator(e.conn.db, alias, q)
 
 	case *sqlparser.JoinTableExpr:
-		leftIter, err := e.buildTableExprIterator(ctx, t.LeftExpr, args)
+		leftIter, err := e.buildTableExprIterator(ctx, t.LeftExpr, args, filters)
 		if err != nil {
 			return nil, err
 		}
-		rightIter, err := e.buildTableExprIterator(ctx, t.RightExpr, args)
+		rightIter, err := e.buildTableExprIterator(ctx, t.RightExpr, args, filters)
 		if err != nil {
 			return nil, err
 		}
@@ -425,6 +431,53 @@ func (e *ExecutorV2) buildTableExprIterator(ctx context.Context, expr sqlparser.
 	default:
 		return nil, fmt.Errorf("velocity driver: unsupported table expression %#v", expr)
 	}
+}
+
+func (e *ExecutorV2) extractFilters(expr sqlparser.Expr, args []driver.NamedValue) []velocity.SearchFilter {
+	eval := &Evaluator{Args: args}
+	var filters []velocity.SearchFilter
+
+	switch v := expr.(type) {
+	case *sqlparser.ComparisonExpr:
+		left, okL := v.Left.(*sqlparser.ColName)
+		if okL {
+			val, err := eval.Eval(v.Right, nil)
+			if err == nil {
+				op := ""
+				hashOnly := false
+				switch v.Operator {
+				case sqlparser.EqualStr:
+					op = "="
+					hashOnly = true
+				case sqlparser.GreaterThanStr:
+					op = ">"
+				case sqlparser.GreaterEqualStr:
+					op = ">="
+				case sqlparser.LessThanStr:
+					op = "<"
+				case sqlparser.LessEqualStr:
+					op = "<="
+				case sqlparser.NotEqualStr:
+					op = "!="
+				}
+
+				if op != "" {
+					filters = append(filters, velocity.SearchFilter{
+						Field:    left.Name.String(),
+						Op:       op,
+						Value:    val,
+						HashOnly: hashOnly,
+					})
+				}
+			}
+		}
+	case *sqlparser.AndExpr:
+		filters = append(filters, e.extractFilters(v.Left, args)...)
+		filters = append(filters, e.extractFilters(v.Right, args)...)
+	case *sqlparser.ParenExpr:
+		filters = append(filters, e.extractFilters(v.Expr, args)...)
+	}
+	return filters
 }
 
 func (e *ExecutorV2) buildSubqueryIterator(ctx context.Context, stmt sqlparser.SelectStatement, alias string, args []driver.NamedValue) (Iterator, error) {

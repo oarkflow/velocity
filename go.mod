@@ -5,6 +5,8 @@ go 1.25.5
 replace github.com/oarkflow/velocity/web => ./web
 
 require (
+	github.com/go-sql-driver/mysql v1.9.3
+	github.com/lib/pq v1.11.2
 	github.com/oarkflow/convert v0.0.5
 	github.com/oarkflow/licensing v0.0.24
 	github.com/oarkflow/previewer v0.0.5
@@ -17,6 +19,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect

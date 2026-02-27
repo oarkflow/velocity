@@ -814,6 +814,10 @@ func (db *DB) Keys(pattern string) ([]string, error) {
 	}
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+	return db.keysLocked(pattern)
+}
+
+func (db *DB) keysLocked(pattern string) ([]string, error) {
 
 	seen := make(map[string]bool)
 	var keys []string
@@ -971,6 +975,10 @@ func globMatch(pattern, str string) bool {
 func (db *DB) KeysPage(offset, limit int) ([][]byte, int) {
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
+	return db.keysPageLocked(offset, limit)
+}
+
+func (db *DB) keysPageLocked(offset, limit int) ([][]byte, int) {
 
 	seen := make(map[string]bool)
 	var keys [][]byte

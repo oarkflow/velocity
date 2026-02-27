@@ -7,8 +7,14 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/oarkflow/velocity"
+)
+
+var (
+	engines   = make(map[string]*velocity.DB)
+	enginesMu sync.Mutex
 )
 
 // DSNConfigs allows injecting pre-configured velocity.Config setups for a given DSN.
@@ -38,9 +44,16 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 
 	config.Path = path
 
-	db, err := velocity.NewWithConfig(*config)
-	if err != nil {
-		return nil, fmt.Errorf("velocity driver: failed to open db: %w", err)
+	enginesMu.Lock()
+	defer enginesMu.Unlock()
+
+	db, ok := engines[path]
+	if !ok {
+		db, err = velocity.NewWithConfig(*config)
+		if err != nil {
+			return nil, fmt.Errorf("velocity driver: failed to open db at %s: %w", path, err)
+		}
+		engines[path] = db
 	}
 
 	return &Conn{db: db}, nil
