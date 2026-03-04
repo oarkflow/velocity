@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/oarkflow/velocity/internal/secretr/authz"
+	"github.com/oarkflow/velocity/internal/secretr/core/access"
 	"github.com/oarkflow/velocity/internal/secretr/core/alerts"
 	"github.com/oarkflow/velocity/internal/secretr/core/audit"
 	"github.com/oarkflow/velocity/internal/secretr/core/cicd"
@@ -45,6 +48,11 @@ type Server struct {
 	rateLimiter *RateLimiter
 	monitoring  *monitoring.Engine
 	alerts      *alerts.Engine
+	access      *access.Manager
+	authorizer  *authz.Authorizer
+	resolver    authz.ResourceResolver
+	routeSpecs  []authz.APIRouteAuthSpec
+	routeSet    []RouteMethod
 	mu          sync.RWMutex
 	certFile    string
 	keyFile     string
@@ -65,6 +73,11 @@ type Config struct {
 	CICDManager      *cicd.Manager
 	MonitoringEngine *monitoring.Engine
 	AlertEngine      *alerts.Engine
+	AccessManager    *access.Manager
+	PolicyChecker    authz.PolicyChecker
+	Entitlements     authz.EntitlementProvider
+	UsageCounter     authz.UsageCounter
+	ResourceResolver authz.ResourceResolver
 	RateLimitRPS     int
 	RateLimitBurst   int
 	CertFile         string
@@ -81,12 +94,23 @@ func NewServer(cfg Config) *Server {
 		cicd:        cfg.CICDManager,
 		monitoring:  cfg.MonitoringEngine,
 		alerts:      cfg.AlertEngine,
+		access:      cfg.AccessManager,
 		crypto:      crypto.NewEngine(""),
 		mux:         http.NewServeMux(),
 		rateLimiter: NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst),
 		certFile:    cfg.CertFile,
 		keyFile:     cfg.KeyFile,
+		resolver:    cfg.ResourceResolver,
 	}
+	if s.resolver == nil {
+		s.resolver = authz.NewDefaultResourceResolver()
+	}
+	entProvider := cfg.Entitlements
+	if entProvider == nil {
+		entProvider = authz.NewEnvEntitlementProvider()
+	}
+	s.authorizer = authz.NewAuthorizerWithCounter(entProvider, s.access, &authz.AuditAdapter{Engine: s.audit}, cfg.UsageCounter)
+	s.authorizer.SetPolicyChecker(cfg.PolicyChecker)
 
 	s.setupRoutes()
 
@@ -103,47 +127,145 @@ func NewServer(cfg Config) *Server {
 
 // setupRoutes configures API routes
 func (s *Server) setupRoutes() {
+	addSpec := func(method, pattern string, scopes []types.Scope, resourceType string, requireACL, allowUnauth bool) {
+		s.routeSpecs = append(s.routeSpecs, authz.APIRouteAuthSpec{
+			Method:         method,
+			Pattern:        pattern,
+			RequiredScopes: scopes,
+			ResourceType:   resourceType,
+			RequireACL:     requireACL,
+			AllowUnauth:    allowUnauth,
+		})
+	}
 	// Health check
-	s.mux.HandleFunc("/health", s.handleHealth)
-	s.mux.HandleFunc("/ready", s.handleReady)
+	s.registerRoute("/health", []string{http.MethodGet}, true, s.handleHealth)
+	s.registerRoute("/ready", []string{http.MethodGet}, true, s.handleReady)
+	addSpec(http.MethodGet, "/health", nil, "", false, true)
+	addSpec(http.MethodGet, "/ready", nil, "", false, true)
 
 	// Auth endpoints
-	s.mux.HandleFunc("/api/v1/auth/login", s.withMiddleware(s.handleLogin))
-	s.mux.HandleFunc("/api/v1/auth/logout", s.withMiddleware(s.handleLogout))
-	s.mux.HandleFunc("/api/v1/auth/refresh", s.withMiddleware(s.handleRefresh))
+	s.registerRoute("/api/v1/auth/login", []string{http.MethodPost}, true, s.handleLogin)
+	s.registerRoute("/api/v1/auth/logout", []string{http.MethodPost}, true, s.handleLogout)
+	s.registerRoute("/api/v1/auth/refresh", []string{http.MethodPost}, true, s.handleRefresh)
+	addSpec(http.MethodPost, "/api/v1/auth/login", nil, "", false, true)
+	addSpec(http.MethodPost, "/api/v1/auth/logout", []types.Scope{types.ScopeAuthLogout}, "", false, false)
+	addSpec(http.MethodPost, "/api/v1/auth/refresh", []types.Scope{types.ScopeAuthLogin}, "", false, false)
 
 	// Secret endpoints
-	s.mux.HandleFunc("/api/v1/secrets", s.withMiddleware(s.handleSecrets))
-	s.mux.HandleFunc("/api/v1/secrets/", s.withMiddleware(s.handleSecret))
+	s.registerRoute("/api/v1/secrets", []string{http.MethodGet, http.MethodPost}, true, s.handleSecrets)
+	s.registerRoute("/api/v1/secrets/", []string{http.MethodGet, http.MethodPut, http.MethodDelete}, true, s.handleSecret)
+	addSpec(http.MethodGet, "/api/v1/secrets", []types.Scope{types.ScopeSecretList}, "secret", true, false)
+	addSpec(http.MethodPost, "/api/v1/secrets", []types.Scope{types.ScopeSecretCreate}, "secret", true, false)
+	addSpec(http.MethodGet, "/api/v1/secrets/", []types.Scope{types.ScopeSecretRead}, "secret", true, false)
+	addSpec(http.MethodPut, "/api/v1/secrets/", []types.Scope{types.ScopeSecretUpdate}, "secret", true, false)
+	addSpec(http.MethodDelete, "/api/v1/secrets/", []types.Scope{types.ScopeSecretDelete}, "secret", true, false)
 
 	// Identity endpoints
-	s.mux.HandleFunc("/api/v1/identities", s.withMiddleware(s.handleIdentities))
-	s.mux.HandleFunc("/api/v1/identities/", s.withMiddleware(s.handleIdentity))
+	s.registerRoute("/api/v1/identities", []string{http.MethodGet}, true, s.handleIdentities)
+	s.registerRoute("/api/v1/identities/", []string{http.MethodGet}, true, s.handleIdentity)
+	addSpec(http.MethodGet, "/api/v1/identities", []types.Scope{types.ScopeIdentityRead}, "identity", true, false)
+	addSpec(http.MethodGet, "/api/v1/identities/", []types.Scope{types.ScopeIdentityRead}, "identity", true, false)
 
 	// Audit endpoints
-	s.mux.HandleFunc("/api/v1/audit", s.withMiddleware(s.handleAuditQuery))
-	s.mux.HandleFunc("/api/v1/audit/export", s.withMiddleware(s.handleAuditExport))
+	s.registerRoute("/api/v1/audit", []string{http.MethodGet}, true, s.handleAuditQuery)
+	s.registerRoute("/api/v1/audit/export", []string{http.MethodGet}, true, s.handleAuditExport)
+	addSpec(http.MethodGet, "/api/v1/audit", []types.Scope{types.ScopeAuditQuery}, "audit", true, false)
+	addSpec(http.MethodGet, "/api/v1/audit/export", []types.Scope{types.ScopeAuditExport}, "audit", true, false)
 
 	// CICD endpoints
-	s.mux.HandleFunc("/api/v1/cicd/auth", s.handlePipelineAuth)
+	s.registerRoute("/api/v1/cicd/auth", []string{http.MethodPost}, true, s.handlePipelineAuth)
+	addSpec(http.MethodPost, "/api/v1/cicd/auth", []types.Scope{types.ScopePipelineAuth}, "", false, true)
 
 	// File endpoints
-	s.mux.HandleFunc("/api/v1/files", s.withMiddleware(s.handleFiles))
-	s.mux.HandleFunc("/api/v1/files/", s.withMiddleware(s.handleFile))
+	s.registerRoute("/api/v1/files", []string{http.MethodGet, http.MethodPost}, true, s.handleFiles)
+	s.registerRoute("/api/v1/files/", []string{http.MethodGet, http.MethodDelete}, true, s.handleFile)
+	addSpec(http.MethodGet, "/api/v1/files", []types.Scope{types.ScopeFileList}, "file", true, false)
+	addSpec(http.MethodPost, "/api/v1/files", []types.Scope{types.ScopeFileUpload}, "file", true, false)
+	addSpec(http.MethodGet, "/api/v1/files/", []types.Scope{types.ScopeFileDownload}, "file", true, false)
+	addSpec(http.MethodDelete, "/api/v1/files/", []types.Scope{types.ScopeFileDelete}, "file", true, false)
 
 	// Monitoring endpoints
-	s.mux.HandleFunc("/api/v1/monitoring/dashboard", s.withMiddleware(s.handleDashboard))
-	s.mux.HandleFunc("/api/v1/monitoring/events", s.withMiddleware(s.handleMonitoringEvents))
-	s.mux.HandleFunc("/api/v1/monitoring/stream", s.withMiddleware(s.handleMonitoringStream))
+	s.registerRoute("/api/v1/monitoring/dashboard", []string{http.MethodGet, http.MethodPost}, true, s.handleDashboard)
+	s.registerRoute("/api/v1/monitoring/events", []string{http.MethodGet}, true, s.handleMonitoringEvents)
+	s.registerRoute("/api/v1/monitoring/stream", []string{http.MethodGet}, true, s.handleMonitoringStream)
+	addSpec(http.MethodGet, "/api/v1/monitoring/dashboard", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodPost, "/api/v1/monitoring/dashboard", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodGet, "/api/v1/monitoring/events", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodGet, "/api/v1/monitoring/stream", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
 
 	// Alert endpoints
-	s.mux.HandleFunc("/api/v1/alerts", s.withMiddleware(s.handleAlerts))
-	s.mux.HandleFunc("/api/v1/alerts/", s.withMiddleware(s.handleAlert))
-	s.mux.HandleFunc("/api/v1/alerts/rules", s.withMiddleware(s.handleAlertRules))
-	s.mux.HandleFunc("/api/v1/alerts/notifiers", s.withMiddleware(s.handleAlertNotifiers))
+	s.registerRoute("/api/v1/alerts", []string{http.MethodGet}, true, s.handleAlerts)
+	s.registerRoute("/api/v1/alerts/", []string{http.MethodGet, http.MethodPost}, true, s.handleAlert)
+	s.registerRoute("/api/v1/alerts/rules", []string{http.MethodGet, http.MethodPost}, true, s.handleAlertRules)
+	s.registerRoute("/api/v1/alerts/notifiers", []string{http.MethodGet}, true, s.handleAlertNotifiers)
+	addSpec(http.MethodGet, "/api/v1/alerts", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodGet, "/api/v1/alerts/", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodPost, "/api/v1/alerts/", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodGet, "/api/v1/alerts/rules", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodPost, "/api/v1/alerts/rules", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
+	addSpec(http.MethodGet, "/api/v1/alerts/notifiers", []types.Scope{types.ScopeAuditRead}, "audit", true, false)
 
 	// Generic command-dispatch endpoint for CLI/API parity.
-	s.mux.HandleFunc("/api/v1/commands/", s.withMiddleware(s.handleCommandDispatch))
+	s.registerRoute("/api/v1/commands/", []string{http.MethodPost}, true, s.handleCommandDispatch)
+	// Include both auth and non-auth dispatch forms in route inventory.
+	s.routeSet = append(s.routeSet, RouteMethod{Method: http.MethodPost, Path: "/api/v1/commands/auth/login"})
+	addSpec(http.MethodPost, "/api/v1/commands/auth/", nil, "", false, true)
+	addSpec(http.MethodPost, "/api/v1/commands/", []types.Scope{types.ScopeAdminAll}, "", false, false)
+
+	sort.Slice(s.routeSpecs, func(i, j int) bool {
+		if len(s.routeSpecs[i].Pattern) == len(s.routeSpecs[j].Pattern) {
+			if s.routeSpecs[i].Method == s.routeSpecs[j].Method {
+				return s.routeSpecs[i].Pattern < s.routeSpecs[j].Pattern
+			}
+			return s.routeSpecs[i].Method < s.routeSpecs[j].Method
+		}
+		return len(s.routeSpecs[i].Pattern) > len(s.routeSpecs[j].Pattern)
+	})
+}
+
+func (s *Server) registerRoute(path string, methods []string, guarded bool, handler http.HandlerFunc) {
+	h := handler
+	if guarded {
+		h = s.withMiddleware(handler)
+	}
+	s.mux.HandleFunc(path, h)
+	for _, m := range methods {
+		s.routeSet = append(s.routeSet, RouteMethod{Method: m, Path: methodProbePath(path, m)})
+	}
+}
+
+func methodProbePath(path, method string) string {
+	switch path {
+	case "/api/v1/secrets/":
+		return "/api/v1/secrets/name"
+	case "/api/v1/identities/":
+		return "/api/v1/identities/id"
+	case "/api/v1/files/":
+		return "/api/v1/files/name"
+	case "/api/v1/alerts/":
+		if method == http.MethodGet {
+			return "/api/v1/alerts/id"
+		}
+		return "/api/v1/alerts/id/acknowledge"
+	case "/api/v1/commands/":
+		return "/api/v1/commands/secret/list"
+	default:
+		return path
+	}
+}
+
+// RouteMethods returns the concrete method/path contract registered by setupRoutes.
+func (s *Server) RouteMethods() []RouteMethod {
+	out := make([]RouteMethod, len(s.routeSet))
+	copy(out, s.routeSet)
+	return out
+}
+
+// RouteAuthSpecs returns the registered API auth specs.
+func (s *Server) RouteAuthSpecs() []authz.APIRouteAuthSpec {
+	out := make([]authz.APIRouteAuthSpec, len(s.routeSpecs))
+	copy(out, s.routeSpecs)
+	return out
 }
 
 // withMiddleware wraps handlers with common middleware
@@ -173,8 +295,74 @@ func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'")
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
+		if !s.authorizeRoute(w, r) {
+			return
+		}
+
 		handler(w, r)
 	}
+}
+
+func (s *Server) authorizeRoute(w http.ResponseWriter, r *http.Request) bool {
+	if s.authorizer == nil {
+		return true
+	}
+	spec, ok := authz.ResolveAPIRouteSpec(r.Method, r.URL.Path, s.routeSpecs)
+	if !ok {
+		s.authorizer.AuditSpecDenied(r.Context(), authz.Request{
+			Session:   nil,
+			Operation: "api:" + r.Method + ":" + r.URL.Path,
+			Metadata:  map[string]any{"method": r.Method, "path": r.URL.Path},
+		}, "authorization spec missing for route")
+		s.jsonError(w, http.StatusForbidden, types.ErrCodeAuthzSpecMissing, "authorization spec missing for route")
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/commands/") {
+		cmdPath := authz.CommandPathFromDispatchURL(r.URL.Path)
+		cspec, err := authz.ResolveCommandDispatchAuth(cmdPath)
+		if err != nil {
+			s.authorizer.AuditSpecDenied(r.Context(), authz.Request{
+				Session:   nil,
+				Operation: "api:" + r.Method + ":" + r.URL.Path,
+				Metadata:  map[string]any{"method": r.Method, "path": r.URL.Path, "command_path": cmdPath},
+			}, "authorization spec missing for command dispatch")
+			s.jsonError(w, http.StatusForbidden, types.ErrCodeAuthzSpecMissing, err.Error())
+			return false
+		}
+		spec.RequiredScopes = cspec.RequiredScopes
+		spec.AllowUnauth = cspec.AllowUnauth
+		spec.RequireACL = cspec.RequireACL
+		spec.ResourceType = cspec.ResourceType
+	}
+
+	session := s.getSession(r)
+	resourceType, resourceID, usageCtx, metadata := s.resolver.ResolveAPI(r, session, spec)
+	req := authz.Request{
+		Session:        session,
+		ActorID:        resolveActorID(session),
+		Operation:      "api:" + r.Method + ":" + r.URL.Path,
+		RequiredScopes: spec.RequiredScopes,
+		ResourceType:   resourceType,
+		ResourceID:     resourceID,
+		UsageContext:   usageCtx,
+		AllowUnauth:    spec.AllowUnauth,
+		RequireACL:     spec.RequireACL,
+		Metadata:       metadata,
+	}
+	if _, err := s.authorizer.Authorize(r.Context(), req); err != nil {
+		var te *types.Error
+		if errors.As(err, &te) {
+			status := http.StatusForbidden
+			if te.Code == types.ErrCodeUnauthorized {
+				status = http.StatusUnauthorized
+			}
+			s.jsonError(w, status, te.Code, te.Message)
+			return false
+		}
+		s.jsonError(w, http.StatusForbidden, "forbidden", err.Error())
+		return false
+	}
+	return true
 }
 
 // Start starts the API server
@@ -306,9 +494,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -329,9 +516,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -348,9 +534,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 // Secret handlers
 
 func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -365,9 +550,8 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecret(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -396,11 +580,6 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request, session *ty
 		return
 	}
 
-	if !session.Scopes.Has(types.ScopeSecretList) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	env := r.URL.Query().Get("environment")
 	prefix := r.URL.Query().Get("prefix")
 
@@ -419,11 +598,6 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request, session *ty
 func (s *Server) createSecret(w http.ResponseWriter, r *http.Request, session *types.Session) {
 	if s.secrets == nil {
 		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Secret service not available")
-		return
-	}
-
-	if !session.Scopes.Has(types.ScopeSecretCreate) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
 		return
 	}
 
@@ -462,11 +636,6 @@ func (s *Server) createSecret(w http.ResponseWriter, r *http.Request, session *t
 func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, session *types.Session, name string) {
 	if s.secrets == nil {
 		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Secret service not available")
-		return
-	}
-
-	if !session.Scopes.Has(types.ScopeSecretRead) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
 		return
 	}
 
@@ -516,11 +685,6 @@ func (s *Server) updateSecret(w http.ResponseWriter, r *http.Request, session *t
 		return
 	}
 
-	if !session.Scopes.Has(types.ScopeSecretUpdate) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	var req UpdateSecretRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
@@ -551,11 +715,6 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, session *t
 		return
 	}
 
-	if !session.Scopes.Has(types.ScopeSecretDelete) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	if err := s.secrets.Delete(r.Context(), name, session.IdentityID); err != nil {
 		s.logAuditEvent(r.Context(), "secret", "delete_failed", session.IdentityID, false, map[string]any{
 			"name":  name,
@@ -575,9 +734,8 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, session *t
 // Identity handlers
 
 func (s *Server) handleIdentities(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -590,9 +748,8 @@ func (s *Server) handleIdentities(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -611,11 +768,6 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listIdentities(w http.ResponseWriter, r *http.Request, session *types.Session) {
-	if !session.Scopes.Has(types.ScopeIdentityRead) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	if s.identity == nil {
 		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Identity service not available")
 		return
@@ -631,11 +783,6 @@ func (s *Server) listIdentities(w http.ResponseWriter, r *http.Request, session 
 }
 
 func (s *Server) getIdentity(w http.ResponseWriter, r *http.Request, session *types.Session, id types.ID) {
-	if !session.Scopes.Has(types.ScopeIdentityRead) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	if s.identity == nil {
 		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Identity service not available")
 		return
@@ -658,14 +805,8 @@ func (s *Server) handleAuditQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
-		return
-	}
-
-	if !session.Scopes.Has(types.ScopeAuditQuery) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
+	_, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -712,14 +853,8 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
-		return
-	}
-
-	if !session.Scopes.Has(types.ScopeAuditExport) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -793,6 +928,18 @@ func (s *Server) getSession(r *http.Request) *types.Session {
 	return session
 }
 
+func (s *Server) requireSession(w http.ResponseWriter, r *http.Request, msg string) (*types.Session, bool) {
+	session := s.getSession(r)
+	if session != nil {
+		return session, true
+	}
+	if strings.TrimSpace(msg) == "" {
+		msg = "Not authenticated"
+	}
+	s.jsonError(w, http.StatusUnauthorized, "unauthorized", msg)
+	return nil, false
+}
+
 func (s *Server) logAuditEvent(ctx context.Context, eventType, action string, actorID types.ID, success bool, details map[string]any) {
 	if s.audit == nil {
 		return
@@ -833,6 +980,13 @@ func getClientIP(r *http.Request) string {
 		return ip
 	}
 	return strings.Split(r.RemoteAddr, ":")[0]
+}
+
+func resolveActorID(session *types.Session) types.ID {
+	if session == nil {
+		return ""
+	}
+	return session.IdentityID
 }
 
 func parseOptionalTime(value string) (time.Time, error) {
@@ -1004,9 +1158,8 @@ func (s *Server) handlePipelineAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -1021,9 +1174,8 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
+	session, ok := s.requireSession(w, r, "Not authenticated")
+	if !ok {
 		return
 	}
 
@@ -1075,11 +1227,6 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request, session *type
 		return
 	}
 
-	if !session.Scopes.Has(types.ScopeFileList) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	prefix := r.URL.Query().Get("prefix")
 	includeDeleted := r.URL.Query().Get("include_deleted") == "true"
 
@@ -1098,11 +1245,6 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request, session *type
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request, session *types.Session) {
 	if s.files == nil {
 		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "File service not available")
-		return
-	}
-
-	if !session.Scopes.Has(types.ScopeFileUpload) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
 		return
 	}
 
@@ -1150,11 +1292,6 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 
-	if !session.Scopes.Has(types.ScopeFileDownload) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	meta, err := s.files.GetMetadata(r.Context(), name)
 	if err != nil {
 		s.errorResponse(w, http.StatusNotFound, err)
@@ -1185,11 +1322,6 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request, sess
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request, session *types.Session, name string) {
-	if !session.Scopes.Has(types.ScopeFileDelete) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	err := s.files.Delete(r.Context(), name, session.IdentityID)
 	if err != nil {
 		s.errorResponse(w, http.StatusInternalServerError, err)
@@ -1200,11 +1332,6 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request, sessio
 }
 
 func (s *Server) handleFileProtect(w http.ResponseWriter, r *http.Request, session *types.Session, name string) {
-	if !session.Scopes.Has(types.ScopeFileSeal) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	var req files.FileProtectionPolicy
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid policy data")
@@ -1227,11 +1354,6 @@ func (s *Server) handleFileProtect(w http.ResponseWriter, r *http.Request, sessi
 }
 
 func (s *Server) handleFileKill(w http.ResponseWriter, r *http.Request, session *types.Session, name string) {
-	if !session.Scopes.Has(types.ScopeFileDelete) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	var req struct {
 		Reason string `json:"reason"`
 	}
@@ -1246,11 +1368,6 @@ func (s *Server) handleFileKill(w http.ResponseWriter, r *http.Request, session 
 }
 
 func (s *Server) handleFileRevive(w http.ResponseWriter, r *http.Request, session *types.Session, name string) {
-	if !session.Scopes.Has(types.ScopeFileDelete) {
-		s.jsonError(w, http.StatusForbidden, "forbidden", "Insufficient permissions")
-		return
-	}
-
 	if err := s.files.ReviveFile(r.Context(), name); err != nil {
 		s.errorResponse(w, http.StatusInternalServerError, err)
 		return
@@ -1267,9 +1384,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 
@@ -1303,9 +1419,8 @@ func (s *Server) handleMonitoringEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 
@@ -1359,9 +1474,8 @@ func (s *Server) handleMonitoringStream(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 
@@ -1410,9 +1524,8 @@ func (s *Server) handleMonitoringStream(w http.ResponseWriter, r *http.Request) 
 // Alert handlers
 
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 	if s.alerts == nil {
@@ -1438,9 +1551,8 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 	if s.alerts == nil {
@@ -1494,9 +1606,8 @@ func (s *Server) handleAlert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 	if s.alerts == nil {
@@ -1529,9 +1640,8 @@ func (s *Server) handleAlertRules(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAlertNotifiers(w http.ResponseWriter, r *http.Request) {
-	session := s.getSession(r)
-	if session == nil {
-		s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
 		return
 	}
 	if s.alerts == nil {
@@ -1563,14 +1673,6 @@ func (s *Server) handleCommandDispatch(w http.ResponseWriter, r *http.Request) {
 	if commandPath == "" {
 		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Command path required")
 		return
-	}
-
-	// Keep auth commands callable without a session to mirror CLI behavior.
-	if !strings.HasPrefix(commandPath, "auth/") {
-		if session := s.getSession(r); session == nil {
-			s.jsonError(w, http.StatusUnauthorized, "unauthorized", "Not authenticated")
-			return
-		}
 	}
 
 	var payload map[string]any

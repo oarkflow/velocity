@@ -12,6 +12,7 @@ import (
 
 	"github.com/oarkflow/velocity"
 	velocitycli "github.com/oarkflow/velocity/cli"
+	"github.com/oarkflow/velocity/internal/secretr/authz"
 	secretrcli "github.com/oarkflow/velocity/internal/secretr/cli"
 	"github.com/oarkflow/velocity/internal/secretr/cli/commands"
 	"github.com/oarkflow/velocity/internal/secretr/cli/middleware"
@@ -81,11 +82,38 @@ func NewApp(sessionStore SessionStore) (*App, error) {
 
 	// Create permission gate - it will handle nil sessionStore
 	app.gate = middleware.NewPermissionGate(sessionStore, nil)
+	var aclChecker authz.ACLChecker
+	var usageCounter authz.UsageCounter
+	var policyChecker authz.PolicyChecker
+	if c := app.adapter.GetClient(); c != nil {
+		aclChecker = c.Access
+		usageCounter = authz.NewStoreUsageCounter(c.Store)
+		policyChecker = &authz.PolicyAdapter{Engine: c.Policy}
+	}
+	authorizer := authz.NewAuthorizerWithCounter(authz.NewEnvEntitlementProvider(), aclChecker, nil, usageCounter)
+	authorizer.SetPolicyChecker(policyChecker)
+	app.gate.SetAuthorizer(authorizer)
 
 	// Build CLI
 	app.cli = app.buildCLI()
+	app.gate.SetCommandSpecs(authz.BuildCLIAuthSpecs(app.cli, nil))
+	app.applyAuthzBefore(app.cli)
 
 	return app, nil
+}
+
+func (a *App) applyAuthzBefore(cmd *cli.Command) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Before == nil {
+		cmd.Before = a.gate.RequireAuthz()
+	} else {
+		cmd.Before = middleware.Chain(a.gate.RequireAuthz(), cmd.Before)
+	}
+	for _, sub := range cmd.Commands {
+		a.applyAuthzBefore(sub)
+	}
 }
 
 func (a *App) buildCLI() *cli.Command {
@@ -228,6 +256,13 @@ and reduces trust ambiguity.`,
 			}
 		},
 	}
+}
+
+// BuildCLIRootForAuthz builds the CLI command tree without runtime client dependencies.
+// Used by authz metadata generation/tests.
+func BuildCLIRootForAuthz() *cli.Command {
+	a := &App{gate: middleware.NewPermissionGate(nil, nil)}
+	return a.buildCLI()
 }
 
 func (a *App) isAuthenticationExempt(cmd *cli.Command) bool {

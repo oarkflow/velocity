@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/oarkflow/velocity/internal/secretr/api"
+	"github.com/oarkflow/velocity/internal/secretr/authz"
 	client "github.com/oarkflow/velocity/internal/secretr/cli"
 	"github.com/oarkflow/velocity/internal/secretr/core/identity"
 	"github.com/urfave/cli/v3"
@@ -29,10 +30,13 @@ func AdminServer(ctx context.Context, cmd *cli.Command) error {
 		IdentityMgr:      c.Identity,
 		SecretVault:      c.Secrets,
 		FileVault:        c.Files,
+		AccessManager:    c.Access,
 		AuditEngine:      c.Audit,
 		CICDManager:      c.CICD,
 		MonitoringEngine: c.Monitoring,
 		AlertEngine:      c.Alerts,
+		UsageCounter:     authz.NewStoreUsageCounter(c.Store),
+		PolicyChecker:    &authz.PolicyAdapter{Engine: c.Policy},
 	})
 
 	info("Starting Secretr API Server on %s...", addr)

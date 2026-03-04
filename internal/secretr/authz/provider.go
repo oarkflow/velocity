@@ -1,0 +1,63 @@
+package authz
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"sync"
+	"time"
+
+	licclient "github.com/oarkflow/licensing-go"
+	"github.com/oarkflow/velocity/internal/secretr/types"
+)
+
+// EnvEntitlementProvider loads a license payload from SECRETR_LICENSE_PATH.
+// The file is cached and reloaded on mtime changes.
+type EnvEntitlementProvider struct {
+	mu       sync.RWMutex
+	path     string
+	cached   *licclient.LicenseData
+	cachedAt time.Time
+}
+
+func NewEnvEntitlementProvider() *EnvEntitlementProvider {
+	return &EnvEntitlementProvider{path: os.Getenv("SECRETR_LICENSE_PATH")}
+}
+
+func (p *EnvEntitlementProvider) GetLicenseData(ctx context.Context, actorID types.ID) (*licclient.LicenseData, error) {
+	_ = ctx
+	_ = actorID
+	if p.path == "" {
+		return nil, nil
+	}
+
+	fi, err := os.Stat(p.path)
+	if err != nil {
+		return nil, fmt.Errorf("authz: license file stat failed: %w", err)
+	}
+
+	p.mu.RLock()
+	if p.cached != nil && !fi.ModTime().After(p.cachedAt) {
+		defer p.mu.RUnlock()
+		return p.cached, nil
+	}
+	p.mu.RUnlock()
+
+	b, err := os.ReadFile(p.path)
+	if err != nil {
+		return nil, fmt.Errorf("authz: license file read failed: %w", err)
+	}
+
+	var data licclient.LicenseData
+	if err := json.Unmarshal(b, &data); err != nil {
+		return nil, fmt.Errorf("authz: invalid license json: %w", err)
+	}
+
+	p.mu.Lock()
+	p.cached = &data
+	p.cachedAt = fi.ModTime()
+	p.mu.Unlock()
+
+	return &data, nil
+}

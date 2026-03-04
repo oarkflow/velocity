@@ -1,0 +1,992 @@
+[
+  {
+    "path": "access",
+    "scopes": [
+      "access:read"
+    ]
+  },
+  {
+    "path": "access approve",
+    "scopes": [
+      "access:approve"
+    ]
+  },
+  {
+    "path": "access grant",
+    "scopes": [
+      "access:grant"
+    ]
+  },
+  {
+    "path": "access list",
+    "scopes": [
+      "access:read"
+    ]
+  },
+  {
+    "path": "access request",
+    "scopes": [
+      "access:request"
+    ]
+  },
+  {
+    "path": "access revoke",
+    "scopes": [
+      "access:revoke"
+    ]
+  },
+  {
+    "path": "admin",
+    "scopes": [
+      "admin:system"
+    ]
+  },
+  {
+    "path": "admin server",
+    "scopes": [
+      "admin:system"
+    ]
+  },
+  {
+    "path": "admin system",
+    "scopes": [
+      "admin:system"
+    ]
+  },
+  {
+    "path": "admin users",
+    "scopes": [
+      "admin:users"
+    ]
+  },
+  {
+    "path": "alert",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "alert ack",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "alert list",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "alert resolve",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "alert rules",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "audit",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "audit export",
+    "scopes": [
+      "audit:export"
+    ]
+  },
+  {
+    "path": "audit query",
+    "scopes": [
+      "audit:query"
+    ]
+  },
+  {
+    "path": "audit verify",
+    "scopes": [
+      "audit:verify"
+    ]
+  },
+  {
+    "path": "auth",
+    "scopes": []
+  },
+  {
+    "path": "auth init",
+    "scopes": []
+  },
+  {
+    "path": "auth login",
+    "scopes": []
+  },
+  {
+    "path": "auth logout",
+    "scopes": [
+      "auth:logout"
+    ]
+  },
+  {
+    "path": "auth mfa",
+    "scopes": []
+  },
+  {
+    "path": "auth rotate-token",
+    "scopes": [
+      "auth:rotate"
+    ]
+  },
+  {
+    "path": "auth status",
+    "scopes": [
+      "auth:login"
+    ]
+  },
+  {
+    "path": "backup",
+    "scopes": [
+      "backup:create"
+    ]
+  },
+  {
+    "path": "backup audit",
+    "scopes": [
+      "backup:create"
+    ]
+  },
+  {
+    "path": "backup create",
+    "scopes": [
+      "backup:create"
+    ]
+  },
+  {
+    "path": "backup list",
+    "scopes": [
+      "backup:create"
+    ]
+  },
+  {
+    "path": "backup restore",
+    "scopes": [
+      "backup:restore"
+    ]
+  },
+  {
+    "path": "backup schedule",
+    "scopes": [
+      "backup:schedule"
+    ]
+  },
+  {
+    "path": "backup verify",
+    "scopes": [
+      "backup:verify"
+    ]
+  },
+  {
+    "path": "cicd",
+    "scopes": [
+      "pipeline:create"
+    ]
+  },
+  {
+    "path": "cicd create-pipeline",
+    "scopes": [
+      "pipeline:create"
+    ]
+  },
+  {
+    "path": "cicd inject",
+    "scopes": [
+      "pipeline:inject"
+    ]
+  },
+  {
+    "path": "compliance",
+    "scopes": [
+      "compliance:report"
+    ]
+  },
+  {
+    "path": "compliance frameworks",
+    "scopes": [
+      "compliance:report"
+    ]
+  },
+  {
+    "path": "compliance list-reports",
+    "scopes": [
+      "compliance:report"
+    ]
+  },
+  {
+    "path": "compliance policy",
+    "scopes": [
+      "compliance:policy"
+    ]
+  },
+  {
+    "path": "compliance policy create",
+    "scopes": [
+      "compliance:policy"
+    ]
+  },
+  {
+    "path": "compliance policy list",
+    "scopes": [
+      "compliance:policy"
+    ]
+  },
+  {
+    "path": "compliance policy update",
+    "scopes": [
+      "compliance:policy"
+    ]
+  },
+  {
+    "path": "compliance report",
+    "scopes": [
+      "compliance:report"
+    ]
+  },
+  {
+    "path": "compliance score",
+    "scopes": [
+      "compliance:report"
+    ]
+  },
+  {
+    "path": "data",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "data delete",
+    "scopes": [
+      "file:delete"
+    ]
+  },
+  {
+    "path": "data exists",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "data get",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "data index",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "data list",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "data put",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "data search",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "device",
+    "scopes": [
+      "device:read"
+    ]
+  },
+  {
+    "path": "device enroll",
+    "scopes": [
+      "device:enroll"
+    ]
+  },
+  {
+    "path": "device list",
+    "scopes": [
+      "device:read"
+    ]
+  },
+  {
+    "path": "device revoke",
+    "scopes": [
+      "device:revoke"
+    ]
+  },
+  {
+    "path": "device trust",
+    "scopes": [
+      "device:trust"
+    ]
+  },
+  {
+    "path": "dlp",
+    "scopes": [
+      "dlp:scan"
+    ]
+  },
+  {
+    "path": "dlp rules",
+    "scopes": [
+      "dlp:rules"
+    ]
+  },
+  {
+    "path": "dlp rules create",
+    "scopes": [
+      "dlp:rules"
+    ]
+  },
+  {
+    "path": "dlp rules delete",
+    "scopes": [
+      "dlp:rules"
+    ]
+  },
+  {
+    "path": "dlp rules list",
+    "scopes": [
+      "dlp:rules"
+    ]
+  },
+  {
+    "path": "dlp scan",
+    "scopes": [
+      "dlp:scan"
+    ]
+  },
+  {
+    "path": "enrich",
+    "scopes": [
+      "secret:read"
+    ]
+  },
+  {
+    "path": "env",
+    "scopes": [
+      "secret:read"
+    ]
+  },
+  {
+    "path": "envelope",
+    "scopes": [
+      "envelope:create"
+    ]
+  },
+  {
+    "path": "envelope create",
+    "scopes": [
+      "envelope:create"
+    ]
+  },
+  {
+    "path": "envelope open",
+    "scopes": [
+      "envelope:open"
+    ]
+  },
+  {
+    "path": "envelope verify",
+    "scopes": [
+      "envelope:verify"
+    ]
+  },
+  {
+    "path": "exec",
+    "scopes": [
+      "exec:run"
+    ]
+  },
+  {
+    "path": "export",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "folder",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "folder copy",
+    "scopes": [
+      "file:upload"
+    ]
+  },
+  {
+    "path": "folder create",
+    "scopes": [
+      "file:upload"
+    ]
+  },
+  {
+    "path": "folder delete",
+    "scopes": [
+      "file:delete"
+    ]
+  },
+  {
+    "path": "folder info",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "folder list",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "folder rename",
+    "scopes": [
+      "file:upload"
+    ]
+  },
+  {
+    "path": "folder size",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "folder upload",
+    "scopes": [
+      "file:upload"
+    ]
+  },
+  {
+    "path": "folder view",
+    "scopes": [
+      "file:download"
+    ]
+  },
+  {
+    "path": "identity",
+    "scopes": [
+      "identity:read"
+    ]
+  },
+  {
+    "path": "identity create",
+    "scopes": [
+      "identity:create"
+    ]
+  },
+  {
+    "path": "identity get",
+    "scopes": [
+      "identity:read"
+    ]
+  },
+  {
+    "path": "identity list",
+    "scopes": [
+      "identity:read"
+    ]
+  },
+  {
+    "path": "identity recover",
+    "scopes": [
+      "identity:recover"
+    ]
+  },
+  {
+    "path": "identity revoke",
+    "scopes": [
+      "identity:delete"
+    ]
+  },
+  {
+    "path": "import",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "incident",
+    "scopes": [
+      "incident:monitor"
+    ]
+  },
+  {
+    "path": "incident declare",
+    "scopes": [
+      "incident:declare"
+    ]
+  },
+  {
+    "path": "incident export",
+    "scopes": [
+      "incident:export"
+    ]
+  },
+  {
+    "path": "incident freeze",
+    "scopes": [
+      "incident:freeze"
+    ]
+  },
+  {
+    "path": "incident list",
+    "scopes": [
+      "incident:monitor"
+    ]
+  },
+  {
+    "path": "incident rotate",
+    "scopes": [
+      "incident:rotate"
+    ]
+  },
+  {
+    "path": "incident timeline",
+    "scopes": [
+      "incident:timeline"
+    ]
+  },
+  {
+    "path": "key",
+    "scopes": [
+      "key:read"
+    ]
+  },
+  {
+    "path": "key destroy",
+    "scopes": [
+      "key:destroy"
+    ]
+  },
+  {
+    "path": "key export",
+    "scopes": [
+      "key:export"
+    ]
+  },
+  {
+    "path": "key generate",
+    "scopes": [
+      "key:generate"
+    ]
+  },
+  {
+    "path": "key import",
+    "scopes": [
+      "key:import"
+    ]
+  },
+  {
+    "path": "key list",
+    "scopes": [
+      "key:read"
+    ]
+  },
+  {
+    "path": "key rotate",
+    "scopes": [
+      "key:rotate"
+    ]
+  },
+  {
+    "path": "key split",
+    "scopes": [
+      "key:read"
+    ]
+  },
+  {
+    "path": "load-env",
+    "scopes": [
+      "secret:create"
+    ]
+  },
+  {
+    "path": "monitoring",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "monitoring dashboard",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "monitoring events",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
+    "path": "object",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "object delete",
+    "scopes": [
+      "file:delete"
+    ]
+  },
+  {
+    "path": "object get",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "object info",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "object list",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "object put",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "object view",
+    "scopes": [
+      "file:list"
+    ]
+  },
+  {
+    "path": "org",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org create",
+    "scopes": [
+      "org:create"
+    ]
+  },
+  {
+    "path": "org create-vendor",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org environments",
+    "scopes": [
+      "org:environments"
+    ]
+  },
+  {
+    "path": "org environments create",
+    "scopes": [
+      "org:environments"
+    ]
+  },
+  {
+    "path": "org environments list",
+    "scopes": [
+      "org:environments"
+    ]
+  },
+  {
+    "path": "org grant-auditor",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org invite",
+    "scopes": [
+      "org:invite"
+    ]
+  },
+  {
+    "path": "org legal-hold",
+    "scopes": [
+      "org:legal_hold",
+      "admin:*"
+    ]
+  },
+  {
+    "path": "org list",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org teams",
+    "scopes": [
+      "org:teams"
+    ]
+  },
+  {
+    "path": "org teams create",
+    "scopes": [
+      "org:teams"
+    ]
+  },
+  {
+    "path": "org teams list",
+    "scopes": [
+      "org:teams"
+    ]
+  },
+  {
+    "path": "org transfer",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org transfer approve",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org transfer execute",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "org transfer init",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "pipeline",
+    "scopes": [
+      "pipeline:create"
+    ]
+  },
+  {
+    "path": "pipeline apply",
+    "scopes": [
+      "pipeline:create"
+    ]
+  },
+  {
+    "path": "pipeline list",
+    "scopes": [
+      "pipeline:create"
+    ]
+  },
+  {
+    "path": "pipeline trigger",
+    "scopes": [
+      "pipeline:create"
+    ]
+  },
+  {
+    "path": "policy",
+    "scopes": [
+      "policy:read"
+    ]
+  },
+  {
+    "path": "policy bind",
+    "scopes": [
+      "policy:bind"
+    ]
+  },
+  {
+    "path": "policy create",
+    "scopes": [
+      "policy:create"
+    ]
+  },
+  {
+    "path": "policy freeze",
+    "scopes": [
+      "policy:freeze",
+      "admin:*"
+    ]
+  },
+  {
+    "path": "policy list",
+    "scopes": [
+      "policy:read"
+    ]
+  },
+  {
+    "path": "policy simulate",
+    "scopes": [
+      "policy:simulate"
+    ]
+  },
+  {
+    "path": "role",
+    "scopes": [
+      "role:read"
+    ]
+  },
+  {
+    "path": "role assign",
+    "scopes": [
+      "role:assign"
+    ]
+  },
+  {
+    "path": "role create",
+    "scopes": [
+      "role:create"
+    ]
+  },
+  {
+    "path": "role list",
+    "scopes": [
+      "role:read"
+    ]
+  },
+  {
+    "path": "secret",
+    "scopes": [
+      "secret:read"
+    ]
+  },
+  {
+    "path": "secret delete",
+    "scopes": [
+      "secret:delete"
+    ]
+  },
+  {
+    "path": "secret get",
+    "scopes": [
+      "secret:read"
+    ]
+  },
+  {
+    "path": "secret list",
+    "scopes": [
+      "secret:list"
+    ]
+  },
+  {
+    "path": "secret rotate",
+    "scopes": [
+      "secret:rotate"
+    ]
+  },
+  {
+    "path": "secret set",
+    "scopes": [
+      "secret:update"
+    ]
+  },
+  {
+    "path": "session",
+    "scopes": [
+      "session:read"
+    ]
+  },
+  {
+    "path": "session list",
+    "scopes": [
+      "session:read"
+    ]
+  },
+  {
+    "path": "session revoke",
+    "scopes": [
+      "session:revoke"
+    ]
+  },
+  {
+    "path": "session revoke-all",
+    "scopes": [
+      "session:read"
+    ]
+  },
+  {
+    "path": "share",
+    "scopes": [
+      "share:read"
+    ]
+  },
+  {
+    "path": "share accept",
+    "scopes": [
+      "share:accept"
+    ]
+  },
+  {
+    "path": "share create",
+    "scopes": [
+      "share:create"
+    ]
+  },
+  {
+    "path": "share export",
+    "scopes": [
+      "share:export"
+    ]
+  },
+  {
+    "path": "share list",
+    "scopes": [
+      "share:read"
+    ]
+  },
+  {
+    "path": "share revoke",
+    "scopes": [
+      "share:revoke"
+    ]
+  },
+  {
+    "path": "ssh",
+    "scopes": [
+      "ssh:manage"
+    ]
+  },
+  {
+    "path": "ssh create-profile",
+    "scopes": [
+      "ssh:manage"
+    ]
+  },
+  {
+    "path": "ssh list-profiles",
+    "scopes": [
+      "ssh:manage"
+    ]
+  },
+  {
+    "path": "ssh start",
+    "scopes": [
+      "ssh:manage"
+    ]
+  }
+]

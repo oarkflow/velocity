@@ -33,7 +33,7 @@ require (
 	github.com/nicksnyder/go-i18n/v2 v2.5.1 // indirect
 	github.com/oarkflow/convert v0.0.5 // indirect
 	github.com/oarkflow/date v0.0.4 // indirect
-	github.com/oarkflow/licensing v0.0.25 // indirect
+	github.com/oarkflow/licensing v0.0.26 // indirect
 	github.com/oarkflow/previewer v0.0.6 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rymdport/portal v0.4.2 // indirect

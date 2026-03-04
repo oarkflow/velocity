@@ -29,7 +29,7 @@ require (
 	github.com/oarkflow/expr v0.0.11 // indirect
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/json v0.0.28 // indirect
-	github.com/oarkflow/licensing v0.0.25 // indirect
+	github.com/oarkflow/licensing v0.0.26 // indirect
 	github.com/oarkflow/previewer v0.0.6 // indirect
 	github.com/oarkflow/shamir v0.0.2 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect

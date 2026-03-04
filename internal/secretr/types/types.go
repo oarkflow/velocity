@@ -901,19 +901,24 @@ func (e *Error) Error() string {
 
 // Error codes
 const (
-	ErrCodeUnauthorized   = "unauthorized"
-	ErrCodeForbidden      = "forbidden"
-	ErrCodeNotFound       = "not_found"
-	ErrCodeConflict       = "conflict"
-	ErrCodeValidation     = "validation_error"
-	ErrCodeCrypto         = "crypto_error"
-	ErrCodeStorage        = "storage_error"
-	ErrCodePolicy         = "policy_violation"
-	ErrCodeExpired        = "expired"
-	ErrCodeRevoked        = "revoked"
-	ErrCodeRateLimited    = "rate_limited"
-	ErrCodeIncidentFrozen = "incident_frozen"
-	ErrCodeScopeRequired  = "scope_required"
+	ErrCodeUnauthorized             = "unauthorized"
+	ErrCodeForbidden                = "forbidden"
+	ErrCodeNotFound                 = "not_found"
+	ErrCodeConflict                 = "conflict"
+	ErrCodeValidation               = "validation_error"
+	ErrCodeCrypto                   = "crypto_error"
+	ErrCodeStorage                  = "storage_error"
+	ErrCodePolicy                   = "policy_violation"
+	ErrCodeExpired                  = "expired"
+	ErrCodeRevoked                  = "revoked"
+	ErrCodeRateLimited              = "rate_limited"
+	ErrCodeIncidentFrozen           = "incident_frozen"
+	ErrCodeScopeRequired            = "scope_required"
+	ErrCodeEntitlementScopeRequired = "entitlement_scope_required"
+	ErrCodeEntitlementDenied        = "entitlement_denied"
+	ErrCodeEntitlementLimitExceeded = "entitlement_limit_exceeded"
+	ErrCodeACLDenied                = "acl_denied"
+	ErrCodeAuthzSpecMissing         = "authz_spec_missing"
 )
 
 // NewError creates a new error

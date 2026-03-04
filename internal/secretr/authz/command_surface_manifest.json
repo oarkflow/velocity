@@ -1,0 +1,3320 @@
+[
+  {
+    "path": "access",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "access approve",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "access grant",
+    "flags": [
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "grantee",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resharing",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "scopes",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "access list",
+    "flags": [
+      {
+        "name": "grantee",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "access request",
+    "flags": [
+      {
+        "name": "duration",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "justification",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "access revoke",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "admin",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "admin server",
+    "flags": [
+      {
+        "name": "addr",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "admin system",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "admin users",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "alert",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "alert ack",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "alert list",
+    "flags": [
+      {
+        "name": "severity",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "status",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "alert resolve",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "alert rules",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "audit",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "audit export",
+    "flags": [
+      {
+        "name": "end",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "start",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "audit query",
+    "flags": [
+      {
+        "name": "action",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "actor",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "end",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "limit",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "start",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "audit verify",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth init",
+    "flags": [
+      {
+        "name": "device-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "email",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "full-name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "idle-timeout",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "username",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth login",
+    "flags": [
+      {
+        "name": "device-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "email",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "mfa-token",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "offline",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "username",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth logout",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth mfa",
+    "flags": [
+      {
+        "name": "token",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth rotate-token",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth status",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup audit",
+    "flags": [
+      {
+        "name": "end",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "export",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "operation",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "start",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "verify-chain",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup create",
+    "flags": [
+      {
+        "name": "compress",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "description",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "encrypt",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "filter",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "include",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup list",
+    "flags": [
+      {
+        "name": "directory",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup restore",
+    "flags": [
+      {
+        "name": "filter",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "include",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "overwrite",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup schedule",
+    "flags": [
+      {
+        "name": "cron",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "destination",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup verify",
+    "flags": [
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "cicd",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "cicd create-pipeline",
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "provider",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "repo",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "secret-patterns",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "cicd inject",
+    "flags": [
+      {
+        "name": "branch",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "env",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "pipeline-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance frameworks",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance list-reports",
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance policy",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance policy create",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance policy list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance policy update",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance report",
+    "flags": [
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "standard",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "compliance score",
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "standard",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data delete",
+    "flags": [
+      {
+        "name": "key",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data exists",
+    "flags": [
+      {
+        "name": "key",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data get",
+    "flags": [
+      {
+        "name": "json",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "key",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data index",
+    "flags": [
+      {
+        "name": "json",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "key",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "prefix",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "schema",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "value",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data list",
+    "flags": [
+      {
+        "name": "limit",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "offset",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "prefix",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data put",
+    "flags": [
+      {
+        "name": "json",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "key",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "ttl",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "value",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "data search",
+    "flags": [
+      {
+        "name": "filter",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "hash-field",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "json",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "limit",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "prefix",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "text",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "device",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "device enroll",
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "device list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "device revoke",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "device trust",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "dlp",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "dlp rules",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "dlp rules create",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "dlp rules delete",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "dlp rules list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "dlp scan",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "rules",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "enrich",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "env",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "envelope",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "envelope create",
+    "flags": [
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "message",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "policy",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recipient",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "require-mfa",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "secret",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "envelope open",
+    "flags": [
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "inspect",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "envelope verify",
+    "flags": [
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "exec",
+    "flags": [
+      {
+        "name": "command",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "isolation",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "seccomp-profile",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "secret",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "strict-sandbox",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "export",
+    "flags": [
+      {
+        "name": "compress",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "format",
+        "class": "output",
+        "require_acl": false
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "pretty",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recursive",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder copy",
+    "flags": [
+      {
+        "name": "dest",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "source",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder create",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "paths",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder delete",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "recursive",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder info",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder list",
+    "flags": [
+      {
+        "name": "parent",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recursive",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder rename",
+    "flags": [
+      {
+        "name": "new",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "old",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder size",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "recursive",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder upload",
+    "flags": [
+      {
+        "name": "dest",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "encrypt",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recursive",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "source",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "folder view",
+    "flags": [
+      {
+        "name": "compress",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "max-file-size",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "identity",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "identity create",
+    "flags": [
+      {
+        "name": "email",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "scopes",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "identity get",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "identity list",
+    "flags": [
+      {
+        "name": "status",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "identity recover",
+    "flags": [
+      {
+        "name": "email",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "identity revoke",
+    "flags": [
+      {
+        "name": "force",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "import",
+    "flags": [
+      {
+        "name": "dry-run",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "format",
+        "class": "output",
+        "require_acl": false
+      },
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "overwrite",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident declare",
+    "flags": [
+      {
+        "name": "description",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "severity",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident export",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident freeze",
+    "flags": [
+      {
+        "name": "disable",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident list",
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident rotate",
+    "flags": [
+      {
+        "name": "all",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "names",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "incident timeline",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key destroy",
+    "flags": [
+      {
+        "name": "force",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key export",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key generate",
+    "flags": [
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "purpose",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key import",
+    "flags": [
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key list",
+    "flags": [
+      {
+        "name": "status",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key rotate",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "key split",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "shares",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "threshold",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "load-env",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "monitoring",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "monitoring dashboard",
+    "flags": [
+      {
+        "name": "period",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "monitoring events",
+    "flags": [
+      {
+        "name": "actor",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "limit",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object delete",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object get",
+    "flags": [
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object info",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object list",
+    "flags": [
+      {
+        "name": "folder",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "limit",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "prefix",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recursive",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object put",
+    "flags": [
+      {
+        "name": "content-type",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "encrypt",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "tag",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "object view",
+    "flags": [
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org create",
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "slug",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org create-vendor",
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "vendor-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org environments",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org environments create",
+    "flags": [
+      {
+        "name": "description",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org environments list",
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org grant-auditor",
+    "flags": [
+      {
+        "name": "auditor-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org invite",
+    "flags": [
+      {
+        "name": "email",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "role",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org legal-hold",
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org teams",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org teams create",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org teams list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org transfer",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org transfer approve",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org transfer execute",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "org transfer init",
+    "flags": [
+      {
+        "name": "source-org",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "target-org",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "pipeline",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "pipeline apply",
+    "flags": [
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "pipeline list",
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "pipeline trigger",
+    "flags": [
+      {
+        "name": "event",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "param",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy bind",
+    "flags": [
+      {
+        "name": "policy",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy create",
+    "flags": [
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy freeze",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy simulate",
+    "flags": [
+      {
+        "name": "action",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "policy",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "role",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "role assign",
+    "flags": [
+      {
+        "name": "identity",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "role",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "role create",
+    "flags": [
+      {
+        "name": "description",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "scopes",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "role list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "secret",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "secret delete",
+    "flags": [
+      {
+        "name": "category",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "secret get",
+    "flags": [
+      {
+        "name": "category",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "show",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "secret list",
+    "flags": [
+      {
+        "name": "category",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "secret rotate",
+    "flags": [
+      {
+        "name": "category",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "length",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "secret set",
+    "flags": [
+      {
+        "name": "category",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "ttl",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "value",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "session",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "session list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "session revoke",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "session revoke-all",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share accept",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share create",
+    "flags": [
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "max-access",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "one-time",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recipient",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share export",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share revoke",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "ssh",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "ssh create-profile",
+    "flags": [
+      {
+        "name": "host",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "key-id",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "user",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "ssh list-profiles",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "ssh start",
+    "flags": [
+      {
+        "name": "profile-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  }
+]

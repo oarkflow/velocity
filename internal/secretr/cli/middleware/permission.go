@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/oarkflow/velocity/internal/secretr/authz"
 	"github.com/urfave/cli/v3"
 
 	"github.com/oarkflow/velocity/internal/secretr/types"
@@ -27,6 +28,9 @@ const (
 type PermissionGate struct {
 	sessionProvider SessionProvider
 	auditLogger     AuditLogger
+	authorizer      *authz.Authorizer
+	commandSpecs    map[string]authz.CommandAuthSpec
+	resolver        authz.ResourceResolver
 }
 
 // SessionProvider provides the current session
@@ -56,7 +60,23 @@ func NewPermissionGate(sessionProvider SessionProvider, auditLogger AuditLogger)
 	return &PermissionGate{
 		sessionProvider: sessionProvider,
 		auditLogger:     auditLogger,
+		resolver:        authz.NewDefaultResourceResolver(),
 	}
+}
+
+func (pg *PermissionGate) SetAuthorizer(authorizer *authz.Authorizer) {
+	pg.authorizer = authorizer
+}
+
+func (pg *PermissionGate) SetCommandSpecs(specs map[string]authz.CommandAuthSpec) {
+	pg.commandSpecs = specs
+}
+
+func (pg *PermissionGate) SetResourceResolver(resolver authz.ResourceResolver) {
+	if resolver == nil {
+		return
+	}
+	pg.resolver = resolver
 }
 
 // RequireScopes returns a middleware that requires specific scopes
@@ -221,6 +241,175 @@ func (pg *PermissionGate) RequireMFA() cli.BeforeFunc {
 // RequireAdmin returns a middleware that requires admin scope
 func (pg *PermissionGate) RequireAdmin() cli.BeforeFunc {
 	return pg.RequireScopes(types.ScopeAdminAll)
+}
+
+// RequireAuthz enforces centralized deny-first RBAC + entitlement + ACL checks.
+func (pg *PermissionGate) RequireAuthz() cli.BeforeFunc {
+	return func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+		if pg.authorizer == nil || cmd == nil {
+			return ctx, nil
+		}
+
+		path := authz.NormalizeCommandPath(cmd.FullName())
+		if path == "" {
+			return ctx, nil
+		}
+
+		spec, ok := pg.commandSpecs[path]
+		if !ok {
+			pg.authorizer.AuditSpecDenied(ctx, authz.Request{
+				Session:   nil,
+				Operation: "cli:" + path,
+				Metadata:  map[string]any{"command": path},
+			}, "authorization spec missing for command")
+			return ctx, &types.Error{
+				Code:    types.ErrCodeAuthzSpecMissing,
+				Message: fmt.Sprintf("authorization spec missing for command: %s", path),
+			}
+		}
+		if spec.SpecMissing {
+			pg.authorizer.AuditSpecDenied(ctx, authz.Request{
+				Session:   nil,
+				Operation: "cli:" + path,
+				Metadata:  map[string]any{"command": path},
+			}, "authorization scope spec missing for command")
+			return ctx, &types.Error{
+				Code:    types.ErrCodeAuthzSpecMissing,
+				Message: fmt.Sprintf("authorization scope spec missing for command: %s", path),
+			}
+		}
+
+		var session *types.Session
+		if pg.sessionProvider != nil {
+			s, err := pg.sessionProvider.GetCurrentSession(ctx)
+			if err == nil {
+				session = s
+			}
+		}
+
+		resourceType, resourceID, usageCtx, metadata := pg.resolver.ResolveCLI(cmd, session, path, spec)
+
+		req := authz.Request{
+			Session:        session,
+			ActorID:        sessionActorID(session),
+			Operation:      "cli:" + path,
+			RequiredScopes: spec.RequiredScopes,
+			ResourceType:   resourceType,
+			ResourceID:     resourceID,
+			UsageContext:   usageCtx,
+			Metadata:       metadata,
+			AllowUnauth:    spec.AllowUnauth,
+			RequireACL:     spec.RequireACL,
+		}
+		if _, err := pg.authorizer.Authorize(ctx, req); err != nil {
+			return ctx, err
+		}
+
+		// Fail-closed for flags: each used flag must have a spec.
+		for _, flag := range cmd.Flags {
+			names := flag.Names()
+			if len(names) == 0 {
+				continue
+			}
+			primary := names[0]
+			used := false
+			for _, n := range names {
+				if cmd.IsSet(n) {
+					used = true
+					break
+				}
+			}
+			if !used {
+				continue
+			}
+
+			fspec, exists := spec.Flags[primary]
+			if !exists {
+				pg.authorizer.AuditSpecDenied(ctx, req, fmt.Sprintf("authorization spec missing for flag %q", primary))
+				return ctx, &types.Error{
+					Code:    types.ErrCodeAuthzSpecMissing,
+					Message: fmt.Sprintf("authorization spec missing for flag %q on %s", primary, path),
+				}
+			}
+			if fspec.SpecMissing {
+				pg.authorizer.AuditSpecDenied(ctx, req, fmt.Sprintf("authorization scope spec missing for flag %q", primary))
+				return ctx, &types.Error{
+					Code:    types.ErrCodeAuthzSpecMissing,
+					Message: fmt.Sprintf("authorization scope spec missing for flag %q on %s", primary, path),
+				}
+			}
+
+			freq := req
+			freq.Operation = req.Operation + ":flag:" + primary
+			freq.RequiredScopes = fspec.RequiredScopes
+			freq.RequireACL = fspec.RequireACL
+			freq.ResourceID, freq.UsageContext, freq.Metadata = pg.resolver.ResolveCLIFlag(cmd, session, path, spec, names, fspec)
+
+			if _, err := pg.authorizer.Authorize(ctx, freq); err != nil {
+				return ctx, err
+			}
+		}
+
+		// Fail-closed for positional args.
+		args := cmd.Args().Slice()
+		if len(args) > 0 {
+			if len(spec.Args) == 0 {
+				pg.authorizer.AuditSpecDenied(ctx, req, "authorization arg spec missing for command")
+				return ctx, &types.Error{
+					Code:    types.ErrCodeAuthzSpecMissing,
+					Message: fmt.Sprintf("authorization arg spec missing for command: %s", path),
+				}
+			}
+			for i, argVal := range args {
+				argSpec, ok := findArgSpec(spec.Args, i)
+				if !ok {
+					pg.authorizer.AuditSpecDenied(ctx, req, fmt.Sprintf("authorization spec missing for arg position %d", i))
+					return ctx, &types.Error{
+						Code:    types.ErrCodeAuthzSpecMissing,
+						Message: fmt.Sprintf("authorization spec missing for arg position %d on %s", i, path),
+					}
+				}
+				if argSpec.SpecMissing {
+					pg.authorizer.AuditSpecDenied(ctx, req, fmt.Sprintf("authorization scope spec missing for arg position %d", i))
+					return ctx, &types.Error{
+						Code:    types.ErrCodeAuthzSpecMissing,
+						Message: fmt.Sprintf("authorization scope spec missing for arg position %d on %s", i, path),
+					}
+				}
+				areq := req
+				areq.Operation = fmt.Sprintf("%s:arg:%d", req.Operation, i)
+				areq.RequiredScopes = argSpec.RequiredScopes
+				areq.RequireACL = argSpec.RequireACL
+				areq.ResourceID, areq.UsageContext, areq.Metadata = pg.resolver.ResolveCLIArg(session, path, spec, i, argVal, argSpec)
+				if _, err := pg.authorizer.Authorize(ctx, areq); err != nil {
+					return ctx, err
+				}
+			}
+		}
+
+		return ctx, nil
+	}
+}
+
+func sessionActorID(session *types.Session) types.ID {
+	if session == nil {
+		return ""
+	}
+	return session.IdentityID
+}
+
+func findArgSpec(specs []authz.ArgAuthSpec, position int) (authz.ArgAuthSpec, bool) {
+	for _, s := range specs {
+		if s.Position == position {
+			return s, true
+		}
+	}
+	for _, s := range specs {
+		if s.Position == -1 {
+			return s, true
+		}
+	}
+	return authz.ArgAuthSpec{}, false
 }
 
 // RequireIncidentFreeOrAdmin returns a middleware that checks incident status
