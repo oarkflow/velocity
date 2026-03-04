@@ -1,6 +1,6 @@
 module github.com/oarkflow/velocity
 
-go 1.25.5
+go 1.26.0
 
 replace github.com/oarkflow/velocity/web => ./web
 
@@ -9,7 +9,7 @@ require (
 	github.com/lib/pq v1.11.2
 	github.com/oarkflow/convert v0.0.5
 	github.com/oarkflow/licensing v0.0.24
-	github.com/oarkflow/previewer v0.0.5
+	github.com/oarkflow/previewer v0.0.6
 	github.com/oarkflow/shamir v0.0.2
 	github.com/oarkflow/velocity/web v0.0.0-00010101000000-000000000000
 	github.com/urfave/cli/v3 v3.6.1
@@ -21,16 +21,15 @@ require (
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
-	github.com/clipperhouse/stringish v0.1.1 // indirect
-	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
 	github.com/goccy/go-reflect v1.2.0 // indirect
-	github.com/gofiber/fiber/v2 v2.52.10 // indirect
+	github.com/gofiber/fiber/v3 v3.1.0 // indirect
+	github.com/gofiber/schema v1.7.0 // indirect
+	github.com/gofiber/utils/v2 v2.0.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/klauspost/compress v1.18.2 // indirect
+	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/mattn/go-sqlite3 v1.14.33 // indirect
 	github.com/oarkflow/cas v0.0.5 // indirect
 	github.com/oarkflow/date v0.0.4 // indirect
@@ -42,6 +41,8 @@ require (
 	github.com/tinylib/msgp v1.6.3 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.69.0 // indirect
+	golang.org/x/net v0.50.0 // indirect
+	golang.org/x/text v0.34.0 // indirect
 )
 
 require (

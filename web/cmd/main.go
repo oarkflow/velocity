@@ -104,14 +104,25 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 	}
 	defer userDB.Close()
 
-	// create default admin if not exists
+	// Optional bootstrap admin creation (explicit opt-in via env vars).
 	ctx := context.Background()
-	if _, err := userDB.GetUserByUsername(ctx, "admin"); err != nil {
-		adminUser := &web.User{Username: "admin", Email: "admin@example.com", Password: "password123", Role: "admin"}
-		if err := userDB.CreateUser(ctx, adminUser); err != nil {
-			log.Fatalf("failed to create admin user: %v", err)
+	bootstrapUsername := os.Getenv("VELOCITY_BOOTSTRAP_ADMIN_USER")
+	bootstrapPassword := os.Getenv("VELOCITY_BOOTSTRAP_ADMIN_PASS")
+	if bootstrapUsername != "" && bootstrapPassword != "" {
+		if _, err := userDB.GetUserByUsername(ctx, bootstrapUsername); err != nil {
+			adminUser := &web.User{
+				Username: bootstrapUsername,
+				Email:    bootstrapUsername + "@localhost",
+				Password: bootstrapPassword,
+				Role:     "admin",
+			}
+			if err := userDB.CreateUser(ctx, adminUser); err != nil {
+				log.Fatalf("failed to create bootstrap admin user: %v", err)
+			}
+			log.Printf("Created bootstrap admin user: %s", bootstrapUsername)
 		}
-		log.Println("Created default admin user (username: admin, password: password123)")
+	} else {
+		log.Println("No bootstrap admin configured (set VELOCITY_BOOTSTRAP_ADMIN_USER and VELOCITY_BOOTSTRAP_ADMIN_PASS to enable)")
 	}
 
 	tcpServer := web.NewTCPServer(db, tcpPort, userDB)

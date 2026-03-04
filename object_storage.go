@@ -1221,6 +1221,18 @@ func (db *DB) GetObjectACL(path string) (*ObjectACL, error) {
 	return &acl, nil
 }
 
+// CheckObjectPermission verifies whether user has the requested permission on object path.
+func (db *DB) CheckObjectPermission(path, user, permission string) (bool, error) {
+	path = normalizePath(path)
+	if !isValidPath(path) {
+		return false, ErrInvalidPath
+	}
+	if _, err := db.GetObjectMetadata(path); err != nil {
+		return false, err
+	}
+	return db.hasPermissionInternal(path, user, permission, false), nil
+}
+
 // Helper functions
 
 func (db *DB) saveObjectMetadata(meta *ObjectMetadata) error {

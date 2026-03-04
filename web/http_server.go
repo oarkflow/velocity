@@ -14,12 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/helmet"
-	"github.com/gofiber/fiber/v2/middleware/limiter"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/fiber/v3/middleware/static"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/cors"
+	"github.com/gofiber/fiber/v3/middleware/helmet"
+	"github.com/gofiber/fiber/v3/middleware/limiter"
+	"github.com/gofiber/fiber/v3/middleware/logger"
+	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/oarkflow/velocity"
 )
@@ -35,7 +37,7 @@ type HTTPServer struct {
 // NewHTTPServer creates a new HTTP server
 func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer {
 	app := fiber.New(fiber.Config{
-		ErrorHandler: func(c *fiber.Ctx, err error) error {
+		ErrorHandler: func(c fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
 				code = e.Code
@@ -44,15 +46,15 @@ func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer
 				"error": err.Error(),
 			})
 		},
-		BodyLimit: 100 * 1024 * 1024, // 100MB max upload size
+		BodyLimit: 100 * 1024 * 1024, // 100MB max upload size,
 	})
 
 	// Security middleware
 	app.Use(helmet.New())
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowMethods: "GET,POST,DELETE",
-		AllowHeaders: "Origin, Content-Type, Accept, Authorization",
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"},
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
 	}))
 	app.Use(recover.New())
 	app.Use(logger.New())
@@ -61,10 +63,10 @@ func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer
 	app.Use(limiter.New(limiter.Config{
 		Max:        100,             // max requests per window
 		Expiration: 1 * time.Minute, // per minute
-		KeyGenerator: func(c *fiber.Ctx) string {
+		KeyGenerator: func(c fiber.Ctx) string {
 			return c.IP() // limit by IP
 		},
-		LimitReached: func(c *fiber.Ctx) error {
+		LimitReached: func(c fiber.Ctx) error {
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 				"error": "Too many requests",
 			})
@@ -111,13 +113,13 @@ func (s *HTTPServer) setupRoutes() {
 	api.Delete("/files/:key", s.handleFileDelete)
 
 	// Public static assets for the admin UI
-	s.app.Static("/static", "./static", fiber.Static{})
+	s.app.Get("/static*", static.New("./static", static.Config{}))
 
 	// Serve the admin UI at a separate public path to avoid admin API middleware
-	s.app.Static("/admin-ui", "./static", fiber.Static{Index: "index.html"})
+	s.app.Get("/admin-ui*", static.New("./static", static.Config{IndexNames: []string{"index.html"}}))
 	// Optional redirect from /admin to /admin-ui (placed before admin group)
-	s.app.Get("/admin", func(c *fiber.Ctx) error {
-		return c.Redirect("/admin-ui", fiber.StatusFound)
+	s.app.Get("/admin", func(c fiber.Ctx) error {
+		return c.Redirect().Status(fiber.StatusFound).To("/admin-ui")
 	})
 
 	// Admin routes (require admin role)
@@ -142,7 +144,7 @@ func (s *HTTPServer) setupRoutes() {
 
 // jwtAuthMiddleware validates JWT tokens
 func (s *HTTPServer) jwtAuthMiddleware() fiber.Handler {
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		authHeader := c.Get("Authorization")
 		if authHeader == "" {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -173,31 +175,51 @@ func (s *HTTPServer) jwtAuthMiddleware() fiber.Handler {
 			})
 		}
 
-		// Extract claims
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			c.Locals("username", claims["username"])
-			c.Locals("role", claims["role"])
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Invalid token claims",
+			})
 		}
+
+		username, ok := claims["username"].(string)
+		if !ok || strings.TrimSpace(username) == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Missing required username claim",
+			})
+		}
+		role, _ := claims["role"].(string)
+		if role == "" {
+			role = "user"
+		}
+		if role != "user" && role != "admin" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Invalid role claim",
+			})
+		}
+
+		c.Locals("username", username)
+		c.Locals("role", role)
 
 		return c.Next()
 	}
 }
 
 // handleLogin authenticates users and returns JWT token
-func (s *HTTPServer) handleLogin(c *fiber.Ctx) error {
+func (s *HTTPServer) handleLogin(c fiber.Ctx) error {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
 
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.Bind().Body(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Invalid JSON",
 		})
 	}
 
 	// Authenticate user using user storage
-	user, err := s.userDB.AuthenticateUser(c.Context(), req.Username, req.Password)
+	user, err := s.userDB.AuthenticateUser(c.RequestCtx(), req.Username, req.Password)
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "Invalid credentials",
@@ -233,13 +255,13 @@ func (s *HTTPServer) handleLogin(c *fiber.Ctx) error {
 	})
 }
 
-func (s *HTTPServer) handlePut(c *fiber.Ctx) error {
+func (s *HTTPServer) handlePut(c fiber.Ctx) error {
 	var req struct {
 		Key   string `json:"key"`
 		Value string `json:"value"`
 	}
 
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.Bind().Body(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
 	}
 
@@ -257,7 +279,7 @@ func (s *HTTPServer) handlePut(c *fiber.Ctx) error {
 	})
 }
 
-func (s *HTTPServer) handleGet(c *fiber.Ctx) error {
+func (s *HTTPServer) handleGet(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "Key is required")
@@ -274,7 +296,7 @@ func (s *HTTPServer) handleGet(c *fiber.Ctx) error {
 	})
 }
 
-func (s *HTTPServer) handleDelete(c *fiber.Ctx) error {
+func (s *HTTPServer) handleDelete(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "Key is required")
@@ -290,9 +312,9 @@ func (s *HTTPServer) handleDelete(c *fiber.Ctx) error {
 	})
 }
 
-func (s *HTTPServer) handlePutIndexed(c *fiber.Ctx) error {
+func (s *HTTPServer) handlePutIndexed(c fiber.Ctx) error {
 	var req map[string]any
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.Bind().Body(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
 	}
 
@@ -343,7 +365,7 @@ func (s *HTTPServer) handlePutIndexed(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok"})
 }
 
-func (s *HTTPServer) handleSearch(c *fiber.Ctx) error {
+func (s *HTTPServer) handleSearch(c fiber.Ctx) error {
 	var req struct {
 		Prefix   string `json:"prefix"`
 		FullText string `json:"fullText"`
@@ -356,15 +378,44 @@ func (s *HTTPServer) handleSearch(c *fiber.Ctx) error {
 		Limit int `json:"limit"`
 	}
 
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.Bind().Body(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
+	}
+
+	if req.Limit < 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "limit must be >= 0")
+	}
+	if req.Limit == 0 {
+		req.Limit = 100
+	}
+	if req.Limit > 1000 {
+		return fiber.NewError(fiber.StatusBadRequest, "limit exceeds maximum of 1000")
+	}
+
+	allowedOps := map[string]struct{}{
+		"=":        {},
+		"==":       {},
+		"!=":       {},
+		">":        {},
+		">=":       {},
+		"<":        {},
+		"<=":       {},
+		"contains": {},
+		"prefix":   {},
 	}
 
 	query := velocity.SearchQuery{Prefix: req.Prefix, FullText: req.FullText, Limit: req.Limit}
 	for _, f := range req.Filters {
+		if strings.TrimSpace(f.Field) == "" {
+			return fiber.NewError(fiber.StatusBadRequest, "filter field is required")
+		}
+		op := strings.TrimSpace(strings.ToLower(f.Op))
+		if _, ok := allowedOps[op]; !ok {
+			return fiber.NewError(fiber.StatusBadRequest, "invalid filter operator")
+		}
 		query.Filters = append(query.Filters, velocity.SearchFilter{
 			Field:    f.Field,
-			Op:       f.Op,
+			Op:       op,
 			Value:    f.Value,
 			HashOnly: f.HashOnly,
 		})
@@ -391,7 +442,7 @@ func (s *HTTPServer) handleSearch(c *fiber.Ctx) error {
 
 const MaxUploadSize = 100 * 1024 * 1024 // 100 MB
 
-func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
+func (s *HTTPServer) handleFileUpload(c fiber.Ctx) error {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "File is required")
@@ -436,7 +487,7 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 	}
 
 	key := c.FormValue("key")
-	overwrite := c.QueryBool("overwrite", false)
+	overwrite := fiber.Query[bool](c, "overwrite", false)
 
 	if overwrite && key != "" && s.db.HasFile(key) {
 		if err := s.db.DeleteFile(key); err != nil && !errors.Is(err, velocity.ErrFileNotFound) {
@@ -467,7 +518,7 @@ func (s *HTTPServer) handleFileUpload(c *fiber.Ctx) error {
 	})
 }
 
-func (s *HTTPServer) handleFileDownload(c *fiber.Ctx) error {
+func (s *HTTPServer) handleFileDownload(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
@@ -491,7 +542,7 @@ func (s *HTTPServer) handleFileDownload(c *fiber.Ctx) error {
 }
 
 // handleFileThumbnail returns a generated thumbnail (cached)
-func (s *HTTPServer) handleFileThumbnail(c *fiber.Ctx) error {
+func (s *HTTPServer) handleFileThumbnail(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
@@ -508,7 +559,7 @@ func (s *HTTPServer) handleFileThumbnail(c *fiber.Ctx) error {
 	return c.SendStream(bytes.NewReader(data))
 }
 
-func (s *HTTPServer) handleFileMetadata(c *fiber.Ctx) error {
+func (s *HTTPServer) handleFileMetadata(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
@@ -527,10 +578,10 @@ func (s *HTTPServer) handleFileMetadata(c *fiber.Ctx) error {
 	})
 }
 
-func (s *HTTPServer) handleFileList(c *fiber.Ctx) error {
+func (s *HTTPServer) handleFileList(c fiber.Ctx) error {
 	// support pagination: ?limit= & ?offset=
-	limit := c.QueryInt("limit", 0)
-	offset := c.QueryInt("offset", 0)
+	limit := fiber.Query[int](c, "limit", 0)
+	offset := fiber.Query[int](c, "offset", 0)
 	files, err := s.db.ListFiles()
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -555,9 +606,9 @@ func (s *HTTPServer) handleFileList(c *fiber.Ctx) error {
 }
 
 // handleListKeys returns paginated keys
-func (s *HTTPServer) handleListKeys(c *fiber.Ctx) error {
-	limit := c.QueryInt("limit", 100)
-	offset := c.QueryInt("offset", 0)
+func (s *HTTPServer) handleListKeys(c fiber.Ctx) error {
+	limit := fiber.Query[int](c, "limit", 100)
+	offset := fiber.Query[int](c, "offset", 0)
 	keys, total := s.db.KeysPage(offset, limit)
 	// convert to strings for deterministic JSON
 	sKeys := make([]string, 0, len(keys))
@@ -568,7 +619,7 @@ func (s *HTTPServer) handleListKeys(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"total": total, "keys": sKeys})
 }
 
-func (s *HTTPServer) handleFileDelete(c *fiber.Ctx) error {
+func (s *HTTPServer) handleFileDelete(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "File key is required")
@@ -588,7 +639,7 @@ func (s *HTTPServer) handleFileDelete(c *fiber.Ctx) error {
 
 // adminOnly middleware ensures the authenticated user is an admin (role claim)
 func (s *HTTPServer) adminOnly() fiber.Handler {
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		role := c.Locals("role")
 		if roleStr, ok := role.(string); !ok || roleStr != "admin" {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "admin role required"})
@@ -598,7 +649,7 @@ func (s *HTTPServer) adminOnly() fiber.Handler {
 }
 
 // handleAdminWalStats returns basic archive stats
-func (s *HTTPServer) handleAdminWalStats(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminWalStats(c fiber.Ctx) error {
 	if s.db == nil || s.db.GetWAL() == nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
 	}
@@ -610,7 +661,7 @@ func (s *HTTPServer) handleAdminWalStats(c *fiber.Ctx) error {
 }
 
 // handleAdminWalRotate triggers immediate WAL rotation
-func (s *HTTPServer) handleAdminWalRotate(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminWalRotate(c fiber.Ctx) error {
 	if s.db == nil || s.db.GetWAL() == nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
 	}
@@ -621,7 +672,7 @@ func (s *HTTPServer) handleAdminWalRotate(c *fiber.Ctx) error {
 }
 
 // handleAdminWalArchives returns detailed archive file metadata
-func (s *HTTPServer) handleAdminWalArchives(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminWalArchives(c fiber.Ctx) error {
 	if s.db == nil || s.db.GetWAL() == nil {
 		return fiber.NewError(fiber.StatusInternalServerError, "WAL not available")
 	}
@@ -649,11 +700,11 @@ func (s *HTTPServer) handleAdminWalArchives(c *fiber.Ctx) error {
 }
 
 // handleAdminSSTableRepair tries to repair a given sstable path and returns the repaired path
-func (s *HTTPServer) handleAdminSSTableRepair(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminSSTableRepair(c fiber.Ctx) error {
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.Bind().Body(&req); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, "Invalid JSON")
 	}
 	if req.Path == "" {
@@ -668,7 +719,7 @@ func (s *HTTPServer) handleAdminSSTableRepair(c *fiber.Ctx) error {
 }
 
 // Admin: regenerate all thumbnails
-func (s *HTTPServer) handleAdminRegenerateThumbnails(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminRegenerateThumbnails(c fiber.Ctx) error {
 	files, err := s.db.ListFiles()
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, err.Error())
@@ -689,7 +740,7 @@ func (s *HTTPServer) handleAdminRegenerateThumbnails(c *fiber.Ctx) error {
 }
 
 // Admin: regenerate single thumbnail
-func (s *HTTPServer) handleAdminRegenerateThumbnail(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminRegenerateThumbnail(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "key required")
@@ -702,7 +753,7 @@ func (s *HTTPServer) handleAdminRegenerateThumbnail(c *fiber.Ctx) error {
 }
 
 // Admin: delete thumbnail for a key
-func (s *HTTPServer) handleAdminDeleteThumbnail(c *fiber.Ctx) error {
+func (s *HTTPServer) handleAdminDeleteThumbnail(c fiber.Ctx) error {
 	key := c.Params("key")
 	if key == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "key required")
@@ -734,3 +785,5 @@ func (s *HTTPServer) Start() error {
 func (s *HTTPServer) Stop() error {
 	return s.app.Shutdown()
 }
+
+// fiber:context-methods migrated

@@ -1,6 +1,8 @@
 package velocity
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"hash/crc32"
 	"log"
@@ -270,7 +272,8 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		}
 	}
 	if db.jwtSecret == "" {
-		db.jwtSecret = "velocity-default-secret-change-it"
+		db.jwtSecret = generateJWTSecret()
+		log.Printf("velocity: JWT secret not configured; generated ephemeral secret for this process")
 	}
 	if len(db.searchSchemas) > 0 {
 		db.searchIndexEnabled = true
@@ -333,6 +336,15 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	go db.compactionLoop()
 
 	return db, nil
+}
+
+func generateJWTSecret() string {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// Last-resort fallback to preserve startup behavior without a fixed known secret.
+		return fmt.Sprintf("velocity-%d", time.Now().UnixNano())
+	}
+	return base64.RawStdEncoding.EncodeToString(buf)
 }
 
 func (db *DB) MasterKey() []byte {
