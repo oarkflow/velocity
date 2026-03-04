@@ -1,0 +1,25 @@
+{
+    "name": "Employee Onboarding",
+    "description": "Standard onboarding workflow for new employees",
+    "trigger": "enrollment",
+    "steps": [
+        {
+            "name": "Create Personal Vault",
+            "type": "secret:create",
+            "parameters": {
+                "name": "users/{{user_id}}/init_token",
+                "value": "{{generateToken(user_id)}}"
+            }
+        },
+        {
+            "name": "Grant Base Access",
+            "type": "access:grant",
+            "parameters": {
+                "resource_id": "common-assets",
+                "resource_type": "file",
+                "identity_id": "{{user_id}}",
+                "scopes": "file:read,file:list"
+            }
+        }
+    ]
+}
