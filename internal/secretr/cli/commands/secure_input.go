@@ -8,12 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"golang.org/x/term"
 )
 
 // promptPasswordWithConfirm prompts for password with confirmation
 func promptPasswordWithConfirm(prompt string) (string, error) {
-	if os.Getenv("SECRETR_ALLOW_INSECURE_PASSWORD_ENV") == "true" {
+	if securitymode.AllowInsecurePasswordEnv() {
 		if password := os.Getenv("SECRETR_PASSWORD"); password != "" {
 			if confirm := os.Getenv("SECRETR_PASSWORD_CONFIRM"); confirm != "" && confirm != password {
 				return "", fmt.Errorf("passwords do not match")
@@ -41,7 +42,7 @@ func promptPasswordWithConfirm(prompt string) (string, error) {
 
 // promptSecurePassword prompts for password securely (no flag support)
 func promptSecurePassword(prompt string) (string, error) {
-	if os.Getenv("SECRETR_ALLOW_INSECURE_PASSWORD_ENV") == "true" {
+	if securitymode.AllowInsecurePasswordEnv() {
 		if password := os.Getenv("SECRETR_PASSWORD"); password != "" {
 			return password, nil
 		}

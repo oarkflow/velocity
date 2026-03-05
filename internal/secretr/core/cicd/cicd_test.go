@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -106,9 +105,6 @@ func TestVerifyGitHubOIDCTokenWithJWKS(t *testing.T) {
 	}
 	defer store.Close()
 
-	manager := NewManager(ManagerConfig{Store: store})
-	defer manager.Close()
-
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate rsa key: %v", err)
@@ -135,8 +131,11 @@ func TestVerifyGitHubOIDCTokenWithJWKS(t *testing.T) {
 	}))
 	defer jwksServer.Close()
 
-	t.Setenv("SECRETR_OIDC_JWKS_URL", jwksServer.URL)
-	_ = os.Unsetenv("SECRETR_OIDC_ALLOW_INSECURE_MOCK")
+	manager := NewManager(ManagerConfig{
+		Store:       store,
+		OIDCJWKSURL: jwksServer.URL,
+	})
+	defer manager.Close()
 
 	claims := OIDCTokenClaims{
 		RegisteredClaims: jwt.RegisteredClaims{

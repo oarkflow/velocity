@@ -3,6 +3,7 @@ package audit
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -250,7 +251,11 @@ func (l *Ledger) createBlock(ctx context.Context) error {
 
 	// Sign block
 	if len(l.signerKey) > 0 {
-		block.Signature, _ = l.crypto.Sign(l.signerKey, block.Hash)
+		sig, err := l.crypto.Sign(l.signerKey, block.Hash)
+		if err != nil {
+			return err
+		}
+		block.Signature = sig
 	}
 
 	// Store block
@@ -271,7 +276,11 @@ func (l *Ledger) createBlock(ctx context.Context) error {
 
 		if len(l.signerKey) > 0 {
 			receiptData, _ := json.Marshal(receipt)
-			receipt.Signature, _ = l.crypto.Sign(l.signerKey, receiptData)
+			sig, err := l.crypto.Sign(l.signerKey, receiptData)
+			if err != nil {
+				return err
+			}
+			receipt.Signature = sig
 		}
 
 		_ = l.receiptStore.Set(ctx, string(eventID), receipt)
@@ -508,15 +517,22 @@ func (l *Ledger) VerifyBlockIntegrity(b *LedgerBlock) bool {
 		return false
 	}
 
-	// 2. Verify signature if key exists
-	// Note: We need the PUBLIC key to verify. Ledger config has SignerKey (Private?).
-	// If SignerKey is symmetric (HMAC), we can use it.
-	// crypto.Sign usually implies asymmetric if it returns signature?
-	// But crypto engine handles it.
-	// For this migration, we assume if engine.Verify works (if exposed).
-	// crypto.Sign signature interface doesn't strictly imply Verify method on Engine for generic key?
-	// Engine usually has Verify.
-	// For now, Hash check is sufficient for integrity if we don't have public key separation here.
+	// 2. Verify signature when signer key is configured.
+	if len(l.signerKey) > 0 {
+		if len(b.Signature) == 0 {
+			return false
+		}
+		if len(l.signerKey) != ed25519.PrivateKeySize {
+			return false
+		}
+		pub, ok := ed25519.PrivateKey(l.signerKey).Public().(ed25519.PublicKey)
+		if !ok {
+			return false
+		}
+		if err := l.crypto.Verify(pub, b.Hash, b.Signature); err != nil {
+			return false
+		}
+	}
 
 	return true
 }

@@ -102,11 +102,26 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init store: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "secretr: vault path: %s\n", storeConfig.Path)
 
 	// Initialize audit engine first (used by other managers)
 	auditEngine := audit.NewEngine(audit.EngineConfig{
 		Store: store,
 	})
+	if ok, err := auditEngine.VerifyIntegrity(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("security: failed to verify audit chain integrity: %w", err)
+	} else if !ok {
+		_ = store.Close()
+		return nil, fmt.Errorf("security: audit chain integrity verification failed")
+	}
+	if ok, err := auditEngine.VerifyLedgerIntegrity(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("security: failed to verify ledger integrity: %w", err)
+	} else if !ok {
+		_ = store.Close()
+		return nil, fmt.Errorf("security: audit ledger integrity verification failed")
+	}
 
 	// Initialize all managers
 	client := &Client{
@@ -180,6 +195,11 @@ func NewClient(cfg Config) (*Client, error) {
 		Store:       store,
 		AuditEngine: auditEngine,
 		SecretRetriever: func(ctx context.Context, secretID types.ID, env string) (string, error) {
+			if v, found, err := LookupVelocitySecretValue(string(secretID)); err != nil {
+				return "", err
+			} else if found {
+				return v, nil
+			}
 			mfa := false
 			if sess := client.CurrentSession(); sess != nil {
 				mfa = sess.MFAVerified

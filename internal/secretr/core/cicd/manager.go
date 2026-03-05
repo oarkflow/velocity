@@ -14,13 +14,14 @@ import (
 	"io"
 	"math/big"
 	"net/http"
-	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/oarkflow/velocity/internal/secretr/core/audit"
 	"github.com/oarkflow/velocity/internal/secretr/core/crypto"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/storage"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
@@ -53,6 +54,7 @@ type Manager struct {
 	tokenStore      *storage.TypedStore[pipelineToken]
 	secretRetriever SecretRetriever
 	httpClient      *http.Client
+	oidcJWKSURL     string
 }
 
 // pipelineToken stores authentication tokens for pipelines
@@ -71,6 +73,7 @@ type ManagerConfig struct {
 	Store           *storage.Store
 	AuditEngine     *audit.Engine
 	SecretRetriever SecretRetriever
+	OIDCJWKSURL     string
 }
 
 // NewManager creates a new CI/CD manager
@@ -84,6 +87,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		tokenStore:      storage.NewTypedStore[pipelineToken](cfg.Store, "pipeline_tokens"),
 		secretRetriever: cfg.SecretRetriever,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
+		oidcJWKSURL:     strings.TrimSpace(cfg.OIDCJWKSURL),
 	}
 }
 
@@ -600,9 +604,12 @@ func (m *Manager) validateGitHubToken(ctx context.Context, tokenString string) (
 			return nil, errors.New("missing OIDC key id (kid)")
 		}
 
-		jwksURL := os.Getenv("SECRETR_OIDC_JWKS_URL")
-		if jwksURL == "" {
-			jwksURL = "https://token.actions.githubusercontent.com/.well-known/jwks"
+		jwksURL := "https://token.actions.githubusercontent.com/.well-known/jwks"
+		if override := strings.TrimSpace(m.oidcJWKSURL); override != "" {
+			jwksURL = override
+		}
+		if override, ok := securitymode.OIDCJWKSURLEnvOverride(); ok && strings.TrimSpace(override) != "" {
+			jwksURL = strings.TrimSpace(override)
 		}
 
 		pubKey, keyErr := m.fetchJWKSRSAKey(ctx, jwksURL, kid)
@@ -613,7 +620,7 @@ func (m *Manager) validateGitHubToken(ctx context.Context, tokenString string) (
 	})
 
 	if err != nil {
-		if os.Getenv("SECRETR_OIDC_ALLOW_INSECURE_MOCK") == "true" && len(tokenString) > 8 && tokenString[:8] == "gh_oidc_" {
+		if securitymode.AllowInsecureOIDCMock() && len(tokenString) > 8 && tokenString[:8] == "gh_oidc_" {
 			return &OIDCTokenClaims{
 				RegisteredClaims: jwt.RegisteredClaims{
 					Issuer:    "https://token.actions.githubusercontent.com",

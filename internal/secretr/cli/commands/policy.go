@@ -2,11 +2,18 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 
 	client "github.com/oarkflow/velocity/internal/secretr/cli"
 	"github.com/oarkflow/velocity/internal/secretr/core/policy"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 	"github.com/urfave/cli/v3"
+	"gopkg.in/yaml.v3"
 )
 
 // Policy commands
@@ -24,12 +31,28 @@ func PolicyCreate(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	_ = file // Assume reading file content logic here
+	description := "Created via CLI"
+	pType := types.PolicyTypeAccess
+	var rules []types.PolicyRule
+	if strings.TrimSpace(file) != "" {
+		definition, err := loadPolicyDefinition(file)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(definition.Description) != "" {
+			description = definition.Description
+		}
+		if definition.Type != "" {
+			pType = definition.Type
+		}
+		rules = definition.Rules
+	}
 
 	policy, err := c.Policy.Create(ctx, policy.CreatePolicyOptions{
 		Name:        name,
-		Description: "Created via CLI",
-		Type:        types.PolicyTypeAccess,
+		Description: description,
+		Type:        pType,
+		Rules:       rules,
 		SignerID:    c.CurrentIdentityID(),
 	})
 	if err != nil {
@@ -72,6 +95,18 @@ func PolicyBind(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
+	resourceType = strings.TrimSpace(resourceType)
+	if resourceType == "" {
+		return fmt.Errorf("resource type is required")
+	}
+	allowedTypes := []string{
+		"secret", "file", "folder", "object", "key", "identity", "org",
+		"session", "device", "share", "policy", "audit", "access", "admin", "global",
+	}
+	if !slices.Contains(allowedTypes, resourceType) {
+		return fmt.Errorf("invalid resource type %q", resourceType)
+	}
+
 	if err := c.Policy.Bind(ctx, types.ID(policyID), types.ID(resourceID), resourceType, c.CurrentIdentityID()); err != nil {
 		return err
 	}
@@ -94,14 +129,11 @@ func PolicySimulate(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	_ = policyID // Used? actually PolicySimulate struct takes Policy ID in context?
-	// No, EvaluationRequest does NOT take policyID. It evaluates ALL policies for resource.
-	// But CLI flag allow specific policy?
-	// The Manager.Simulate signature uses EvaluationRequest which has NO PolicyID field.
-	// So `policy` arg is effectively ignored by the engine unless we filter manually?
-	// Engine Evaluate iterates all bindings.
-	// We'll leave it as unused or remove it.
-	// Removing to satisfy lint "declared and not used".
+	if strings.TrimSpace(policyID) != "" {
+		if _, err := c.Policy.Get(ctx, types.ID(policyID)); err != nil {
+			return fmt.Errorf("policy not found: %s", policyID)
+		}
+	}
 
 	result, err := c.Policy.Simulate(ctx, policy.EvaluationRequest{
 		ActorID:    c.CurrentIdentityID(),
@@ -135,4 +167,30 @@ func PolicyFreeze(ctx context.Context, cmd *cli.Command) error {
 
 	success("Policy lockdown mode enabled")
 	return nil
+}
+
+type policyDefinition struct {
+	Description string             `json:"description" yaml:"description"`
+	Type        types.PolicyType   `json:"type" yaml:"type"`
+	Rules       []types.PolicyRule `json:"rules" yaml:"rules"`
+}
+
+func loadPolicyDefinition(path string) (*policyDefinition, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read policy file: %w", err)
+	}
+	var def policyDefinition
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".yaml", ".yml":
+		if err := yaml.Unmarshal(data, &def); err != nil {
+			return nil, fmt.Errorf("failed to parse policy YAML: %w", err)
+		}
+	default:
+		if err := json.Unmarshal(data, &def); err != nil {
+			return nil, fmt.Errorf("failed to parse policy JSON: %w", err)
+		}
+	}
+	return &def, nil
 }

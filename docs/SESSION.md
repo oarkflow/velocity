@@ -1,0 +1,133 @@
+# SESSION Command Deep-Dive
+
+This document is implementation-oriented guidance for the `secretr session` command group.
+
+It is generated from the live CLI/authz surface and intended for parity review, security review, and implementation planning.
+
+## 1. Command Surface
+
+| Subcommand | Purpose |
+|---|---|
+| `secretr session` | Session management |
+| `secretr session list` | List active sessions |
+| `secretr session revoke` | Revoke a session |
+| `secretr session revoke-all` | Revoke all sessions except current |
+
+## 2. RBAC + Entitlement Scope Requirements
+
+Entitlement scope slugs are expected to match RBAC scope literals exactly.
+
+| Subcommand | Required Scopes |
+|---|---|
+| `secretr session` | `session:read` |
+| `secretr session list` | `session:read` |
+| `secretr session revoke` | `session:revoke` |
+| `secretr session revoke-all` | `session:read` |
+
+## 3. ACL / Resource Model
+
+| Subcommand | Resource Type | ACL Required |
+|---|---|---|
+| `secretr session` | `session` | yes |
+| `secretr session list` | `session` | yes |
+| `secretr session revoke` | `session` | yes |
+| `secretr session revoke-all` | `session` | yes |
+
+## 4. Flags and Positional Arguments
+
+### `secretr session`
+
+Flags:
+
+- none
+
+Positional arguments:
+
+| Required Positional Args | Optional Positional Args | ArgsUsage Source |
+|---|---|---|
+| - | - | `-` |
+
+### `secretr session list`
+
+Flags:
+
+- none
+
+Positional arguments:
+
+| Required Positional Args | Optional Positional Args | ArgsUsage Source |
+|---|---|---|
+| - | - | `-` |
+
+### `secretr session revoke`
+
+Flags:
+
+| Flag | Aliases | Type | Required | Auth Class | ACL Required | Description |
+|---|---|---|---|---|---|---|
+| `--id` | - | `string` | yes | `resource_selector` | yes | Session ID |
+
+Positional arguments:
+
+| Required Positional Args | Optional Positional Args | ArgsUsage Source |
+|---|---|---|
+| - | - | `-` |
+
+### `secretr session revoke-all`
+
+Flags:
+
+- none
+
+Positional arguments:
+
+| Required Positional Args | Optional Positional Args | ArgsUsage Source |
+|---|---|---|
+| - | - | `-` |
+
+## 5. Copy-Paste Examples
+
+### `secretr session`
+
+```bash
+secretr session
+```
+
+### `secretr session list`
+
+```bash
+secretr session list
+```
+
+### `secretr session revoke`
+
+```bash
+secretr session revoke --id=demo-id
+```
+
+### `secretr session revoke-all`
+
+```bash
+secretr session revoke-all
+```
+
+## 6. Audit and Observability
+
+All commands in this group are currently observable through:
+- CLI command audit events (`type=cli`, `action=command_execute`)
+- centralized authz decision events (`type=authz`)
+- API request audit events when equivalent API routes are used (`type=api`, `action=request`)
+
+Command-specific domain events may also be emitted by the underlying managers. Validate this explicitly during parity testing.
+
+## 7. Review Checklist (Implementation + Security)
+
+Use this checklist to identify missing implementation pieces and hardening work:
+
+1. Verify every subcommand has expected domain-level audit events (not only CLI/authz wrappers).
+2. Validate flag-level ACL behavior for resource-selector flags (especially `--id`, `--name`, `--path`, `--resource`).
+3. Confirm positional arguments are explicitly modeled where needed (avoid implicit wildcard behavior).
+4. Confirm entitlement scope coverage for all subcommands and critical flags.
+5. Add API parity routes/tests for this group if missing.
+6. Ensure sensitive outputs are masked by default and require explicit reveal flags.
+7. Ensure destructive operations are audited with before/after context and denial reasons.

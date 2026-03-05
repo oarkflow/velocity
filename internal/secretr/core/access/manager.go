@@ -5,10 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/oarkflow/velocity/internal/secretr/core/crypto"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/storage"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
@@ -131,7 +131,7 @@ func (m *Manager) ApproveAccessRequest(ctx context.Context, requestID types.ID, 
 	}
 
 	// Prevent self-approval if requestor is approver
-	if req.RequestorID == approverID && os.Getenv("SECRETR_ALLOW_SELF_APPROVAL") != "true" {
+	if req.RequestorID == approverID && !securitymode.AllowSelfApprovalEnvOverride() {
 		return nil, errors.New("access: self-approval not allowed")
 	}
 
@@ -270,13 +270,17 @@ func (m *Manager) Check(ctx context.Context, identityID types.ID, resourceID typ
 		return err
 	}
 
+	foundGrantForActorResource := false
+
 	for _, grant := range grants {
 		if grant.GranteeID != identityID {
 			continue
 		}
-		if grant.ResourceID != resourceID {
+		// Support global/wildcard grants and exact resource grants.
+		if grant.ResourceID != resourceID && grant.ResourceID != "*" {
 			continue
 		}
+		foundGrantForActorResource = true
 		if grant.Status != types.StatusActive {
 			continue
 		}
@@ -293,6 +297,11 @@ func (m *Manager) Check(ctx context.Context, identityID types.ID, resourceID typ
 			}
 			return nil // Access granted
 		}
+	}
+
+	// Deny by default when no matching ACL grant exists.
+	if !foundGrantForActorResource {
+		return ErrAccessDenied
 	}
 
 	return ErrAccessDenied

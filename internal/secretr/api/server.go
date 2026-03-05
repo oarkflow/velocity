@@ -23,7 +23,9 @@ import (
 	"github.com/oarkflow/velocity/internal/secretr/core/files"
 	"github.com/oarkflow/velocity/internal/secretr/core/identity"
 	"github.com/oarkflow/velocity/internal/secretr/core/monitoring"
+	"github.com/oarkflow/velocity/internal/secretr/core/policy"
 	"github.com/oarkflow/velocity/internal/secretr/core/secrets"
+	"github.com/oarkflow/velocity/internal/secretr/core/share"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
 
@@ -49,6 +51,8 @@ type Server struct {
 	monitoring  *monitoring.Engine
 	alerts      *alerts.Engine
 	access      *access.Manager
+	policy      *policy.Engine
+	share       *share.Manager
 	authorizer  *authz.Authorizer
 	resolver    authz.ResourceResolver
 	routeSpecs  []authz.APIRouteAuthSpec
@@ -74,6 +78,8 @@ type Config struct {
 	MonitoringEngine *monitoring.Engine
 	AlertEngine      *alerts.Engine
 	AccessManager    *access.Manager
+	PolicyEngine     *policy.Engine
+	ShareManager     *share.Manager
 	PolicyChecker    authz.PolicyChecker
 	Entitlements     authz.EntitlementProvider
 	UsageCounter     authz.UsageCounter
@@ -95,6 +101,8 @@ func NewServer(cfg Config) *Server {
 		monitoring:  cfg.MonitoringEngine,
 		alerts:      cfg.AlertEngine,
 		access:      cfg.AccessManager,
+		policy:      cfg.PolicyEngine,
+		share:       cfg.ShareManager,
 		crypto:      crypto.NewEngine(""),
 		mux:         http.NewServeMux(),
 		rateLimiter: NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst),
@@ -184,6 +192,39 @@ func (s *Server) setupRoutes() {
 	addSpec(http.MethodGet, "/api/v1/files/", []types.Scope{types.ScopeFileDownload}, "file", true, false)
 	addSpec(http.MethodDelete, "/api/v1/files/", []types.Scope{types.ScopeFileDelete}, "file", true, false)
 
+	// Access endpoints
+	s.registerRoute("/api/v1/access/grants", []string{http.MethodGet, http.MethodPost}, true, s.handleAccessGrants)
+	s.registerRoute("/api/v1/access/grants/", []string{http.MethodDelete}, true, s.handleAccessGrant)
+	s.registerRoute("/api/v1/access/requests", []string{http.MethodPost}, true, s.handleAccessRequests)
+	s.registerRoute("/api/v1/access/requests/", []string{http.MethodPost}, true, s.handleAccessRequestAction)
+	addSpec(http.MethodGet, "/api/v1/access/grants", []types.Scope{types.ScopeAccessRead}, "access", true, false)
+	addSpec(http.MethodPost, "/api/v1/access/grants", []types.Scope{types.ScopeAccessGrant}, "access", true, false)
+	addSpec(http.MethodDelete, "/api/v1/access/grants/", []types.Scope{types.ScopeAccessRevoke}, "access", true, false)
+	addSpec(http.MethodPost, "/api/v1/access/requests", []types.Scope{types.ScopeAccessRequest}, "access", true, false)
+	addSpec(http.MethodPost, "/api/v1/access/requests/", []types.Scope{types.ScopeAccessApprove}, "access", true, false)
+
+	// Policy endpoints
+	s.registerRoute("/api/v1/policies", []string{http.MethodGet, http.MethodPost}, true, s.handlePolicies)
+	s.registerRoute("/api/v1/policies/bind", []string{http.MethodPost}, true, s.handlePolicyBind)
+	s.registerRoute("/api/v1/policies/simulate", []string{http.MethodPost}, true, s.handlePolicySimulate)
+	s.registerRoute("/api/v1/policies/freeze", []string{http.MethodPost}, true, s.handlePolicyFreeze)
+	addSpec(http.MethodGet, "/api/v1/policies", []types.Scope{types.ScopePolicyRead}, "policy", true, false)
+	addSpec(http.MethodPost, "/api/v1/policies", []types.Scope{types.ScopePolicyCreate}, "policy", true, false)
+	addSpec(http.MethodPost, "/api/v1/policies/bind", []types.Scope{types.ScopePolicyBind}, "policy", true, false)
+	addSpec(http.MethodPost, "/api/v1/policies/simulate", []types.Scope{types.ScopePolicySimulate}, "policy", true, false)
+	addSpec(http.MethodPost, "/api/v1/policies/freeze", []types.Scope{types.ScopePolicyFreeze, types.ScopeAdminAll}, "policy", true, false)
+
+	// Share endpoints
+	s.registerRoute("/api/v1/shares", []string{http.MethodGet, http.MethodPost}, true, s.handleShares)
+	s.registerRoute("/api/v1/shares/accept/", []string{http.MethodPost}, true, s.handleShareAccept)
+	s.registerRoute("/api/v1/shares/revoke/", []string{http.MethodPost}, true, s.handleShareRevoke)
+	s.registerRoute("/api/v1/shares/export/", []string{http.MethodGet}, true, s.handleShareExport)
+	addSpec(http.MethodGet, "/api/v1/shares", []types.Scope{types.ScopeShareRead}, "share", true, false)
+	addSpec(http.MethodPost, "/api/v1/shares", []types.Scope{types.ScopeShareCreate}, "share", true, false)
+	addSpec(http.MethodPost, "/api/v1/shares/accept/", []types.Scope{types.ScopeShareAccept}, "share", true, false)
+	addSpec(http.MethodPost, "/api/v1/shares/revoke/", []types.Scope{types.ScopeShareRevoke}, "share", true, false)
+	addSpec(http.MethodGet, "/api/v1/shares/export/", []types.Scope{types.ScopeShareExport}, "share", true, false)
+
 	// Monitoring endpoints
 	s.registerRoute("/api/v1/monitoring/dashboard", []string{http.MethodGet, http.MethodPost}, true, s.handleDashboard)
 	s.registerRoute("/api/v1/monitoring/events", []string{http.MethodGet}, true, s.handleMonitoringEvents)
@@ -242,6 +283,16 @@ func methodProbePath(path, method string) string {
 		return "/api/v1/identities/id"
 	case "/api/v1/files/":
 		return "/api/v1/files/name"
+	case "/api/v1/access/grants/":
+		return "/api/v1/access/grants/id"
+	case "/api/v1/access/requests/":
+		return "/api/v1/access/requests/id/approve"
+	case "/api/v1/shares/accept/":
+		return "/api/v1/shares/accept/id"
+	case "/api/v1/shares/revoke/":
+		return "/api/v1/shares/revoke/id"
+	case "/api/v1/shares/export/":
+		return "/api/v1/shares/export/id"
 	case "/api/v1/alerts/":
 		if method == http.MethodGet {
 			return "/api/v1/alerts/id"
@@ -271,36 +322,85 @@ func (s *Server) RouteAuthSpecs() []authz.APIRouteAuthSpec {
 // withMiddleware wraps handlers with common middleware
 func (s *Server) withMiddleware(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		// CORS
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
+		sw.Header().Set("Access-Control-Allow-Origin", "*")
+		sw.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		sw.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID")
 
 		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusNoContent)
+			sw.WriteHeader(http.StatusNoContent)
+			s.logAPIRequestAudit(r.Context(), r, sw.status, time.Since(startedAt))
 			return
 		}
 
 		// Rate limiting
 		clientIP := getClientIP(r)
 		if !s.rateLimiter.Allow(clientIP) {
-			s.jsonError(w, http.StatusTooManyRequests, "rate_limited", "Too many requests")
+			s.jsonError(sw, http.StatusTooManyRequests, "rate_limited", "Too many requests")
+			s.logAPIRequestAudit(r.Context(), r, sw.status, time.Since(startedAt))
 			return
 		}
 
 		// Security headers
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'")
-		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		sw.Header().Set("X-Content-Type-Options", "nosniff")
+		sw.Header().Set("X-Frame-Options", "DENY")
+		sw.Header().Set("X-XSS-Protection", "1; mode=block")
+		sw.Header().Set("Content-Security-Policy", "default-src 'self'")
+		sw.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
-		if !s.authorizeRoute(w, r) {
+		if !s.authorizeRoute(sw, r) {
+			s.logAPIRequestAudit(r.Context(), r, sw.status, time.Since(startedAt))
 			return
 		}
 
-		handler(w, r)
+		handler(sw, r)
+		s.logAPIRequestAudit(r.Context(), r, sw.status, time.Since(startedAt))
 	}
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	// Implicitly set status to 200 if caller only writes body.
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *Server) logAPIRequestAudit(ctx context.Context, r *http.Request, status int, duration time.Duration) {
+	if s.audit == nil || r == nil {
+		return
+	}
+	actorID := types.ID("")
+	if session := s.getSession(r); session != nil {
+		actorID = session.IdentityID
+	}
+	success := status < 400
+	_ = s.audit.Log(ctx, audit.AuditEventInput{
+		Type:      "api",
+		Action:    "request",
+		ActorID:   actorID,
+		ActorType: "identity",
+		Success:   success,
+		Details: map[string]any{
+			"method":      r.Method,
+			"path":        r.URL.Path,
+			"status_code": status,
+			"client_ip":   getClientIP(r),
+			"duration_ms": duration.Milliseconds(),
+		},
+	})
 }
 
 func (s *Server) authorizeRoute(w http.ResponseWriter, r *http.Request) bool {

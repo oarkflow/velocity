@@ -89,8 +89,13 @@ func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, erro
 		return dec, types.NewError(types.ErrCodeEntitlementDenied, err.Error())
 	}
 
-	if req.RequireACL {
+	if req.RequireACL && !req.AllowUnauth {
 		if req.ResourceID == "" {
+			if isCollectionScopeRequest(req.RequiredScopes) {
+				dec.Allowed = true
+				a.log(ctx, req, dec)
+				return dec, nil
+			}
 			dec.DeniedBy = DeniedByACL
 			dec.Reason = "resource id required for ACL evaluation"
 			a.log(ctx, req, dec)
@@ -291,6 +296,20 @@ func firstScope(scopes []types.Scope) string {
 		return ""
 	}
 	return string(scopes[0])
+}
+
+func isCollectionScopeRequest(scopes []types.Scope) bool {
+	if len(scopes) == 0 {
+		return false
+	}
+	for _, s := range scopes {
+		raw := strings.ToLower(strings.TrimSpace(string(s)))
+		if strings.HasSuffix(raw, ":list") || strings.HasSuffix(raw, ":query") {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func getScopeGrant(lic *licclient.LicenseData, featureSlug, scopeSlug string) (licclient.ScopeGrant, bool) {

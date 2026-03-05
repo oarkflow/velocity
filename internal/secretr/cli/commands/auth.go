@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -44,6 +45,9 @@ func AuthLogin(ctx context.Context, cmd *cli.Command) error {
 
 	session, err := c.Identity.Authenticate(ctx, email, password, types.ID(deviceID))
 	if err != nil {
+		if errors.Is(err, identity.ErrIdentityNotFound) {
+			return fmt.Errorf("login failed: identity not found for email %q", email)
+		}
 		return fmt.Errorf("login failed: %w", err)
 	}
 
@@ -202,6 +206,7 @@ func AuthInit(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	success("System initialized. Admin created: %s (%s)", ident.Name, ident.ID)
+	info("Admin login email: %s", ident.Email)
 	info("Idle timeout configured: %v", timeout)
 
 	// Enroll initial device

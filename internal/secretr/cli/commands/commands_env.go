@@ -36,13 +36,20 @@ func Env(ctx context.Context, cmd *cli.Command) error {
 		mfaVerified = sess.MFAVerified
 	}
 
-	val, err := c.Secrets.Get(ctx, key, c.CurrentIdentityID(), mfaVerified)
+	val, found, err := getVelocitySecretValue(key)
 	if err != nil {
 		return err
 	}
+	if !found {
+		raw, getErr := c.Secrets.Get(ctx, key, c.CurrentIdentityID(), mfaVerified)
+		if getErr != nil {
+			return getErr
+		}
+		val = string(raw)
+	}
 
 	envVar := toEnvVar(key)
-	fmt.Printf("export %s='%s'\n", envVar, escapeValue(string(val)))
+	fmt.Printf("export %s='%s'\n", envVar, escapeValue(val))
 	return nil
 }
 
@@ -58,21 +65,29 @@ func LoadEnv(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	// List all secrets
-	opts := secrets.ListSecretsOptions{}
+	items, err := loadBulkSecretsFromVelocity("", "general")
+	if err == nil && len(items) > 0 {
+		for _, s := range items {
+			nameForEnv := secretNameForEnv(s.Name, "general")
+			envVar := toEnvVar(nameForEnv)
+			fmt.Printf("export %s='%s'\n", envVar, escapeValue(s.Value))
+		}
+		return nil
+	}
+
+	// Legacy fallback
+	opts := secrets.ListSecretsOptions{Environment: "general"}
 	secretsList, err := c.Secrets.List(ctx, opts)
 	if err != nil {
 		return err
 	}
-
 	mfaVerified := false
 	if sess := c.CurrentSession(); sess != nil {
 		mfaVerified = sess.MFAVerified
 	}
-
 	for _, s := range secretsList {
-		val, err := c.Secrets.Get(ctx, s.Name, c.CurrentIdentityID(), mfaVerified)
-		if err != nil {
+		val, getErr := c.Secrets.Get(ctx, s.Name, c.CurrentIdentityID(), mfaVerified)
+		if getErr != nil {
 			continue
 		}
 		envVar := toEnvVar(s.Name)
@@ -95,26 +110,33 @@ func Enrich(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer c.Close()
 
-	// Build env map
-	opts := secrets.ListSecretsOptions{}
-	secretsList, err := c.Secrets.List(ctx, opts)
-	if err != nil {
-		return err
-	}
-
-	mfaVerified := false
-	if sess := c.CurrentSession(); sess != nil {
-		mfaVerified = sess.MFAVerified
-	}
-
 	env := os.Environ()
-	for _, s := range secretsList {
-		val, err := c.Secrets.Get(ctx, s.Name, c.CurrentIdentityID(), mfaVerified)
-		if err != nil {
-			continue
+	items, err := loadBulkSecretsFromVelocity("", "general")
+	if err == nil && len(items) > 0 {
+		for _, s := range items {
+			nameForEnv := secretNameForEnv(s.Name, "general")
+			envVar := toEnvVar(nameForEnv)
+			env = append(env, fmt.Sprintf("%s=%s", envVar, s.Value))
 		}
-		envVar := toEnvVar(s.Name)
-		env = append(env, fmt.Sprintf("%s=%s", envVar, string(val)))
+	} else {
+		// Legacy fallback
+		opts := secrets.ListSecretsOptions{Environment: "general"}
+		secretsList, listErr := c.Secrets.List(ctx, opts)
+		if listErr != nil {
+			return listErr
+		}
+		mfaVerified := false
+		if sess := c.CurrentSession(); sess != nil {
+			mfaVerified = sess.MFAVerified
+		}
+		for _, s := range secretsList {
+			val, getErr := c.Secrets.Get(ctx, s.Name, c.CurrentIdentityID(), mfaVerified)
+			if getErr != nil {
+				continue
+			}
+			envVar := toEnvVar(s.Name)
+			env = append(env, fmt.Sprintf("%s=%s", envVar, string(val)))
+		}
 	}
 
 	// Run command
@@ -131,7 +153,12 @@ func toEnvVar(name string) string {
 	s := strings.ReplaceAll(name, ".", "_")
 	s = strings.ReplaceAll(s, "-", "_")
 	s = strings.ReplaceAll(s, "/", "_")
-	return strings.ToUpper(s)
+	s = strings.ToUpper(strings.TrimSpace(s))
+	s = strings.Trim(s, "_")
+	for strings.Contains(s, "__") {
+		s = strings.ReplaceAll(s, "__", "_")
+	}
+	return s
 }
 
 func escapeValue(val string) string {

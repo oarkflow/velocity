@@ -81,6 +81,11 @@
         "name": "resource",
         "class": "resource_selector",
         "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
       }
     ],
     "args": [
@@ -142,6 +147,17 @@
   },
   {
     "path": "admin",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "admin security",
     "flags": [],
     "args": [
       {
@@ -1196,7 +1212,28 @@
   },
   {
     "path": "dlp rules create",
-    "flags": [],
+    "flags": [
+      {
+        "name": "description",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "patterns",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "severity",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -1207,7 +1244,13 @@
   },
   {
     "path": "dlp rules delete",
-    "flags": [],
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -1377,7 +1420,22 @@
     "path": "exec",
     "flags": [
       {
+        "name": "all-secrets",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
         "name": "command",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "env",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "env-prefix",
         "class": "control",
         "require_acl": false
       },
@@ -1387,9 +1445,14 @@
         "require_acl": false
       },
       {
+        "name": "prefix",
+        "class": "control",
+        "require_acl": false
+      },
+      {
         "name": "seccomp-profile",
-        "class": "resource_selector",
-        "require_acl": true
+        "class": "control",
+        "require_acl": false
       },
       {
         "name": "secret",
@@ -1406,7 +1469,7 @@
       {
         "position": -1,
         "name": "*",
-        "require_acl": true
+        "require_acl": false
       }
     ]
   },
@@ -2557,6 +2620,11 @@
         "require_acl": false
       },
       {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
         "name": "role",
         "class": "control",
         "require_acl": false
@@ -2611,7 +2679,18 @@
   },
   {
     "path": "org teams create",
-    "flags": [],
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -2622,7 +2701,13 @@
   },
   {
     "path": "org teams list",
-    "flags": [],
+    "flags": [
+      {
+        "name": "org-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
     "args": [
       {
         "position": -1,

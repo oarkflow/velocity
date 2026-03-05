@@ -16,6 +16,8 @@ import (
 	secretrcli "github.com/oarkflow/velocity/internal/secretr/cli"
 	"github.com/oarkflow/velocity/internal/secretr/cli/commands"
 	"github.com/oarkflow/velocity/internal/secretr/cli/middleware"
+	"github.com/oarkflow/velocity/internal/secretr/core/audit"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
 
@@ -85,12 +87,14 @@ func NewApp(sessionStore SessionStore) (*App, error) {
 	var aclChecker authz.ACLChecker
 	var usageCounter authz.UsageCounter
 	var policyChecker authz.PolicyChecker
+	var auditLogger authz.AuditLogger
 	if c := app.adapter.GetClient(); c != nil {
 		aclChecker = c.Access
 		usageCounter = authz.NewStoreUsageCounter(c.Store)
 		policyChecker = &authz.PolicyAdapter{Engine: c.Policy}
+		auditLogger = &authz.AuditAdapter{Engine: c.Audit}
 	}
-	authorizer := authz.NewAuthorizerWithCounter(authz.NewEnvEntitlementProvider(), aclChecker, nil, usageCounter)
+	authorizer := authz.NewAuthorizerWithCounter(authz.NewEnvEntitlementProvider(), aclChecker, auditLogger, usageCounter)
 	authorizer.SetPolicyChecker(policyChecker)
 	app.gate.SetAuthorizer(authorizer)
 
@@ -98,6 +102,7 @@ func NewApp(sessionStore SessionStore) (*App, error) {
 	app.cli = app.buildCLI()
 	app.gate.SetCommandSpecs(authz.BuildCLIAuthSpecs(app.cli, nil))
 	app.applyAuthzBefore(app.cli)
+	app.applyCLIAudit(app.cli)
 
 	return app, nil
 }
@@ -114,6 +119,56 @@ func (a *App) applyAuthzBefore(cmd *cli.Command) {
 	for _, sub := range cmd.Commands {
 		a.applyAuthzBefore(sub)
 	}
+}
+
+func (a *App) applyCLIAudit(cmd *cli.Command) {
+	if cmd == nil {
+		return
+	}
+	if cmd.Action != nil {
+		orig := cmd.Action
+		cmd.Action = func(ctx context.Context, current *cli.Command) error {
+			err := orig(ctx, current)
+			a.logCLICommandAudit(ctx, current, err)
+			return err
+		}
+	}
+	for _, sub := range cmd.Commands {
+		a.applyCLIAudit(sub)
+	}
+}
+
+func (a *App) logCLICommandAudit(ctx context.Context, cmd *cli.Command, actionErr error) {
+	if a == nil || a.adapter == nil {
+		return
+	}
+	c := a.adapter.GetClient()
+	if c == nil || c.Audit == nil || cmd == nil {
+		return
+	}
+
+	actorID := types.ID("")
+	if sess := c.CurrentSession(); sess != nil {
+		actorID = sess.IdentityID
+	}
+	commandPath := strings.TrimSpace(cmd.FullName())
+	if commandPath == "" {
+		commandPath = strings.TrimSpace(cmd.Name)
+	}
+	details := types.Metadata{
+		"command": commandPath,
+	}
+	if actionErr != nil {
+		details["error"] = actionErr.Error()
+	}
+	_ = c.Audit.Log(ctx, audit.AuditEventInput{
+		Type:      "cli",
+		Action:    "command_execute",
+		ActorID:   actorID,
+		ActorType: "identity",
+		Success:   actionErr == nil,
+		Details:   details,
+	})
 }
 
 func (a *App) buildCLI() *cli.Command {
@@ -168,8 +223,9 @@ and reduces trust ambiguity.`,
 				Usage: "Suppress non-essential output",
 			},
 			&cli.BoolFlag{
-				Name:  "debug",
-				Usage: "Enable debug output",
+				Name:   "debug",
+				Usage:  "Enable debug output",
+				Hidden: !securitymode.IsDevBuild(),
 			},
 			&cli.BoolFlag{
 				Name:    "yes",
@@ -966,6 +1022,7 @@ func (a *App) policyCommands() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "policy", Usage: "Policy ID", Required: true},
 					&cli.StringFlag{Name: "resource", Usage: "Resource ID", Required: true},
+					&cli.StringFlag{Name: "type", Usage: "Resource type", Required: true},
 				},
 			},
 			{
@@ -1040,7 +1097,7 @@ func (a *App) shareCommands() *cli.Command {
 				Before: a.gate.RequireScopes(types.ScopeShareCreate),
 				Action: commands.ShareCreate,
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "type", Usage: "Share type: secret, file", Required: true},
+					&cli.StringFlag{Name: "type", Usage: "Share type: secret, file, folder, object", Required: true},
 					&cli.StringFlag{Name: "resource", Aliases: []string{"r"}, Usage: "Resource name or ID", Required: true},
 					&cli.StringFlag{Name: "recipient", Usage: "Recipient identity ID"},
 					&cli.DurationFlag{Name: "expires-in", Usage: "Share expiration"},
@@ -1165,6 +1222,7 @@ func (a *App) orgCommands() *cli.Command {
 				Action: commands.OrgInvite,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "email", Usage: "Email address", Required: true},
+					&cli.StringFlag{Name: "org-id", Usage: "Organization ID"},
 					&cli.StringFlag{Name: "role", Usage: "Role to assign"},
 				},
 			},
@@ -1173,8 +1231,23 @@ func (a *App) orgCommands() *cli.Command {
 				Usage:  "Team management",
 				Before: a.gate.RequireScopes(types.ScopeOrgTeams),
 				Commands: []*cli.Command{
-					{Name: "create", Usage: "Create team", Action: commands.TeamCreate},
-					{Name: "list", Usage: "List teams", Action: commands.TeamList},
+					{
+						Name:   "create",
+						Usage:  "Create team",
+						Action: commands.TeamCreate,
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "org-id", Usage: "Organization ID"},
+							&cli.StringFlag{Name: "name", Usage: "Team name", Required: true},
+						},
+					},
+					{
+						Name:   "list",
+						Usage:  "List teams",
+						Action: commands.TeamList,
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "org-id", Usage: "Organization ID"},
+						},
+					},
 				},
 			},
 			{
@@ -1404,6 +1477,11 @@ func (a *App) adminCommands() *cli.Command {
 				Action: commands.AdminSystem,
 			},
 			{
+				Name:   "security",
+				Usage:  "Global security settings",
+				Action: commands.AdminSecurity,
+			},
+			{
 				Name:   "server",
 				Usage:  "Start the API server",
 				Action: commands.AdminServer,
@@ -1506,6 +1584,10 @@ func (a *App) execCommands() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "command", Usage: "Command to run", Required: true},
 			&cli.StringSliceFlag{Name: "secret", Aliases: []string{"s"}, Usage: "Secret mapping ID:ENV_VAR or ID:ENV_VAR:file"},
+			&cli.BoolFlag{Name: "all-secrets", Usage: "Load all secrets as environment variables"},
+			&cli.StringFlag{Name: "prefix", Usage: "Load only secrets under prefix/folder as environment variables"},
+			&cli.StringFlag{Name: "env", Usage: "Filter bulk-loaded secrets by environment"},
+			&cli.StringFlag{Name: "env-prefix", Usage: "Prefix applied to generated environment variable names"},
 			&cli.StringFlag{Name: "isolation", Usage: "Isolation level: auto (default), host, ns (Linux namespaces)", Value: "auto"},
 			&cli.StringFlag{Name: "seccomp-profile", Usage: "Linux seccomp profile (e.g. strict); strict mode fails closed if unavailable"},
 			&cli.BoolFlag{Name: "strict-sandbox", Usage: "Fail command if requested sandbox controls are unavailable"},
@@ -1604,7 +1686,7 @@ func (a *App) alertCommands() *cli.Command {
 				Before: a.gate.RequireScopes(types.ScopeAuditRead),
 				Action: commands.AlertResolve,
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "id", Usage: "Grant ID", Required: true},
+					&cli.StringFlag{Name: "id", Usage: "Alert ID", Required: true},
 				},
 			},
 		},
@@ -1683,8 +1765,25 @@ func (a *App) dlpCommands() *cli.Command {
 				Before: a.gate.RequireScopes(types.ScopeDLPRules),
 				Commands: []*cli.Command{
 					{Name: "list", Usage: "List rules", Action: commands.DLPRuleList},
-					{Name: "create", Usage: "Create rule", Action: commands.DLPRuleCreate},
-					{Name: "delete", Usage: "Delete rule", Action: commands.DLPRuleDelete},
+					{
+						Name:   "create",
+						Usage:  "Create rule",
+						Action: commands.DLPRuleCreate,
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "name", Usage: "Rule name", Required: true},
+							&cli.StringFlag{Name: "description", Usage: "Rule description"},
+							&cli.StringSliceFlag{Name: "patterns", Usage: "Regex patterns to match", Required: true},
+							&cli.StringFlag{Name: "severity", Usage: "Severity: critical, high, medium, low", Value: "high"},
+						},
+					},
+					{
+						Name:   "delete",
+						Usage:  "Delete rule",
+						Action: commands.DLPRuleDelete,
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "id", Usage: "Rule ID", Required: true},
+						},
+					},
 				},
 			},
 		},

@@ -64,15 +64,35 @@ func AuditVerify(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	ok, err := c.Audit.VerifyIntegrity(ctx)
+	storeOK, err := c.Audit.VerifyIntegrity(ctx)
+	if err != nil {
+		return err
+	}
+	ledgerOK, err := c.Audit.VerifyLedgerIntegrity(ctx)
+	if err != nil {
+		return err
+	}
+	proof, err := c.Audit.GetChainProof(ctx)
 	if err != nil {
 		return err
 	}
 
-	if ok {
+	if storeOK && ledgerOK {
 		success("Audit log integrity verified")
 	} else {
 		warning("Audit log integrity verification FAILED")
+	}
+	info("Hash chain (event store): %t", storeOK)
+	info("Merkle ledger chain: %t", ledgerOK)
+	if proof != nil {
+		info("Ledger blocks: %d", proof.TotalBlocks)
+		info("Latest block index: %d", proof.LatestBlockIndex)
+		if proof.LatestBlockID != "" {
+			info("Latest block id: %s", proof.LatestBlockID)
+		}
+		if proof.LatestBlockHash != "" {
+			info("Latest block hash: %s", proof.LatestBlockHash)
+		}
 	}
 	return nil
 }

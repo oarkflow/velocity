@@ -3,9 +3,12 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 )
 
 // resolveOrCreateJWTSecret returns a stable JWT secret for Secretr runtime.
@@ -14,8 +17,10 @@ import (
 // 2) dataDir/jwt.secret file
 // 3) generated random secret persisted to dataDir/jwt.secret
 func resolveOrCreateJWTSecret(dataDir string) string {
-	if v := strings.TrimSpace(os.Getenv("SECRETR_JWT_SECRET")); v != "" {
-		return v
+	if securitymode.AllowJWTSecretEnvOverride() {
+		if v := strings.TrimSpace(os.Getenv("SECRETR_JWT_SECRET")); v != "" {
+			return v
+		}
 	}
 
 	secretPath := filepath.Join(dataDir, "jwt.secret")
@@ -27,8 +32,7 @@ func resolveOrCreateJWTSecret(dataDir string) string {
 
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		// Last-resort deterministic fallback to avoid empty secret usage.
-		return "secretr-fallback-jwt-secret"
+		panic(fmt.Sprintf("failed to generate JWT secret: %v", err))
 	}
 	secret := hex.EncodeToString(buf)
 	_ = os.MkdirAll(dataDir, 0700)

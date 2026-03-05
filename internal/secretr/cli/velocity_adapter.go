@@ -17,6 +17,11 @@ func SetGlobalAdapter(adapter *VelocityAdapter) {
 	globalAdapter = adapter
 }
 
+// GetGlobalAdapter returns the globally configured Velocity adapter instance.
+func GetGlobalAdapter() *VelocityAdapter {
+	return globalAdapter
+}
+
 // VelocityAdapter adapts secretr client to work with velocity commands
 type VelocityAdapter struct {
 	client     *Client

@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	licclient "github.com/oarkflow/licensing-go"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
 
-// EnvEntitlementProvider loads a license payload from SECRETR_LICENSE_PATH.
+// EnvEntitlementProvider loads license payload from ~/.secretr/license.json in
+// secure builds. Dev builds (tag: secretr_dev) may override path via
+// SECRETR_LICENSE_PATH.
 // The file is cached and reloaded on mtime changes.
 type EnvEntitlementProvider struct {
 	mu       sync.RWMutex
@@ -22,7 +26,20 @@ type EnvEntitlementProvider struct {
 }
 
 func NewEnvEntitlementProvider() *EnvEntitlementProvider {
-	return &EnvEntitlementProvider{path: os.Getenv("SECRETR_LICENSE_PATH")}
+	return &EnvEntitlementProvider{path: resolveLicensePath()}
+}
+
+func resolveLicensePath() string {
+	if securitymode.AllowLicensePathEnvOverride() {
+		if p := os.Getenv("SECRETR_LICENSE_PATH"); p != "" {
+			return p
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".secretr", "license.json")
 }
 
 func (p *EnvEntitlementProvider) GetLicenseData(ctx context.Context, actorID types.ID) (*licclient.LicenseData, error) {

@@ -28,6 +28,12 @@ func (denyACL) Check(ctx context.Context, identityID types.ID, resourceID types.
 	return types.NewError(types.ErrCodeACLDenied, "acl deny")
 }
 
+type failIfCalledACL struct{}
+
+func (failIfCalledACL) Check(ctx context.Context, identityID types.ID, resourceID types.ID, requiredScopes []types.Scope) error {
+	return errors.New("acl should not be called")
+}
+
 type denyPolicy struct{}
 
 func (denyPolicy) Evaluate(ctx context.Context, actorID types.ID, resourceID types.ID, resourceType string, action string, metadata map[string]any) (bool, string, error) {
@@ -101,6 +107,29 @@ func TestAuthorize_DenyByPolicy(t *testing.T) {
 	var te *types.Error
 	if err == nil || !errors.As(err, &te) || te.Code != types.ErrCodePolicy {
 		t.Fatalf("expected policy denied, got %v", err)
+	}
+}
+
+func TestAuthorize_ListScopeWithoutResourceSkipsACL(t *testing.T) {
+	lic := &licclient.LicenseData{Entitlements: &licclient.LicenseEntitlements{Features: map[string]licclient.FeatureGrant{
+		"secret": {
+			FeatureSlug: "secret",
+			Enabled:     true,
+			Scopes: map[string]licclient.ScopeGrant{
+				"secret:list": {ScopeSlug: "secret:list", Permission: licclient.ScopePermissionAllow},
+			},
+		},
+	}}}
+	a := NewAuthorizer(staticProvider{lic: lic}, failIfCalledACL{}, nil)
+	_, err := a.Authorize(context.Background(), Request{
+		Session:        mkSession(types.ScopeSecretList),
+		RequiredScopes: []types.Scope{types.ScopeSecretList},
+		RequireACL:     true,
+		ResourceType:   "secret",
+		ResourceID:     "",
+	})
+	if err != nil {
+		t.Fatalf("expected list request without resource to pass ACL stage, got: %v", err)
 	}
 }
 

@@ -19,7 +19,7 @@ func TestLedgerIntegrity(t *testing.T) {
 		Store:         store,
 		BlockSize:     2, // Small block size for testing
 		BlockInterval: 1 * time.Second,
-		SignerKey:     make([]byte, 32),
+		SignerKey:     nil,
 	})
 	defer ledger.Close()
 

@@ -2,7 +2,9 @@ package commands
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	client "github.com/oarkflow/velocity/internal/secretr/cli"
+	"github.com/oarkflow/velocity/internal/secretr/core/audit"
 	"github.com/oarkflow/velocity/internal/secretr/core/envelope"
 	"github.com/oarkflow/velocity/internal/secretr/core/policy"
 	"github.com/oarkflow/velocity/internal/secretr/types"
@@ -68,9 +71,9 @@ func EnvelopeCreate(ctx context.Context, cmd *cli.Command) error {
 				return fmt.Errorf("failed to archive folder %s: %w", f, err)
 			}
 			filePayloads = append(filePayloads, types.FilePayload{
-				Name: f,
-				Data: data,
-				Type: "application/x-tar-gzip",
+				Name:     f,
+				Data:     data,
+				Type:     "application/x-tar-gzip",
 				Metadata: types.Metadata{"is_folder": true},
 			})
 		} else {
@@ -124,16 +127,16 @@ func EnvelopeCreate(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	env, err := engine.Create(ctx, envelope.CreateOptions{
-		SenderID:      senderID,
-		SenderPrivKey: senderPriv,
-		RecipientID:   types.ID(recipient),
+		SenderID:        senderID,
+		SenderPrivKey:   senderPriv,
+		RecipientID:     types.ID(recipient),
 		RecipientPubKey: recipPub,
-		Secrets:       secretPayloads,
-		Files:         filePayloads,
-		Message:       message,
-		PolicyID:      types.ID(policyID),
-		Rules:         rules,
-		ExpiresIn:     expiresIn,
+		Secrets:         secretPayloads,
+		Files:           filePayloads,
+		Message:         message,
+		PolicyID:        types.ID(policyID),
+		Rules:           rules,
+		ExpiresIn:       expiresIn,
 	})
 
 	if err != nil {
@@ -147,8 +150,18 @@ func EnvelopeCreate(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	if err := os.WriteFile(outputFile, data, 0600); err != nil {
+		logEnvelopeAudit(ctx, c, "envelope_create_write_failed", optsEnvelopeID(env), false, map[string]any{
+			"path":  outputFile,
+			"error": err.Error(),
+		})
 		return err
 	}
+
+	sum := sha256.Sum256(data)
+	logEnvelopeAudit(ctx, c, "envelope_create", env.ID, true, map[string]any{
+		"path":   outputFile,
+		"sha256": hex.EncodeToString(sum[:]),
+	})
 
 	success("Envelope created: %s", outputFile)
 	info("ID: %s", env.ID)
@@ -168,15 +181,26 @@ func EnvelopeOpen(ctx context.Context, cmd *cli.Command) error {
 	// 1. Load File
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		logEnvelopeAudit(ctx, c, "envelope_open_read_failed", "", false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return err
 	}
 
 	var env types.Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
+		logEnvelopeAudit(ctx, c, "envelope_open_invalid_format", "", false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return fmt.Errorf("invalid envelope format: %w", err)
 	}
 
 	if inspect {
+		logEnvelopeAudit(ctx, c, "envelope_inspect", env.ID, true, map[string]any{
+			"path": filePath,
+		})
 		outputTable(env.Header)
 		fmt.Println("\nCustody Chain:")
 		outputTable(env.Custody)
@@ -191,9 +215,9 @@ func EnvelopeOpen(ctx context.Context, cmd *cli.Command) error {
 	// 3. Current Context
 	session, _ := c.Identity.GetCurrentSession(ctx)
 	currCtx := envelope.Context{
-		Time: time.Now(),
+		Time:        time.Now(),
 		MFAVerified: session != nil && session.MFAVerified,
-		TrustScore: 1.0,
+		TrustScore:  1.0,
 	}
 
 	// 4. Open
@@ -201,25 +225,53 @@ func EnvelopeOpen(ctx context.Context, cmd *cli.Command) error {
 
 	password, err := promptPassword("Enter your password to open envelope: ")
 	if err != nil {
+		logEnvelopeAudit(ctx, c, "envelope_open_password_failed", env.ID, false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return err
 	}
 
 	// Get Decryption Key (X25519 Private Key)
 	recipPriv, err := c.Identity.GetEncryptionPrivateKey(ctx, c.CurrentIdentityID(), password)
 	if err != nil {
+		logEnvelopeAudit(ctx, c, "envelope_open_key_failed", env.ID, false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return fmt.Errorf("failed to get decryption key: %w", err)
 	}
 
 	payload, err := engine.Open(ctx, envelope.OpenOptions{
-		Envelope: &env,
-		RecipientID: env.Header.RecipientID,
+		Envelope:         &env,
+		RecipientID:      env.Header.RecipientID,
 		RecipientPrivKey: recipPriv,
-		Context: currCtx,
+		Context:          currCtx,
 	})
 
 	if err != nil {
+		logEnvelopeAudit(ctx, c, "envelope_open_denied", env.ID, false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return err
 	}
+
+	// Record recipient open in custody chain and persist updated envelope.
+	signerPriv, sigErr := c.Identity.GetPrivateKey(ctx, c.CurrentIdentityID(), password)
+	if sigErr == nil {
+		if recErr := engine.RecordAction(&env, types.ActionEnvelopeOpen, c.CurrentIdentityID(), signerPriv, "local"); recErr == nil {
+			updated, mErr := json.MarshalIndent(&env, "", "  ")
+			if mErr == nil {
+				_ = os.WriteFile(filePath, updated, 0600)
+			}
+		}
+	}
+	payloadHash := sha256.Sum256(payloadDataForAudit(payload))
+	logEnvelopeAudit(ctx, c, "envelope_open", env.ID, true, map[string]any{
+		"path":         filePath,
+		"payload_hash": hex.EncodeToString(payloadHash[:]),
+	})
 
 	success("Envelope Opened!")
 	if payload.Message != "" {
@@ -245,11 +297,19 @@ func EnvelopeVerify(ctx context.Context, cmd *cli.Command) error {
 
 	data, err := os.ReadFile(filePath)
 	if err != nil {
+		logEnvelopeAudit(ctx, nil, "envelope_verify_read_failed", "", false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return err
 	}
 
 	var env types.Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
+		logEnvelopeAudit(ctx, nil, "envelope_verify_invalid_format", "", false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return fmt.Errorf("invalid envelope format: %w", err)
 	}
 
@@ -258,10 +318,73 @@ func EnvelopeVerify(ctx context.Context, cmd *cli.Command) error {
 	defer engine.Close()
 
 	if err := engine.VerifyChain(&env); err != nil {
+		logEnvelopeAudit(ctx, nil, "envelope_verify_failed", env.ID, false, map[string]any{
+			"path":  filePath,
+			"error": err.Error(),
+		})
 		return fmt.Errorf("verification failed: %w", err)
 	}
+	sum := sha256.Sum256(data)
+	logEnvelopeAudit(ctx, nil, "envelope_verify", env.ID, true, map[string]any{
+		"path":   filePath,
+		"sha256": hex.EncodeToString(sum[:]),
+	})
 
 	success("Envelope Integrity Verified")
 	fmt.Printf("Chain length: %d\n", len(env.Custody))
 	return nil
+}
+
+func payloadDataForAudit(payload *types.EnvelopePayload) []byte {
+	if payload == nil {
+		return nil
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func optsEnvelopeID(env *types.Envelope) types.ID {
+	if env == nil {
+		return ""
+	}
+	return env.ID
+}
+
+func logEnvelopeAudit(ctx context.Context, c *client.Client, action string, envelopeID types.ID, success bool, details map[string]any) {
+	var cliClient *client.Client
+	if c != nil {
+		cliClient = c
+	} else {
+		var err error
+		cliClient, err = client.GetClient()
+		if err != nil || cliClient == nil {
+			return
+		}
+		defer cliClient.Close()
+	}
+	if cliClient.Audit == nil {
+		return
+	}
+	actorID := cliClient.CurrentIdentityID()
+	var resourceID *types.ID
+	if envelopeID != "" {
+		r := envelopeID
+		resourceID = &r
+	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	_ = cliClient.Audit.Log(ctx, audit.AuditEventInput{
+		Type:         "envelope",
+		Action:       action,
+		ActorID:      actorID,
+		ActorType:    "identity",
+		ResourceID:   resourceID,
+		ResourceType: "envelope",
+		Success:      success,
+		Details:      details,
+	})
 }

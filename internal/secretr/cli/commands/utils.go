@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 
 	client "github.com/oarkflow/velocity/internal/secretr/cli"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
@@ -105,7 +106,7 @@ func outputTable(data any) error {
 }
 
 func promptPassword(prompt string) (string, error) {
-	if os.Getenv("SECRETR_ALLOW_INSECURE_PASSWORD_ENV") == "true" {
+	if securitymode.AllowInsecurePasswordEnv() {
 		if password := os.Getenv("SECRETR_PASSWORD"); password != "" {
 			return password, nil
 		}
@@ -121,7 +122,7 @@ func promptPassword(prompt string) (string, error) {
 }
 
 func confirm(prompt string) bool {
-	if GlobalYes || os.Getenv("SECRETR_YES") == "true" {
+	if GlobalYes || securitymode.AllowYesEnvOverride() {
 		return true
 	}
 	fmt.Printf("%s [y/N]: ", prompt)
@@ -151,11 +152,13 @@ func GetOrgID(ctx context.Context, cmd *cli.Command) (types.ID, error) {
 	}
 
 	// 2) environment (setup_session exports ORG_ID)
-	if env := os.Getenv("ORG_ID"); env != "" {
-		return types.ID(env), nil
-	}
-	if env := os.Getenv("SECRETR_ORG_ID"); env != "" {
-		return types.ID(env), nil
+	if securitymode.AllowOrgEnvOverride() {
+		if env := os.Getenv("ORG_ID"); env != "" {
+			return types.ID(env), nil
+		}
+		if env := os.Getenv("SECRETR_ORG_ID"); env != "" {
+			return types.ID(env), nil
+		}
 	}
 
 	// 3) if client only has one org, use it

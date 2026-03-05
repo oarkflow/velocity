@@ -42,6 +42,12 @@
     ]
   },
   {
+    "path": "admin security",
+    "scopes": [
+      "admin:security"
+    ]
+  },
+  {
     "path": "admin server",
     "scopes": [
       "admin:system"
