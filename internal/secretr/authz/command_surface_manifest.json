@@ -81,11 +81,6 @@
         "name": "resource",
         "class": "resource_selector",
         "require_acl": true
-      },
-      {
-        "name": "type",
-        "class": "control",
-        "require_acl": false
       }
     ],
     "args": [
@@ -2873,6 +2868,11 @@
         "name": "resource",
         "class": "resource_selector",
         "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
       }
     ],
     "args": [

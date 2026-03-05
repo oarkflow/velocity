@@ -161,6 +161,9 @@ func PolicyFreeze(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	if err := c.RequireScope(types.ScopePolicyFreeze); err != nil {
+		return err
+	}
 
 	// Freeze policy engine
 	c.Policy.Freeze()

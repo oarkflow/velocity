@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1137,6 +1138,68 @@ type UpdateSecretRequest struct {
 	Value string `json:"value"`
 }
 
+type AccessGrantCreateRequest struct {
+	GranteeID    string        `json:"grantee_id"`
+	ResourceID   string        `json:"resource_id"`
+	ResourceType string        `json:"resource_type"`
+	Scopes       []string      `json:"scopes"`
+	ExpiresIn    time.Duration `json:"expires_in"`
+	Resharing    bool          `json:"resharing"`
+}
+
+type AccessRequestCreateRequest struct {
+	ResourceID    string   `json:"resource_id"`
+	ResourceType  string   `json:"resource_type"`
+	Justification string   `json:"justification"`
+	Duration      string   `json:"duration"`
+	Permissions   []string `json:"permissions"`
+	Role          string   `json:"role"`
+	MinApprovals  int      `json:"min_approvals"`
+}
+
+type AccessRequestApproveRequest struct {
+	Notes string `json:"notes"`
+}
+
+type PolicyRulePayload struct {
+	ID         string         `json:"id"`
+	Effect     string         `json:"effect"`
+	Actions    []string       `json:"actions"`
+	Resources  []string       `json:"resources"`
+	Conditions types.Metadata `json:"conditions"`
+	Priority   int            `json:"priority"`
+}
+
+type PolicyCreateRequest struct {
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Type        string              `json:"type"`
+	Rules       []PolicyRulePayload `json:"rules"`
+}
+
+type PolicyBindRequest struct {
+	PolicyID     string `json:"policy_id"`
+	ResourceID   string `json:"resource_id"`
+	ResourceType string `json:"resource_type"`
+}
+
+type PolicySimulateRequest struct {
+	PolicyID     string         `json:"policy_id"`
+	Action       string         `json:"action"`
+	ResourceID   string         `json:"resource_id"`
+	ResourceType string         `json:"resource_type"`
+	Context      map[string]any `json:"context"`
+}
+
+type ShareCreateRequest struct {
+	Type        string        `json:"type"`
+	ResourceID  string        `json:"resource_id"`
+	RecipientID string        `json:"recipient_id"`
+	ExpiresIn   time.Duration `json:"expires_in"`
+	MaxAccess   int           `json:"max_access"`
+	OneTime     bool          `json:"one_time"`
+}
+
 // RateLimiter provides simple token bucket rate limiting
 type RateLimiter struct {
 	mu      sync.Mutex
@@ -1759,6 +1822,471 @@ func (s *Server) handleAlertNotifiers(w http.ResponseWriter, r *http.Request) {
 		s.jsonResponse(w, http.StatusOK, notifiers)
 	default:
 		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+	}
+}
+
+func (s *Server) handleAccessGrants(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.access == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Access service not available")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		grantee := strings.TrimSpace(r.URL.Query().Get("grantee"))
+		resource := strings.TrimSpace(r.URL.Query().Get("resource"))
+		includeRevoked := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_revoked")), "true")
+		grants, err := s.access.ListGrants(r.Context(), access.ListGrantsOptions{
+			GranteeID:      types.ID(grantee),
+			ResourceID:     types.ID(resource),
+			IncludeRevoked: includeRevoked,
+		})
+		if err != nil {
+			s.errorResponse(w, http.StatusInternalServerError, err)
+			return
+		}
+		s.jsonResponse(w, http.StatusOK, grants)
+	case http.MethodPost:
+		var req AccessGrantCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+			return
+		}
+		scopes := make([]types.Scope, 0, len(req.Scopes))
+		for _, sc := range req.Scopes {
+			sc = strings.TrimSpace(sc)
+			if sc == "" {
+				continue
+			}
+			scopes = append(scopes, types.Scope(sc))
+		}
+		grant, err := s.access.Grant(r.Context(), access.GrantOptions{
+			GrantorID:      session.IdentityID,
+			GranteeID:      types.ID(strings.TrimSpace(req.GranteeID)),
+			ResourceID:     types.ID(strings.TrimSpace(req.ResourceID)),
+			ResourceType:   strings.TrimSpace(req.ResourceType),
+			Scopes:         scopes,
+			ExpiresIn:      req.ExpiresIn,
+			AllowResharing: req.Resharing,
+		})
+		if err != nil {
+			s.errorResponse(w, http.StatusBadRequest, err)
+			return
+		}
+		s.jsonResponse(w, http.StatusCreated, grant)
+	default:
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+	}
+}
+
+func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.access == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Access service not available")
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/access/grants/"))
+	if id == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Grant ID required")
+		return
+	}
+	if err := s.access.Revoke(r.Context(), types.ID(id)); err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) handleAccessRequests(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.access == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Access service not available")
+		return
+	}
+	var req AccessRequestCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+		return
+	}
+	accessReq, err := s.access.CreateAccessRequest(r.Context(), access.CreateAccessRequestOptions{
+		RequestorID:   session.IdentityID,
+		ResourceID:    types.ID(strings.TrimSpace(req.ResourceID)),
+		ResourceType:  strings.TrimSpace(req.ResourceType),
+		Justification: strings.TrimSpace(req.Justification),
+		Duration:      strings.TrimSpace(req.Duration),
+		Permissions:   req.Permissions,
+		Role:          strings.TrimSpace(req.Role),
+		MinApprovals:  req.MinApprovals,
+	})
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusCreated, accessReq)
+}
+
+func (s *Server) handleAccessRequestAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.access == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Access service not available")
+		return
+	}
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/v1/access/requests/")
+	parts := strings.Split(strings.Trim(suffix, "/"), "/")
+	if len(parts) != 2 || parts[1] != "approve" || strings.TrimSpace(parts[0]) == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Expected /api/v1/access/requests/{id}/approve")
+		return
+	}
+	var req AccessRequestApproveRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	approved, err := s.access.ApproveAccessRequest(r.Context(), types.ID(parts[0]), session.IdentityID, strings.TrimSpace(req.Notes))
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusOK, approved)
+}
+
+func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.policy == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Policy service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		policies, err := s.policy.List(r.Context())
+		if err != nil {
+			s.errorResponse(w, http.StatusInternalServerError, err)
+			return
+		}
+		s.jsonResponse(w, http.StatusOK, policies)
+	case http.MethodPost:
+		var req PolicyCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+			return
+		}
+		rules := make([]types.PolicyRule, 0, len(req.Rules))
+		for _, rule := range req.Rules {
+			rules = append(rules, types.PolicyRule{
+				ID:         types.ID(strings.TrimSpace(rule.ID)),
+				Effect:     strings.TrimSpace(rule.Effect),
+				Actions:    rule.Actions,
+				Resources:  rule.Resources,
+				Conditions: rule.Conditions,
+				Priority:   rule.Priority,
+			})
+		}
+		created, err := s.policy.Create(r.Context(), policy.CreatePolicyOptions{
+			Name:        strings.TrimSpace(req.Name),
+			Description: strings.TrimSpace(req.Description),
+			Type:        types.PolicyType(strings.TrimSpace(req.Type)),
+			Rules:       rules,
+			SignerID:    session.IdentityID,
+		})
+		if err != nil {
+			s.errorResponse(w, http.StatusBadRequest, err)
+			return
+		}
+		s.jsonResponse(w, http.StatusCreated, created)
+	default:
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+	}
+}
+
+func (s *Server) handlePolicyBind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.policy == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Policy service not available")
+		return
+	}
+	var req PolicyBindRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.ResourceType) == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "resource_type is required")
+		return
+	}
+	if err := s.policy.Bind(r.Context(), types.ID(strings.TrimSpace(req.PolicyID)), types.ID(strings.TrimSpace(req.ResourceID)), strings.TrimSpace(req.ResourceType), session.IdentityID); err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusOK, map[string]string{"status": "bound"})
+}
+
+func (s *Server) handlePolicySimulate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.policy == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Policy service not available")
+		return
+	}
+	var req PolicySimulateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.PolicyID) != "" {
+		if _, err := s.policy.Get(r.Context(), types.ID(strings.TrimSpace(req.PolicyID))); err != nil {
+			s.errorResponse(w, http.StatusNotFound, err)
+			return
+		}
+	}
+	result, err := s.policy.Simulate(r.Context(), policy.EvaluationRequest{
+		ActorID:      session.IdentityID,
+		ResourceID:   types.ID(strings.TrimSpace(req.ResourceID)),
+		ResourceType: strings.TrimSpace(req.ResourceType),
+		Action:       strings.TrimSpace(req.Action),
+		Context:      req.Context,
+	})
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handlePolicyFreeze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	_, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.policy == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Policy service not available")
+		return
+	}
+	s.policy.Freeze()
+	s.jsonResponse(w, http.StatusOK, map[string]string{"status": "frozen"})
+}
+
+func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.share == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Share service not available")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		list, err := s.share.ListShares(r.Context(), share.ListSharesOptions{
+			CreatorID:      session.IdentityID,
+			RecipientID:    types.ID(strings.TrimSpace(r.URL.Query().Get("recipient_id"))),
+			ResourceID:     types.ID(strings.TrimSpace(r.URL.Query().Get("resource_id"))),
+			IncludeExpired: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_expired")), "true"),
+		})
+		if err != nil {
+			s.errorResponse(w, http.StatusInternalServerError, err)
+			return
+		}
+		s.jsonResponse(w, http.StatusOK, list)
+	case http.MethodPost:
+		var req ShareCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+			return
+		}
+		var recipientID *types.ID
+		if rid := strings.TrimSpace(req.RecipientID); rid != "" {
+			id := types.ID(rid)
+			recipientID = &id
+		}
+		created, err := s.share.CreateShare(r.Context(), share.CreateShareOptions{
+			Type:        strings.TrimSpace(req.Type),
+			ResourceID:  types.ID(strings.TrimSpace(req.ResourceID)),
+			CreatorID:   session.IdentityID,
+			RecipientID: recipientID,
+			ExpiresIn:   req.ExpiresIn,
+			MaxAccess:   req.MaxAccess,
+			OneTime:     req.OneTime,
+		})
+		if err != nil {
+			s.errorResponse(w, http.StatusBadRequest, err)
+			return
+		}
+		s.jsonResponse(w, http.StatusCreated, created)
+	default:
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+	}
+}
+
+func (s *Server) handleShareAccept(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.share == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Share service not available")
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/shares/accept/"))
+	if id == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Share ID required")
+		return
+	}
+	result, err := s.share.AccessShare(r.Context(), types.ID(id), session.IdentityID)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusOK, result)
+}
+
+func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.share == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Share service not available")
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/shares/revoke/"))
+	if id == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Share ID required")
+		return
+	}
+	if err := s.share.RevokeShare(r.Context(), types.ID(id), session.IdentityID); err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) handleShareExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.share == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Share service not available")
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/v1/shares/export/"))
+	if id == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Share ID required")
+		return
+	}
+	shareRec, err := s.share.GetShare(r.Context(), types.ID(id))
+	if err != nil {
+		s.errorResponse(w, http.StatusNotFound, err)
+		return
+	}
+	if len(shareRec.RecipientKey) == 0 {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "share recipient key is required for export")
+		return
+	}
+	resourceData, err := s.resolveShareResourceDataForAPI(r.Context(), session, shareRec)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+
+	pkg, err := s.share.CreateOfflinePackage(r.Context(), share.OfflinePackageOptions{
+		ShareID:         shareRec.ID,
+		ResourceData:    resourceData,
+		RecipientPubKey: shareRec.RecipientKey,
+	})
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	exported, err := s.share.ExportOfflinePackage(r.Context(), pkg.ID)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=share-%s.json", id))
+	_, _ = w.Write(exported)
+}
+
+func (s *Server) resolveShareResourceDataForAPI(ctx context.Context, session *types.Session, shr *types.Share) ([]byte, error) {
+	if shr == nil {
+		return nil, fmt.Errorf("share is required")
+	}
+	switch strings.ToLower(strings.TrimSpace(shr.Type)) {
+	case "secret":
+		if s.secrets == nil {
+			return nil, fmt.Errorf("secret service not available")
+		}
+		mfa := session != nil && session.MFAVerified
+		return s.secrets.Get(ctx, string(shr.ResourceID), session.IdentityID, mfa)
+	case "file", "object":
+		if s.files == nil {
+			return nil, fmt.Errorf("file service not available")
+		}
+		var buf bytes.Buffer
+		if err := s.files.Download(ctx, string(shr.ResourceID), files.DownloadOptions{
+			AccessorID:  session.IdentityID,
+			MFAVerified: session != nil && session.MFAVerified,
+		}, &buf); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	default:
+		return nil, fmt.Errorf("share export does not support type %q via API yet", shr.Type)
 	}
 }
 

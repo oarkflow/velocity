@@ -224,6 +224,10 @@ func AccessRequest(ctx context.Context, cmd *cli.Command) error {
 	}
 	defer c.Close()
 
+	if err := c.RequireScope(types.ScopeAccessRequest); err != nil {
+		return err
+	}
+
 	req, err := c.Access.CreateAccessRequest(ctx, access.CreateAccessRequestOptions{
 		RequestorID:   c.CurrentIdentityID(),
 		ResourceID:    types.ID(resourceID),
@@ -247,6 +251,10 @@ func AccessApprove(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	defer c.Close()
+
+	if err := c.RequireScope(types.ScopeAccessApprove); err != nil {
+		return err
+	}
 
 	req, err := c.Access.ApproveAccessRequest(ctx, types.ID(id), c.CurrentIdentityID(), "Approved via CLI")
 	if err != nil {

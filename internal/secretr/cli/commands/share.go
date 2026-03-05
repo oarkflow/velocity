@@ -125,6 +125,7 @@ func ShareExport(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	defer c.Close()
 	if err := c.RequireScope(types.ScopeShareExport); err != nil {
 		return err
 	}

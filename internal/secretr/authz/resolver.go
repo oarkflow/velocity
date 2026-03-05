@@ -144,9 +144,6 @@ func resolveAPIResourceIDForResolver(r *http.Request, spec APIRouteAuthSpec) str
 			return v
 		}
 	}
-	if pathID := resolveAPIResourceIDFromPath(path); pathID != "" {
-		return pathID
-	}
 	if spec.Pattern != "" && strings.HasSuffix(spec.Pattern, "/") {
 		trimmedPath := strings.Trim(path, "/")
 		trimmedPattern := strings.Trim(spec.Pattern, "/")
@@ -157,6 +154,9 @@ func resolveAPIResourceIDForResolver(r *http.Request, spec APIRouteAuthSpec) str
 				return rest
 			}
 		}
+	}
+	if pathID := resolveAPIResourceIDFromPath(path); pathID != "" {
+		return pathID
 	}
 	return ""
 }

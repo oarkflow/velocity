@@ -35,11 +35,11 @@ func TestCheck_DeniesWhenNoGrantExists(t *testing.T) {
 func TestCheck_DeniesWhenGrantExistsButScopesDoNotMatch(t *testing.T) {
 	mgr := newTestManager(t)
 	_, err := mgr.Grant(context.Background(), GrantOptions{
-		GrantorID:   types.ID("admin"),
-		GranteeID:   types.ID("user-1"),
-		ResourceID:  types.ID("secret-1"),
-		ResourceType:"secret",
-		Scopes:      []types.Scope{types.ScopeSecretRead},
+		GrantorID:    types.ID("admin"),
+		GranteeID:    types.ID("user-1"),
+		ResourceID:   types.ID("secret-1"),
+		ResourceType: "secret",
+		Scopes:       []types.Scope{types.ScopeSecretRead},
 	})
 	if err != nil {
 		t.Fatalf("grant: %v", err)

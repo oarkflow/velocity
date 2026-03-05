@@ -31,6 +31,8 @@ func AdminServer(ctx context.Context, cmd *cli.Command) error {
 		SecretVault:      c.Secrets,
 		FileVault:        c.Files,
 		AccessManager:    c.Access,
+		PolicyEngine:     c.Policy,
+		ShareManager:     c.Share,
 		AuditEngine:      c.Audit,
 		CICDManager:      c.CICD,
 		MonitoringEngine: c.Monitoring,
