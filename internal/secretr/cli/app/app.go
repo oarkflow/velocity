@@ -189,6 +189,21 @@ func (a *App) buildCLI() *cli.Command {
 			&cli.StringFlag{Name: "destination", Usage: "Backup destination"},
 		},
 	})
+	backupCmd.Commands = append(backupCmd.Commands, &cli.Command{
+		Name:   "drill-run",
+		Usage:  "Run backup recovery drill verification",
+		Before: a.gate.RequireScopes(types.ScopeBackupVerify),
+		Action: commands.BackupDrillRun,
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "id", Usage: "Backup ID", Required: true},
+			&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Usage: "Backup file", Required: true},
+		},
+	}, &cli.Command{
+		Name:   "drill-report",
+		Usage:  "Show latest backup drill report",
+		Before: a.gate.RequireScopes(types.ScopeBackupVerify),
+		Action: commands.BackupDrillReport,
+	})
 
 	return &cli.Command{
 		Name:    "secretr",
@@ -293,6 +308,8 @@ and reduces trust ambiguity.`,
 			a.sshCommands(),
 			a.cicdCommands(),
 			a.execCommands(),
+			a.execProfileCommands(),
+			a.federationCommands(),
 			a.envCommand(),
 			a.loadEnvCommand(),
 			a.enrichCommand(),
@@ -301,6 +318,8 @@ and reduces trust ambiguity.`,
 			a.complianceCommands(),
 			a.dlpCommands(),
 			a.automationPipelineCommands(),
+			a.rotateCommands(),
+			a.detectCommands(),
 		},
 		ExitErrHandler: func(ctx context.Context, cmd *cli.Command, err error) {
 			if err != nil {
@@ -451,6 +470,55 @@ func (a *App) authCommands() *cli.Command {
 				Action: commands.AuthMFA,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "token", Aliases: []string{"t"}, Usage: "MFA token", Required: true},
+				},
+			},
+			{
+				Name:   "can",
+				Usage:  "Preflight authorization for a command",
+				Before: a.gate.RequireAuthenticated(),
+				Action: commands.AuthCan,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "command", Usage: "Command line to evaluate", Required: true},
+				},
+			},
+			{
+				Name:   "explain",
+				Usage:  "Explain authorization requirements for a command",
+				Before: a.gate.RequireAuthenticated(),
+				Action: commands.AuthExplain,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "command", Usage: "Command line to evaluate", Required: true},
+				},
+			},
+			{
+				Name:   "service-account-create",
+				Usage:  "Create service account and return API key",
+				Before: a.gate.RequireScopes(types.ScopeIdentityCreate),
+				Action: commands.AuthServiceAccountCreate,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Service account name", Required: true},
+					&cli.StringFlag{Name: "description", Usage: "Service account description"},
+					&cli.StringSliceFlag{Name: "scopes", Usage: "Granted scopes"},
+					&cli.DurationFlag{Name: "expires-in", Usage: "Optional expiration"},
+				},
+			},
+			{
+				Name:   "token-mint",
+				Usage:  "Mint service session token (session ID) from API key",
+				Before: a.gate.RequireScopes(types.ScopeIdentityRead),
+				Action: commands.AuthTokenMint,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "service-id", Usage: "Service identity ID", Required: true},
+					&cli.StringFlag{Name: "api-key", Usage: "Service API key", Required: true},
+				},
+			},
+			{
+				Name:   "token-revoke",
+				Usage:  "Revoke service/user session token by session ID",
+				Before: a.gate.RequireScopes(types.ScopeSessionRevoke),
+				Action: commands.AuthTokenRevoke,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "session-id", Usage: "Session ID", Required: true},
 				},
 			},
 		},
@@ -1043,6 +1111,24 @@ func (a *App) policyCommands() *cli.Command {
 				Before: middleware.Chain(a.gate.RequireScopes(types.ScopePolicyFreeze), a.gate.RequireAdmin()),
 				Action: commands.PolicyFreeze,
 			},
+			{
+				Name:   "dry-run-enable",
+				Usage:  "Enable policy dry-run mode",
+				Before: a.gate.RequireScopes(types.ScopePolicyUpdate),
+				Action: commands.PolicyDryRunEnable,
+			},
+			{
+				Name:   "dry-run-disable",
+				Usage:  "Disable policy dry-run mode",
+				Before: a.gate.RequireScopes(types.ScopePolicyUpdate),
+				Action: commands.PolicyDryRunDisable,
+			},
+			{
+				Name:   "dry-run-report",
+				Usage:  "Show policy dry-run status and violations",
+				Before: a.gate.RequireScopes(types.ScopePolicyRead),
+				Action: commands.PolicyDryRunReport,
+			},
 		},
 	}
 }
@@ -1083,6 +1169,34 @@ func (a *App) auditCommands() *cli.Command {
 				Before: a.gate.RequireScopes(types.ScopeAuditVerify),
 				Action: commands.AuditVerify,
 			},
+			{
+				Name:   "custody",
+				Usage:  "Show chain-of-custody audit events for a resource",
+				Before: a.gate.RequireScopes(types.ScopeAuditRead),
+				Action: commands.AuditCustody,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "resource", Usage: "Resource as type:id", Required: true},
+					&cli.BoolFlag{Name: "verify", Usage: "Also verify chain integrity"},
+				},
+			},
+			{
+				Name:   "anchor",
+				Usage:  "Anchor latest audit ledger proof to local file",
+				Before: a.gate.RequireScopes(types.ScopeAuditExport),
+				Action: commands.AuditAnchor,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Output anchor file"},
+				},
+			},
+			{
+				Name:   "anchor-verify",
+				Usage:  "Verify current ledger against anchored proof",
+				Before: a.gate.RequireScopes(types.ScopeAuditVerify),
+				Action: commands.AuditAnchorVerify,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Usage: "Anchor input file"},
+				},
+			},
 		},
 	}
 }
@@ -1107,6 +1221,20 @@ func (a *App) shareCommands() *cli.Command {
 				},
 			},
 			{
+				Name:   "request",
+				Usage:  "Create a pending share request requiring approval",
+				Before: a.gate.RequireScopes(types.ScopeShareCreate),
+				Action: commands.ShareRequest,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "type", Usage: "Share type: secret, file, folder, object, envelope", Required: true},
+					&cli.StringFlag{Name: "resource", Aliases: []string{"r"}, Usage: "Resource name or ID", Required: true},
+					&cli.StringFlag{Name: "recipient", Usage: "Recipient identity ID", Required: true},
+					&cli.DurationFlag{Name: "expires-in", Usage: "Share expiration"},
+					&cli.IntFlag{Name: "max-access", Usage: "Maximum access count"},
+					&cli.BoolFlag{Name: "one-time", Usage: "One-time access only"},
+				},
+			},
+			{
 				Name:   "list",
 				Usage:  "List shares",
 				Before: a.gate.RequireScopes(types.ScopeShareRead),
@@ -1119,6 +1247,45 @@ func (a *App) shareCommands() *cli.Command {
 				Action: commands.ShareRevoke,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+				},
+			},
+			{
+				Name:   "approve",
+				Usage:  "Approve a pending share request",
+				Before: a.gate.RequireScopes(types.ScopeShareRevoke),
+				Action: commands.ShareApprove,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+				},
+			},
+			{
+				Name:   "deny",
+				Usage:  "Deny a pending share request",
+				Before: a.gate.RequireScopes(types.ScopeShareRevoke),
+				Action: commands.ShareDeny,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+					&cli.StringFlag{Name: "reason", Usage: "Optional deny reason"},
+				},
+			},
+			{
+				Name:   "status",
+				Usage:  "Show share details/status",
+				Before: a.gate.RequireScopes(types.ScopeShareRead),
+				Action: commands.ShareStatus,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+				},
+			},
+			{
+				Name:   "policy-bind",
+				Usage:  "Bind policy controls for a share package/import flow",
+				Before: a.gate.RequireScopes(types.ScopePolicyBind),
+				Action: commands.SharePolicyBind,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+					&cli.StringFlag{Name: "policy-id", Usage: "Policy ID", Required: true},
+					&cli.BoolFlag{Name: "online-decrypt-required", Usage: "Require active online share record during import/decrypt"},
 				},
 			},
 			{
@@ -1191,8 +1358,29 @@ func (a *App) shareCommands() *cli.Command {
 				Action: commands.ShareLANReceive,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "url", Usage: "Package URL from sender", Required: true},
+					&cli.StringFlag{Name: "state", Usage: "Transfer state file path for resumable download"},
 					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Optional output file for imported payload"},
 					&cli.StringFlag{Name: "password", Usage: "Recipient password (if omitted, prompt securely)"},
+				},
+			},
+			{
+				Name:   "resume",
+				Usage:  "Resume LAN transfer/import using saved transfer state",
+				Before: a.gate.RequireScopes(types.ScopeShareAccept),
+				Action: commands.ShareResume,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "state", Usage: "Transfer state file path", Required: true},
+					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Optional output file for imported payload"},
+					&cli.StringFlag{Name: "password", Usage: "Recipient password (if omitted, prompt securely)"},
+				},
+			},
+			{
+				Name:   "transfer-status",
+				Usage:  "Inspect transfer checkpoint/status file",
+				Before: a.gate.RequireScopes(types.ScopeShareRead),
+				Action: commands.ShareTransferStatus,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "state", Usage: "Transfer state file path", Required: true},
 				},
 			},
 			{
@@ -1543,6 +1731,36 @@ func (a *App) envelopeCommands() *cli.Command {
 					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Usage: "Envelope file path", Required: true},
 				},
 			},
+			{
+				Name:   "lock",
+				Usage:  "Lock envelope with stricter access rules",
+				Before: a.gate.RequireScopes(types.ScopeEnvelopeVerify),
+				Action: commands.EnvelopeLock,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Usage: "Envelope file path", Required: true},
+				},
+			},
+			{
+				Name:   "unlock",
+				Usage:  "Unlock envelope business rules",
+				Before: a.gate.RequireScopes(types.ScopeEnvelopeOpen),
+				Action: commands.EnvelopeUnlock,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Usage: "Envelope file path", Required: true},
+				},
+			},
+			{
+				Name:   "acl",
+				Usage:  "Update envelope ACL/business rule constraints",
+				Before: a.gate.RequireScopes(types.ScopeEnvelopeVerify),
+				Action: commands.EnvelopeACL,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "file", Aliases: []string{"f"}, Usage: "Envelope file path", Required: true},
+					&cli.StringSliceFlag{Name: "allow-ip", Usage: "Allowed IP CIDRs"},
+					&cli.BoolFlag{Name: "require-mfa", Usage: "Require MFA for opening"},
+					&cli.Float64Flag{Name: "trust-level", Usage: "Required trust level (0.0-1.0)"},
+				},
+			},
 		},
 	}
 }
@@ -1682,6 +1900,87 @@ func (a *App) execCommands() *cli.Command {
 	}
 }
 
+func (a *App) execProfileCommands() *cli.Command {
+	return &cli.Command{
+		Name:  "exec-profile",
+		Usage: "Reusable exec injection profiles",
+		Commands: []*cli.Command{
+			{
+				Name:   "create",
+				Usage:  "Create or update exec profile",
+				Before: a.gate.RequireScopes(types.ScopeExecRun),
+				Action: commands.ExecProfileCreate,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Profile name", Required: true},
+					&cli.StringFlag{Name: "command", Usage: "Default command", Required: true},
+					&cli.BoolFlag{Name: "all-secrets", Usage: "Load all secrets"},
+					&cli.StringFlag{Name: "prefix", Usage: "Secret prefix"},
+					&cli.StringFlag{Name: "env", Usage: "Environment filter"},
+					&cli.StringFlag{Name: "env-prefix", Usage: "Environment variable prefix"},
+				},
+			},
+			{
+				Name:   "list",
+				Usage:  "List exec profiles",
+				Before: a.gate.RequireScopes(types.ScopeExecRun),
+				Action: commands.ExecProfileList,
+			},
+			{
+				Name:   "delete",
+				Usage:  "Delete exec profile",
+				Before: a.gate.RequireScopes(types.ScopeExecRun),
+				Action: commands.ExecProfileDelete,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Profile name", Required: true},
+				},
+			},
+			{
+				Name:   "run",
+				Usage:  "Run command using exec profile",
+				Before: a.gate.RequireScopes(types.ScopeExecRun),
+				Action: commands.ExecProfileRun,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Profile name", Required: true},
+					&cli.StringFlag{Name: "command", Usage: "Override command"},
+				},
+			},
+		},
+	}
+}
+
+func (a *App) federationCommands() *cli.Command {
+	return &cli.Command{
+		Name:  "federation",
+		Usage: "Cross-org federation and external sharing",
+		Commands: []*cli.Command{
+			{
+				Name:   "establish",
+				Usage:  "Register federation endpoint for peer org",
+				Before: a.gate.RequireScopes(types.ScopeOrgRead),
+				Action: commands.FederationEstablish,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "name", Usage: "Federation name", Required: true},
+					&cli.StringFlag{Name: "peer-org", Usage: "Peer organization slug/id", Required: true},
+					&cli.StringFlag{Name: "server-url", Usage: "Federation server URL", Required: true},
+				},
+			},
+			{
+				Name:   "share-external",
+				Usage:  "Create external share under federation",
+				Before: a.gate.RequireScopes(types.ScopeShareExternal),
+				Action: commands.FederationShareExternal,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "federation", Usage: "Federation name", Required: true},
+					&cli.StringFlag{Name: "type", Usage: "Share type", Required: true},
+					&cli.StringFlag{Name: "resource", Usage: "Resource id/name/path", Required: true},
+					&cli.StringFlag{Name: "recipient-email", Usage: "Recipient email", Required: true},
+					&cli.DurationFlag{Name: "expires-in", Usage: "Expiration duration"},
+				},
+			},
+		},
+	}
+}
+
 func (a *App) envCommand() *cli.Command {
 	return &cli.Command{
 		Name:   "env",
@@ -1774,6 +2073,72 @@ func (a *App) alertCommands() *cli.Command {
 				Action: commands.AlertResolve,
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "id", Usage: "Alert ID", Required: true},
+				},
+			},
+		},
+	}
+}
+
+func (a *App) rotateCommands() *cli.Command {
+	return &cli.Command{
+		Name:  "rotate",
+		Usage: "Secret rotation orchestration",
+		Commands: []*cli.Command{
+			{
+				Name:   "start",
+				Usage:  "Rotate a secret and record rollback metadata",
+				Before: a.gate.RequireScopes(types.ScopeSecretRotate),
+				Action: commands.RotateStart,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "secret", Usage: "Secret name", Required: true},
+					&cli.StringFlag{Name: "new-value", Usage: "Optional new value (auto-generated if omitted)"},
+				},
+			},
+			{
+				Name:   "status",
+				Usage:  "Show rotation records",
+				Before: a.gate.RequireScopes(types.ScopeSecretRead),
+				Action: commands.RotateStatus,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Rotation ID"},
+				},
+			},
+			{
+				Name:   "rollback",
+				Usage:  "Rollback a rotation to previous value",
+				Before: a.gate.RequireScopes(types.ScopeSecretUpdate),
+				Action: commands.RotateRollback,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Rotation ID", Required: true},
+				},
+			},
+		},
+	}
+}
+
+func (a *App) detectCommands() *cli.Command {
+	return &cli.Command{
+		Name:  "detect",
+		Usage: "Detect secret exposure in files and runtime environments",
+		Commands: []*cli.Command{
+			{
+				Name:   "leaks",
+				Usage:  "Scan filesystem for secret references",
+				Before: a.gate.RequireScopes(types.ScopeDLPScan),
+				Action: commands.DetectLeaks,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "path", Usage: "Path to scan", Value: "."},
+					&cli.BoolFlag{Name: "include-values", Usage: "Also match plaintext secret values"},
+				},
+			},
+			{
+				Name:   "runtime",
+				Usage:  "Scan environment payload for exposed secrets",
+				Before: a.gate.RequireScopes(types.ScopeDLPScan),
+				Action: commands.DetectRuntime,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "env-file", Usage: "Optional env dump file; defaults to current process env"},
+					&cli.BoolFlag{Name: "include-values", Usage: "Also match plaintext secret values"},
 				},
 			},
 		},

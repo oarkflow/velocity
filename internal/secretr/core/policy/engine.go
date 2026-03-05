@@ -15,29 +15,30 @@ import (
 )
 
 var (
-	ErrPolicyNotFound   = errors.New("policy: not found")
-	ErrPolicyViolation  = errors.New("policy: violation detected")
-	ErrPolicyFrozen     = errors.New("policy: system is in lockdown mode")
-	ErrInvalidPolicy    = errors.New("policy: invalid policy definition")
+	ErrPolicyNotFound  = errors.New("policy: not found")
+	ErrPolicyViolation = errors.New("policy: violation detected")
+	ErrPolicyFrozen    = errors.New("policy: system is in lockdown mode")
+	ErrInvalidPolicy   = errors.New("policy: invalid policy definition")
 )
 
 // Engine provides policy management and enforcement
 type Engine struct {
-	store       *storage.Store
-	crypto      *crypto.Engine
-	policyStore *storage.TypedStore[types.Policy]
+	store        *storage.Store
+	crypto       *crypto.Engine
+	policyStore  *storage.TypedStore[types.Policy]
 	bindingStore *storage.TypedStore[PolicyBinding]
-	frozen      bool
+	frozen       bool
+	dryRun       bool
 }
 
 // PolicyBinding binds a policy to a resource
 type PolicyBinding struct {
-	ID         types.ID     `json:"id"`
-	PolicyID   types.ID     `json:"policy_id"`
-	ResourceID types.ID     `json:"resource_id"`
-	ResourceType string     `json:"resource_type"`
-	CreatedAt  types.Timestamp `json:"created_at"`
-	CreatedBy  types.ID     `json:"created_by"`
+	ID           types.ID        `json:"id"`
+	PolicyID     types.ID        `json:"policy_id"`
+	ResourceID   types.ID        `json:"resource_id"`
+	ResourceType string          `json:"resource_type"`
+	CreatedAt    types.Timestamp `json:"created_at"`
+	CreatedBy    types.ID        `json:"created_by"`
 }
 
 // EngineConfig configures the policy engine
@@ -53,6 +54,7 @@ func NewEngine(cfg EngineConfig) *Engine {
 		policyStore:  storage.NewTypedStore[types.Policy](cfg.Store, storage.CollectionPolicies),
 		bindingStore: storage.NewTypedStore[PolicyBinding](cfg.Store, storage.CollectionPolicyBindings),
 		frozen:       false,
+		dryRun:       false,
 	}
 }
 
@@ -239,19 +241,40 @@ func (e *Engine) Evaluate(ctx context.Context, request EvaluationRequest) (*Eval
 			}
 
 			if rule.Effect == "deny" {
-				result.Allowed = false
+				if !e.dryRun {
+					result.Allowed = false
+				}
+				reason := "Denied by policy rule"
+				if e.dryRun {
+					reason = "Would be denied by policy rule (dry-run)"
+				}
 				result.Violations = append(result.Violations, Violation{
 					PolicyID:   policy.ID,
 					PolicyName: policy.Name,
 					RuleID:     rule.ID,
 					Action:     request.Action,
-					Reason:     "Denied by policy rule",
+					Reason:     reason,
 				})
 			}
 		}
 	}
 
 	return result, nil
+}
+
+// EnableDryRun enables dry-run mode where deny rules are reported but not enforced.
+func (e *Engine) EnableDryRun() {
+	e.dryRun = true
+}
+
+// DisableDryRun disables dry-run mode.
+func (e *Engine) DisableDryRun() {
+	e.dryRun = false
+}
+
+// DryRunEnabled returns dry-run mode state.
+func (e *Engine) DryRunEnabled() bool {
+	return e.dryRun
 }
 
 // EvaluationRequest represents a policy evaluation request
@@ -327,9 +350,9 @@ func (e *Engine) Simulate(ctx context.Context, request EvaluationRequest) (*Simu
 	}
 
 	return &SimulationResult{
-		Request:       request,
+		Request:          request,
 		EvaluationResult: *result,
-		SimulatedAt:   time.Now(),
+		SimulatedAt:      time.Now(),
 	}, nil
 }
 

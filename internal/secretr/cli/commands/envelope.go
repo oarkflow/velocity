@@ -388,3 +388,135 @@ func logEnvelopeAudit(ctx context.Context, c *client.Client, action string, enve
 		Details:      details,
 	})
 }
+
+func EnvelopeLock(ctx context.Context, cmd *cli.Command) error {
+	filePath := cmd.String("file")
+	if strings.TrimSpace(filePath) == "" {
+		return fmt.Errorf("file is required")
+	}
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	env, data, err := loadEnvelopeFile(filePath)
+	if err != nil {
+		return err
+	}
+	env.Header.BusinessRules.RequireMFA = true
+	if env.Header.BusinessRules.RequiredTrustLevel < 0.8 {
+		env.Header.BusinessRules.RequiredTrustLevel = 0.8
+	}
+	appendEnvelopeCustody(env, types.ActionEnvelopeReject, c.CurrentIdentityID(), "lockdown")
+	if err := saveEnvelopeFile(filePath, env); err != nil {
+		return err
+	}
+	sum := sha256.Sum256(data)
+	logEnvelopeAudit(ctx, c, "envelope_lock", env.ID, true, map[string]any{
+		"path":   filePath,
+		"sha256": hex.EncodeToString(sum[:]),
+	})
+	success("Envelope locked: %s", env.ID)
+	return nil
+}
+
+func EnvelopeUnlock(ctx context.Context, cmd *cli.Command) error {
+	filePath := cmd.String("file")
+	if strings.TrimSpace(filePath) == "" {
+		return fmt.Errorf("file is required")
+	}
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	env, _, err := loadEnvelopeFile(filePath)
+	if err != nil {
+		return err
+	}
+	env.Header.BusinessRules.RequireMFA = false
+	appendEnvelopeCustody(env, types.ActionEnvelopeSend, c.CurrentIdentityID(), "unlock")
+	if err := saveEnvelopeFile(filePath, env); err != nil {
+		return err
+	}
+	logEnvelopeAudit(ctx, c, "envelope_unlock", env.ID, true, map[string]any{"path": filePath})
+	success("Envelope unlocked: %s", env.ID)
+	return nil
+}
+
+func EnvelopeACL(ctx context.Context, cmd *cli.Command) error {
+	filePath := cmd.String("file")
+	if strings.TrimSpace(filePath) == "" {
+		return fmt.Errorf("file is required")
+	}
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	env, _, err := loadEnvelopeFile(filePath)
+	if err != nil {
+		return err
+	}
+	ipRanges := cmd.StringSlice("allow-ip")
+	requireMFA := cmd.Bool("require-mfa")
+	trust := cmd.Float64("trust-level")
+	if len(ipRanges) > 0 {
+		env.Header.BusinessRules.AllowedIPRanges = ipRanges
+	}
+	env.Header.BusinessRules.RequireMFA = requireMFA
+	if trust > 0 {
+		env.Header.BusinessRules.RequiredTrustLevel = trust
+	}
+	appendEnvelopeCustody(env, "acl_update", c.CurrentIdentityID(), "acl")
+	if err := saveEnvelopeFile(filePath, env); err != nil {
+		return err
+	}
+	logEnvelopeAudit(ctx, c, "envelope_acl", env.ID, true, map[string]any{
+		"path":      filePath,
+		"allow_ips": ipRanges,
+		"mfa":       env.Header.BusinessRules.RequireMFA,
+		"trust":     env.Header.BusinessRules.RequiredTrustLevel,
+	})
+	success("Envelope ACL updated: %s", env.ID)
+	return nil
+}
+
+func loadEnvelopeFile(path string) (*types.Envelope, []byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var env types.Envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, nil, err
+	}
+	return &env, data, nil
+}
+
+func saveEnvelopeFile(path string, env *types.Envelope) error {
+	b, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0600)
+}
+
+func appendEnvelopeCustody(env *types.Envelope, action string, actor types.ID, location string) {
+	if env == nil {
+		return
+	}
+	now := types.Now()
+	var prev []byte
+	if n := len(env.Custody); n > 0 {
+		prev = env.Custody[n-1].Hash
+	}
+	h := sha256.Sum256([]byte(fmt.Sprintf("%x|%s|%s|%d|%s", prev, action, actor, now, location)))
+	env.Custody = append(env.Custody, types.CustodyEntry{
+		Hash:      h[:],
+		Action:    action,
+		ActorID:   actor,
+		Timestamp: now,
+		Location:  location,
+	})
+}

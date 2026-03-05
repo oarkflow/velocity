@@ -3090,6 +3090,7 @@ secretr share lan-send --id=demo-id --bind=0.0.0.0:8787 --api-url=http://192.168
 | Flag | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `--url` | string | yes | `-` | Package URL from sender |
+| `--state` | string | no | `-` | Transfer state file path for resumable download |
 | `--output` (`-o`) | string | no | `-` | Optional output file for imported payload |
 | `--password` | string | no | `-` | Recipient password (prompts if omitted) |
 
@@ -3104,6 +3105,74 @@ Full Flags Example:
 ```bash
 secretr share lan-receive --url=http://192.168.1.10:8787/package/<PACKAGE_ID> --output=/tmp/received.bin --password='********'
 ```
+
+### secretr share policy-bind
+
+- **What**: Bind policy controls to a share package/import flow
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--id` | string | yes | `-` | Share ID |
+| `--policy-id` | string | yes | `-` | Policy ID |
+| `--online-decrypt-required` | bool | no | `false` | Require active online share record at import/decrypt |
+
+Minimal Example:
+
+```bash
+secretr share policy-bind --id=demo-id --policy-id=policy-id
+```
+
+Full Flags Example:
+
+```bash
+secretr share policy-bind --id=demo-id --policy-id=policy-id --online-decrypt-required
+```
+
+### secretr share resume
+
+- **What**: Resume LAN transfer/import using a saved transfer state file
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--state` | string | yes | `-` | Transfer state file path |
+| `--output` (`-o`) | string | no | `-` | Optional output file for imported payload |
+| `--password` | string | no | `-` | Recipient password (prompts if omitted) |
+
+Minimal Example:
+
+```bash
+secretr share resume --state=/tmp/share-transfer.json
+```
+
+Full Flags Example:
+
+```bash
+secretr share resume --state=/tmp/share-transfer.json --output=/tmp/received.bin --password='********'
+```
+
+### secretr share transfer-status
+
+- **What**: Inspect transfer checkpoint/status file
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--state` | string | yes | `-` | Transfer state file path |
+
+Minimal Example:
+
+```bash
+secretr share transfer-status --state=/tmp/share-transfer.json
+```
+
+### Expected Failure Modes (Share E2E)
+
+| Symptom | Error code / message | Why it happens | Fix |
+|---|---|---|---|
+| Entitlement gate blocks share command | `entitlement_scope_required` | Active license does not include required `share:*` scope | Add required share scopes to license entitlements |
+| ACL gate blocks operation | `acl_denied` or `resource id required for ACL evaluation` | Caller lacks ACL permission on target or command did not resolve resource ID | Grant ACL on target resource and pass correct `--id` / selector flags |
+| Recipient cannot decrypt imported package | `share: decrypt key not found` (or decrypt failure) | Package encrypted for different recipient key/device | Re-create share for intended recipient identity/device |
+| Import fails after revocation | `share: has been revoked` | Sender revoked share and revocation marker is enforced | Expected behavior; create a new share package |
+| LAN receive cannot connect | `curl: (7)` / connection refused | Sender not reachable on LAN or wrong URL/bind address | Verify sender is running, URL is correct, firewall/network allows reachability |
 
 ### secretr share list
 

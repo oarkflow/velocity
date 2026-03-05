@@ -491,10 +491,16 @@ func HasScope(ctx context.Context, scope types.Scope) bool {
 // CommandPermissions maps commands to required scopes
 var CommandPermissions = map[string][]types.Scope{
 	// Auth commands
-	"auth login":        {},
-	"auth logout":       {types.ScopeAuthLogout},
-	"auth status":       {types.ScopeAuthLogin},
-	"auth rotate-token": {types.ScopeAuthRotate},
+	"auth login":                  {},
+	"auth logout":                 {types.ScopeAuthLogout},
+	"auth status":                 {types.ScopeAuthLogin},
+	"auth rotate-token":           {types.ScopeAuthRotate},
+	"auth mfa":                    {types.ScopeAuthLogin},
+	"auth can":                    {types.ScopeAuthLogin},
+	"auth explain":                {types.ScopeAuthLogin},
+	"auth service-account-create": {types.ScopeIdentityCreate},
+	"auth token-mint":             {types.ScopeIdentityRead},
+	"auth token-revoke":           {types.ScopeSessionRevoke},
 
 	// Identity commands
 	"identity create":  {types.ScopeIdentityCreate},
@@ -562,41 +568,56 @@ var CommandPermissions = map[string][]types.Scope{
 	"role assign": {types.ScopeRoleAssign},
 
 	// Policy commands
-	"policy create":   {types.ScopePolicyCreate},
-	"policy list":     {types.ScopePolicyRead},
-	"policy get":      {types.ScopePolicyRead},
-	"policy update":   {types.ScopePolicyUpdate},
-	"policy delete":   {types.ScopePolicyDelete},
-	"policy bind":     {types.ScopePolicyBind},
-	"policy simulate": {types.ScopePolicySimulate},
-	"policy freeze":   {types.ScopePolicyFreeze, types.ScopeAdminAll},
+	"policy create":          {types.ScopePolicyCreate},
+	"policy list":            {types.ScopePolicyRead},
+	"policy get":             {types.ScopePolicyRead},
+	"policy update":          {types.ScopePolicyUpdate},
+	"policy delete":          {types.ScopePolicyDelete},
+	"policy bind":            {types.ScopePolicyBind},
+	"policy simulate":        {types.ScopePolicySimulate},
+	"policy freeze":          {types.ScopePolicyFreeze, types.ScopeAdminAll},
+	"policy dry-run-enable":  {types.ScopePolicyUpdate},
+	"policy dry-run-disable": {types.ScopePolicyUpdate},
+	"policy dry-run-report":  {types.ScopePolicyRead},
 
 	// Audit commands
-	"audit query":  {types.ScopeAuditQuery},
-	"audit export": {types.ScopeAuditExport},
-	"audit verify": {types.ScopeAuditVerify},
-	"audit redact": {types.ScopeAuditRedact, types.ScopeAdminAll},
+	"audit query":         {types.ScopeAuditQuery},
+	"audit export":        {types.ScopeAuditExport},
+	"audit verify":        {types.ScopeAuditVerify},
+	"audit redact":        {types.ScopeAuditRedact, types.ScopeAdminAll},
+	"audit custody":       {types.ScopeAuditRead},
+	"audit anchor":        {types.ScopeAuditExport},
+	"audit anchor-verify": {types.ScopeAuditVerify},
 
 	// Share commands
-	"share create":        {types.ScopeShareCreate},
-	"share list":          {types.ScopeShareRead},
-	"share revoke":        {types.ScopeShareRevoke},
-	"share accept":        {types.ScopeShareAccept},
-	"share export":        {types.ScopeShareExport},
-	"share import":        {types.ScopeShareAccept},
-	"share qr-generate":   {types.ScopeShareExport},
-	"share qr-decode":     {types.ScopeShareRead},
-	"share lan-send":      {types.ScopeShareExport},
-	"share lan-receive":   {types.ScopeShareAccept},
-	"share webrtc-offer":  {types.ScopeShareExport},
-	"share webrtc-answer": {types.ScopeShareAccept},
+	"share create":          {types.ScopeShareCreate},
+	"share request":         {types.ScopeShareCreate},
+	"share list":            {types.ScopeShareRead},
+	"share status":          {types.ScopeShareRead},
+	"share policy-bind":     {types.ScopePolicyBind},
+	"share revoke":          {types.ScopeShareRevoke},
+	"share approve":         {types.ScopeShareRevoke},
+	"share deny":            {types.ScopeShareRevoke},
+	"share accept":          {types.ScopeShareAccept},
+	"share export":          {types.ScopeShareExport},
+	"share import":          {types.ScopeShareAccept},
+	"share qr-generate":     {types.ScopeShareExport},
+	"share qr-decode":       {types.ScopeShareRead},
+	"share lan-send":        {types.ScopeShareExport},
+	"share lan-receive":     {types.ScopeShareAccept},
+	"share resume":          {types.ScopeShareAccept},
+	"share transfer-status": {types.ScopeShareRead},
+	"share webrtc-offer":    {types.ScopeShareExport},
+	"share webrtc-answer":   {types.ScopeShareAccept},
 
 	// Backup commands
-	"backup create":   {types.ScopeBackupCreate},
-	"backup list":     {types.ScopeBackupCreate},
-	"backup verify":   {types.ScopeBackupVerify},
-	"backup restore":  {types.ScopeBackupRestore},
-	"backup schedule": {types.ScopeBackupSchedule},
+	"backup create":       {types.ScopeBackupCreate},
+	"backup list":         {types.ScopeBackupCreate},
+	"backup verify":       {types.ScopeBackupVerify},
+	"backup restore":      {types.ScopeBackupRestore},
+	"backup schedule":     {types.ScopeBackupSchedule},
+	"backup drill-run":    {types.ScopeBackupVerify},
+	"backup drill-report": {types.ScopeBackupVerify},
 
 	// Organization commands
 	"org create":       {types.ScopeOrgCreate},
@@ -617,6 +638,30 @@ var CommandPermissions = map[string][]types.Scope{
 	"incident export":   {types.ScopeIncidentExport},
 	"incident monitor":  {types.ScopeIncidentMonitor},
 	"incident timeline": {types.ScopeIncidentTimeline},
+
+	// Rotate commands
+	"rotate start":    {types.ScopeSecretRotate},
+	"rotate status":   {types.ScopeSecretRead},
+	"rotate rollback": {types.ScopeSecretUpdate},
+
+	// Detect commands
+	"detect leaks":   {types.ScopeDLPScan},
+	"detect runtime": {types.ScopeDLPScan},
+
+	// Exec profile commands
+	"exec-profile create": {types.ScopeExecRun},
+	"exec-profile list":   {types.ScopeExecRun},
+	"exec-profile delete": {types.ScopeExecRun},
+	"exec-profile run":    {types.ScopeExecRun},
+
+	// Federation commands
+	"federation establish":      {types.ScopeOrgRead},
+	"federation share-external": {types.ScopeShareExternal},
+
+	// Envelope hardening commands
+	"envelope lock":   {types.ScopeEnvelopeVerify},
+	"envelope unlock": {types.ScopeEnvelopeOpen},
+	"envelope acl":    {types.ScopeEnvelopeVerify},
 
 	// Envelope commands
 	"envelope create": {types.ScopeEnvelopeCreate},

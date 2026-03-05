@@ -253,7 +253,11 @@ func classifyFlag(name string) FlagClass {
 	if strings.Contains(n, "password") || strings.Contains(n, "token") || strings.Contains(n, "secret") || strings.Contains(n, "key") || strings.Contains(n, "signer") {
 		return FlagClassSensitive
 	}
-	if strings.Contains(n, "id") || strings.Contains(n, "name") || strings.Contains(n, "path") || strings.Contains(n, "file") || strings.Contains(n, "folder") || strings.Contains(n, "resource") || strings.Contains(n, "org") {
+	if n == "id" ||
+		strings.HasSuffix(n, "-id") || strings.HasSuffix(n, "_id") ||
+		strings.Contains(n, "name") || strings.Contains(n, "path") ||
+		strings.Contains(n, "file") || strings.Contains(n, "folder") ||
+		strings.Contains(n, "resource") || strings.Contains(n, "org") {
 		return FlagClassResourceSelector
 	}
 	return FlagClassControl

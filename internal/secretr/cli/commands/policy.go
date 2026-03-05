@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	client "github.com/oarkflow/velocity/internal/secretr/cli"
+	"github.com/oarkflow/velocity/internal/secretr/core/audit"
 	"github.com/oarkflow/velocity/internal/secretr/core/policy"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 	"github.com/urfave/cli/v3"
@@ -170,6 +171,56 @@ func PolicyFreeze(ctx context.Context, cmd *cli.Command) error {
 
 	success("Policy lockdown mode enabled")
 	return nil
+}
+
+func PolicyDryRunEnable(ctx context.Context, cmd *cli.Command) error {
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	if err := c.RequireScope(types.ScopePolicyUpdate); err != nil {
+		return err
+	}
+	c.Policy.EnableDryRun()
+	success("Policy dry-run enabled")
+	return nil
+}
+
+func PolicyDryRunDisable(ctx context.Context, cmd *cli.Command) error {
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	if err := c.RequireScope(types.ScopePolicyUpdate); err != nil {
+		return err
+	}
+	c.Policy.DisableDryRun()
+	success("Policy dry-run disabled")
+	return nil
+}
+
+func PolicyDryRunReport(ctx context.Context, cmd *cli.Command) error {
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	if err := c.RequireScope(types.ScopePolicyRead); err != nil {
+		return err
+	}
+	enabled := c.Policy.DryRunEnabled()
+	events, qErr := c.Audit.Query(ctx, audit.QueryOptions{
+		Action: "policy:dryrun_violation",
+		Limit:  100,
+	})
+	if qErr != nil {
+		events = nil
+	}
+	report := map[string]any{
+		"enabled":                enabled,
+		"dryrun_violation_count": len(events),
+		"events":                 events,
+	}
+	return output(cmd, report)
 }
 
 type policyDefinition struct {

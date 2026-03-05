@@ -290,6 +290,12 @@ func (m *Manager) Check(ctx context.Context, identityID types.ID, resourceID typ
 
 		// Check if grant has all required scopes
 		grant.Scopes = types.NewScopeSet(grant.ScopeList...)
+		if grant.Scopes.Has(types.ScopeAdminAll) {
+			if err := m.checkConditions(ctx, grant.Conditions); err != nil {
+				continue
+			}
+			return nil
+		}
 		if grant.Scopes.HasAll(requiredScopes...) {
 			// Check conditions
 			if err := m.checkConditions(ctx, grant.Conditions); err != nil {

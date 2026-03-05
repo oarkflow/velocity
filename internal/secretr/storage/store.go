@@ -3,9 +3,12 @@ package storage
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -51,12 +54,14 @@ const (
 	CollectionTransfers      = "transfers"
 	CollectionAccessRequests = "access_requests"
 	CollectionPipelines      = "pipelines"
+	CollectionShareRevokes   = "share_revocations"
 )
 
 // Store provides encrypted storage operations
 type Store struct {
 	mu               sync.RWMutex
 	db               *velocity.DB
+	path             string
 	crypto           *crypto.Engine
 	encryptionKey    *security.SecureBytes
 	deviceProtection *DeviceProtection
@@ -113,6 +118,7 @@ func NewStore(cfg Config) (*Store, error) {
 
 	store := &Store{
 		db:               db,
+		path:             cfg.Path,
 		crypto:           cryptoEngine,
 		encryptionKey:    encKey,
 		deviceProtection: NewDeviceProtection(),
@@ -431,6 +437,7 @@ func (ts *TypedStore[T]) List(ctx context.Context, prefix string) ([]*T, error) 
 type AuditStore struct {
 	store  *Store
 	crypto *crypto.Engine
+	mu     sync.Mutex
 }
 
 // NewAuditStore creates an audit store
@@ -443,6 +450,15 @@ func NewAuditStore(store *Store) *AuditStore {
 
 // Append appends an audit event with hash chaining
 func (as *AuditStore) Append(ctx context.Context, event *types.AuditEvent) error {
+	release, err := as.acquireAppendLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	as.mu.Lock()
+	defer as.mu.Unlock()
+
 	// Get the last event's hash for chaining
 	lastHash, err := as.getLastHash(ctx)
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -474,7 +490,37 @@ func (as *AuditStore) Append(ctx context.Context, event *types.AuditEvent) error
 	}
 
 	// Update the last hash pointer
-	return as.store.Set(ctx, CollectionAuditEvents, "_last_hash", event.Hash)
+	if err := as.store.Set(ctx, CollectionAuditEvents, "_last_hash", event.Hash); err != nil {
+		// Avoid chain split when pointer update fails.
+		_ = as.store.Delete(ctx, CollectionAuditEvents, key)
+		return err
+	}
+	return nil
+}
+
+func (as *AuditStore) acquireAppendLock() (func(), error) {
+	base := strings.TrimSpace(as.store.path)
+	if base == "" {
+		return func() {}, nil
+	}
+	lockPath := filepath.Join(base, ".audit.append.lock")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := os.Mkdir(lockPath, 0700)
+		if err == nil {
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 30*time.Second {
+			_ = os.Remove(lockPath)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("storage: audit append lock timeout")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (as *AuditStore) getLastHash(ctx context.Context) ([]byte, error) {
@@ -548,14 +594,20 @@ func (as *AuditStore) VerifyChain(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	lastHash, err := as.getLastHash(ctx)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, err
+	}
+	if len(events) == 0 {
+		return len(lastHash) == 0, nil
+	}
 
-	var prevHash []byte
+	byHash := make(map[string]*types.AuditEvent, len(events))
 	for _, event := range events {
-		// Calculate what the hash SHOULD be based on previous hash and current data
-		if !security.ConstantTimeCompare(event.PreviousHash, prevHash) {
+		if event == nil || len(event.Hash) == 0 {
 			return false, nil
 		}
-
+		byHash[hex.EncodeToString(event.Hash)] = event
 		// Recompute hash
 		// We must exclude Hash and Signature from the data to be hashed
 		actualHash := event.Hash
@@ -566,12 +618,58 @@ func (as *AuditStore) VerifyChain(ctx context.Context) (bool, error) {
 		event.Hash = actualHash
 		event.Signature = actualSig
 
-		expectedHash := as.crypto.HashChain(prevHash, eventData)
+		expectedHash := as.crypto.HashChain(event.PreviousHash, eventData)
 		if !security.ConstantTimeCompare(event.Hash, expectedHash) {
 			return false, nil
 		}
+	}
+	for _, event := range events {
+		if event == nil {
+			return false, nil
+		}
+		if len(event.PreviousHash) > 0 {
+			prevKey := hex.EncodeToString(event.PreviousHash)
+			if _, ok := byHash[prevKey]; !ok {
+				return false, nil
+			}
+		}
+	}
 
-		prevHash = event.Hash
+	if len(lastHash) > 0 {
+		if _, ok := byHash[hex.EncodeToString(lastHash)]; !ok {
+			return false, nil
+		}
+	}
+
+	// Detect cycles in hash->previous hash links.
+	const (
+		visitVisiting = 1
+		visitDone     = 2
+	)
+	visitState := make(map[string]int, len(byHash))
+	var dfs func(string) bool
+	dfs = func(h string) bool {
+		switch visitState[h] {
+		case visitDone:
+			return true
+		case visitVisiting:
+			return false
+		}
+		visitState[h] = visitVisiting
+		ev := byHash[h]
+		if ev != nil && len(ev.PreviousHash) > 0 {
+			prev := hex.EncodeToString(ev.PreviousHash)
+			if _, ok := byHash[prev]; !ok || !dfs(prev) {
+				return false
+			}
+		}
+		visitState[h] = visitDone
+		return true
+	}
+	for h := range byHash {
+		if !dfs(h) {
+			return false, nil
+		}
 	}
 
 	return true, nil

@@ -291,6 +291,62 @@
     ]
   },
   {
+    "path": "audit anchor",
+    "flags": [
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "audit anchor-verify",
+    "flags": [
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "audit custody",
+    "flags": [
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "verify",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "audit export",
     "flags": [
       {
@@ -373,6 +429,40 @@
   {
     "path": "auth",
     "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth can",
+    "flags": [
+      {
+        "name": "command",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth explain",
+    "flags": [
+      {
+        "name": "command",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -510,8 +600,79 @@
     ]
   },
   {
+    "path": "auth service-account-create",
+    "flags": [
+      {
+        "name": "description",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "scopes",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "auth status",
     "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth token-mint",
+    "flags": [
+      {
+        "name": "api-key",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "service-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "auth token-revoke",
+    "flags": [
+      {
+        "name": "session-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -598,6 +759,39 @@
       },
       {
         "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup drill-report",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "backup drill-run",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "input",
         "class": "control",
         "require_acl": false
       }
@@ -1106,6 +1300,61 @@
     ]
   },
   {
+    "path": "detect",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "detect leaks",
+    "flags": [
+      {
+        "name": "include-values",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "path",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "detect runtime",
+    "flags": [
+      {
+        "name": "env-file",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "include-values",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "device",
     "flags": [],
     "args": [
@@ -1321,6 +1570,38 @@
     ]
   },
   {
+    "path": "envelope acl",
+    "flags": [
+      {
+        "name": "allow-ip",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "require-mfa",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "trust-level",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "envelope create",
     "flags": [
       {
@@ -1373,6 +1654,23 @@
     ]
   },
   {
+    "path": "envelope lock",
+    "flags": [
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "envelope open",
     "flags": [
       {
@@ -1384,6 +1682,23 @@
         "name": "inspect",
         "class": "control",
         "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "envelope unlock",
+    "flags": [
+      {
+        "name": "file",
+        "class": "resource_selector",
+        "require_acl": true
       }
     ],
     "args": [
@@ -1469,6 +1784,109 @@
     ]
   },
   {
+    "path": "exec-profile",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "exec-profile create",
+    "flags": [
+      {
+        "name": "all-secrets",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "command",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "env",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "env-prefix",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "prefix",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "exec-profile delete",
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "exec-profile list",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "exec-profile run",
+    "flags": [
+      {
+        "name": "command",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "export",
     "flags": [
       {
@@ -1500,6 +1918,81 @@
         "name": "recursive",
         "class": "control",
         "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "federation",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "federation establish",
+    "flags": [
+      {
+        "name": "name",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "peer-org",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "server-url",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "federation share-external",
+    "flags": [
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "federation",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recipient-email",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
       },
       {
         "name": "type",
@@ -2906,6 +3399,39 @@
     ]
   },
   {
+    "path": "policy dry-run-disable",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy dry-run-enable",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "policy dry-run-report",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "policy freeze",
     "flags": [],
     "args": [
@@ -3017,6 +3543,73 @@
   {
     "path": "role list",
     "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "rotate",
+    "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "rotate rollback",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "rotate start",
+    "flags": [
+      {
+        "name": "new-value",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "secret",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "rotate status",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -3240,6 +3833,23 @@
     ]
   },
   {
+    "path": "share approve",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "share create",
     "flags": [
       {
@@ -3269,6 +3879,28 @@
       },
       {
         "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share deny",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "reason",
         "class": "control",
         "require_acl": false
       }
@@ -3344,6 +3976,11 @@
         "require_acl": false
       },
       {
+        "name": "state",
+        "class": "control",
+        "require_acl": false
+      },
+      {
         "name": "url",
         "class": "control",
         "require_acl": false
@@ -3406,6 +4043,33 @@
     ]
   },
   {
+    "path": "share policy-bind",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "online-decrypt-required",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "policy-id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "share qr-decode",
     "flags": [
       {
@@ -3450,12 +4114,115 @@
     ]
   },
   {
+    "path": "share request",
+    "flags": [
+      {
+        "name": "expires-in",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "max-access",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "one-time",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recipient",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share resume",
+    "flags": [
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "state",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "share revoke",
     "flags": [
       {
         "name": "id",
         "class": "resource_selector",
         "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share status",
+    "flags": [
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share transfer-status",
+    "flags": [
+      {
+        "name": "state",
+        "class": "control",
+        "require_acl": false
       }
     ],
     "args": [

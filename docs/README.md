@@ -281,6 +281,66 @@ secretr share webrtc-answer --url http://<SENDER_IP>:8789/webrtc/<TOKEN> --outpu
 secretr share webrtc-offer --type object --resource /apps/api/config.json --recipient <IDENTITY_ID> --bind 0.0.0.0:8789 --qr
 ```
 
+### Tested End-to-End: Resumable LAN + Policy-Bound Revoke Deny
+
+Terminal 1:
+```bash
+cd /Users/sujit/Sites/velocity
+go build -o ./secretr ./cmd/secretr
+
+export HOME=/Users/sujit/Sites/velocity/.tmp_home_share_demo
+mkdir -p "$HOME/.secretr"
+# Place entitlement file at:
+#   $HOME/.secretr/license.json
+
+secretr auth init --email admin@example.com --name Admin --password 'Admin#1234'
+secretr auth login --email admin@example.com --password 'Admin#1234'
+secretr secret set --name ENCRYPTED_SECRET --value hello
+
+ADMIN_ID=$(jq -r '.identity_id' "$HOME/.secretr/session.json")
+SHARE_ID=$(secretr share create --type secret --resource ENCRYPTED_SECRET --recipient "$ADMIN_ID" | sed -nE 's/^✓ Share created: ([a-f0-9]+)$/\1/p')
+POLICY_ID=$(secretr policy create --name share-online-required | sed -nE 's/^✓ Policy created: ([a-f0-9]+)$/\1/p')
+secretr share policy-bind --id "$SHARE_ID" --policy-id "$POLICY_ID" --online-decrypt-required
+
+secretr share lan-send --id "$SHARE_ID" --bind 127.0.0.1:8899 --ttl 90s
+```
+
+Terminal 2:
+```bash
+cd /Users/sujit/Sites/velocity
+export HOME=/Users/sujit/Sites/velocity/.tmp_home_share_demo
+
+URL="http://127.0.0.1:8899/package/<PACKAGE_ID_FROM_TERMINAL_1>"
+STATE=/Users/sujit/Sites/velocity/.tmp_transfer_state_demo.json
+PKG=/Users/sujit/Sites/velocity/.tmp_transfer_state_demo.pkg.part
+OUT=/Users/sujit/Sites/velocity/.tmp_imported_payload_demo.txt
+
+curl -fsSL -H 'Range: bytes=0-120' "$URL" -o "$PKG"
+jq -n --arg u "$URL" --arg s "$STATE" --arg p "$PKG" --argjson b 121 \
+  '{url:$u,state_path:$s,package_path:$p,bytes_written:$b,status:"downloading"}' > "$STATE"
+
+secretr share resume --state "$STATE" --password 'Admin#1234' --output "$OUT"
+cat "$OUT"            # expected: hello
+jq -r '.require_online_decrypt' "$PKG"   # expected: true
+
+SHARE_ID=$(secretr share list --format json | jq -r '.[-1].id')
+secretr share revoke --id "$SHARE_ID"
+secretr share status --id "$SHARE_ID" --format json | jq -r '.status'  # expected: revoked
+
+secretr share import --input "$PKG" --password 'Admin#1234'
+# expected: Error: share: has been revoked
+```
+
+### Expected Failure Modes (Share E2E)
+
+| Symptom | Error code / message | Why it happens | Fix |
+|---|---|---|---|
+| Entitlement gate blocks share command | `entitlement_scope_required` | Active license does not include required `share:*` scope | Add required share scopes to license entitlements |
+| ACL gate blocks operation | `acl_denied` or `resource id required for ACL evaluation` | Caller lacks ACL permission on target or command did not resolve resource ID | Grant ACL on target resource and pass correct `--id` / selector flags |
+| Recipient cannot decrypt imported package | `share: decrypt key not found` (or decrypt failure) | Package encrypted for different recipient key/device | Re-create share for intended recipient identity/device |
+| Import fails after revocation | `share: has been revoked` | Sender revoked share and revocation marker is enforced | Expected behavior; create a new share package |
+| LAN receive cannot connect | `curl: (7)` / connection refused | Sender not reachable on LAN or wrong URL/bind address | Verify sender is running, URL is correct, firewall/network allows reachability |
+
 Detailed command reference:
 - `docs/SHARE.md`
 
@@ -1192,8 +1252,12 @@ Flag Matrix
 | `secretr share export` | `--id`, `--output (-o)` | - |
 | `secretr share import` | `--input (-i)` | `--output (-o)`, `--password` |
 | `secretr share lan-send` | `--id` | `--api-url`, `--bind`, `--qr`, `--ttl` |
-| `secretr share lan-receive` | `--url` | `--output (-o)`, `--password` |
+| `secretr share lan-receive` | `--url` | `--output (-o)`, `--password`, `--state` |
 | `secretr share list` | - | - |
+| `secretr share status` | `--id` | - |
+| `secretr share policy-bind` | `--id`, `--policy-id` | `--online-decrypt-required` |
+| `secretr share resume` | `--state` | `--output (-o)`, `--password` |
+| `secretr share transfer-status` | `--state` | - |
 | `secretr share qr-decode` | `--input (-i)` | - |
 | `secretr share qr-generate` | `--id` | `--api-url`, `--output (-o)` |
 | `secretr share revoke` | `--id` | - |
@@ -1212,6 +1276,10 @@ Positional Args Matrix
 | `secretr share lan-send` | - | - |
 | `secretr share lan-receive` | - | - |
 | `secretr share list` | - | - |
+| `secretr share status` | - | - |
+| `secretr share policy-bind` | - | - |
+| `secretr share resume` | - | - |
+| `secretr share transfer-status` | - | - |
 | `secretr share qr-decode` | - | - |
 | `secretr share qr-generate` | - | - |
 | `secretr share revoke` | - | - |

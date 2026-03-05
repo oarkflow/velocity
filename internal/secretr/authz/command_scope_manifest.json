@@ -102,6 +102,24 @@
     ]
   },
   {
+    "path": "audit anchor",
+    "scopes": [
+      "audit:export"
+    ]
+  },
+  {
+    "path": "audit anchor-verify",
+    "scopes": [
+      "audit:verify"
+    ]
+  },
+  {
+    "path": "audit custody",
+    "scopes": [
+      "audit:read"
+    ]
+  },
+  {
     "path": "audit export",
     "scopes": [
       "audit:export"
@@ -121,6 +139,14 @@
   },
   {
     "path": "auth",
+    "scopes": []
+  },
+  {
+    "path": "auth can",
+    "scopes": []
+  },
+  {
+    "path": "auth explain",
     "scopes": []
   },
   {
@@ -148,10 +174,22 @@
     ]
   },
   {
+    "path": "auth service-account-create",
+    "scopes": []
+  },
+  {
     "path": "auth status",
     "scopes": [
       "auth:login"
     ]
+  },
+  {
+    "path": "auth token-mint",
+    "scopes": []
+  },
+  {
+    "path": "auth token-revoke",
+    "scopes": []
   },
   {
     "path": "backup",
@@ -169,6 +207,18 @@
     "path": "backup create",
     "scopes": [
       "backup:create"
+    ]
+  },
+  {
+    "path": "backup drill-report",
+    "scopes": [
+      "backup:verify"
+    ]
+  },
+  {
+    "path": "backup drill-run",
+    "scopes": [
+      "backup:verify"
     ]
   },
   {
@@ -316,6 +366,24 @@
     ]
   },
   {
+    "path": "detect",
+    "scopes": [
+      "dlp:scan"
+    ]
+  },
+  {
+    "path": "detect leaks",
+    "scopes": [
+      "dlp:scan"
+    ]
+  },
+  {
+    "path": "detect runtime",
+    "scopes": [
+      "dlp:scan"
+    ]
+  },
+  {
     "path": "device",
     "scopes": [
       "device:read"
@@ -400,13 +468,31 @@
     ]
   },
   {
+    "path": "envelope acl",
+    "scopes": [
+      "envelope:verify"
+    ]
+  },
+  {
     "path": "envelope create",
     "scopes": [
       "envelope:create"
     ]
   },
   {
+    "path": "envelope lock",
+    "scopes": [
+      "envelope:verify"
+    ]
+  },
+  {
     "path": "envelope open",
+    "scopes": [
+      "envelope:open"
+    ]
+  },
+  {
+    "path": "envelope unlock",
     "scopes": [
       "envelope:open"
     ]
@@ -424,9 +510,57 @@
     ]
   },
   {
+    "path": "exec-profile",
+    "scopes": [
+      "exec:run"
+    ]
+  },
+  {
+    "path": "exec-profile create",
+    "scopes": [
+      "exec:run"
+    ]
+  },
+  {
+    "path": "exec-profile delete",
+    "scopes": [
+      "exec:run"
+    ]
+  },
+  {
+    "path": "exec-profile list",
+    "scopes": [
+      "exec:run"
+    ]
+  },
+  {
+    "path": "exec-profile run",
+    "scopes": [
+      "exec:run"
+    ]
+  },
+  {
     "path": "export",
     "scopes": [
       "file:list"
+    ]
+  },
+  {
+    "path": "federation",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "federation establish",
+    "scopes": [
+      "org:read"
+    ]
+  },
+  {
+    "path": "federation share-external",
+    "scopes": [
+      "share:external"
     ]
   },
   {
@@ -833,6 +967,24 @@
     ]
   },
   {
+    "path": "policy dry-run-disable",
+    "scopes": [
+      "policy:update"
+    ]
+  },
+  {
+    "path": "policy dry-run-enable",
+    "scopes": [
+      "policy:update"
+    ]
+  },
+  {
+    "path": "policy dry-run-report",
+    "scopes": [
+      "policy:read"
+    ]
+  },
+  {
     "path": "policy freeze",
     "scopes": [
       "policy:freeze",
@@ -873,6 +1025,30 @@
     "path": "role list",
     "scopes": [
       "role:read"
+    ]
+  },
+  {
+    "path": "rotate",
+    "scopes": [
+      "secret:read"
+    ]
+  },
+  {
+    "path": "rotate rollback",
+    "scopes": [
+      "secret:update"
+    ]
+  },
+  {
+    "path": "rotate start",
+    "scopes": [
+      "secret:rotate"
+    ]
+  },
+  {
+    "path": "rotate status",
+    "scopes": [
+      "secret:read"
     ]
   },
   {
@@ -948,9 +1124,21 @@
     ]
   },
   {
+    "path": "share approve",
+    "scopes": [
+      "share:revoke"
+    ]
+  },
+  {
     "path": "share create",
     "scopes": [
       "share:create"
+    ]
+  },
+  {
+    "path": "share deny",
+    "scopes": [
+      "share:revoke"
     ]
   },
   {
@@ -984,6 +1172,12 @@
     ]
   },
   {
+    "path": "share policy-bind",
+    "scopes": [
+      "policy:bind"
+    ]
+  },
+  {
     "path": "share qr-decode",
     "scopes": [
       "share:read"
@@ -996,9 +1190,33 @@
     ]
   },
   {
+    "path": "share request",
+    "scopes": [
+      "share:create"
+    ]
+  },
+  {
+    "path": "share resume",
+    "scopes": [
+      "share:accept"
+    ]
+  },
+  {
     "path": "share revoke",
     "scopes": [
       "share:revoke"
+    ]
+  },
+  {
+    "path": "share status",
+    "scopes": [
+      "share:read"
+    ]
+  },
+  {
+    "path": "share transfer-status",
+    "scopes": [
+      "share:read"
     ]
   },
   {

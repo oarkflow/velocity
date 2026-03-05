@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oarkflow/velocity/internal/secretr/authz"
 	client "github.com/oarkflow/velocity/internal/secretr/cli"
+	"github.com/oarkflow/velocity/internal/secretr/core/access"
 	"github.com/oarkflow/velocity/internal/secretr/core/identity"
 	"github.com/oarkflow/velocity/internal/secretr/core/org"
 	"github.com/oarkflow/velocity/internal/secretr/types"
@@ -147,6 +149,89 @@ func AuthMFA(ctx context.Context, cmd *cli.Command) error {
 	return nil
 }
 
+func AuthCan(ctx context.Context, cmd *cli.Command) error {
+	commandLine := strings.TrimSpace(cmd.String("command"))
+	if commandLine == "" {
+		return fmt.Errorf("command is required")
+	}
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireSession(); err != nil {
+		return err
+	}
+	path, err := normalizeCommandPath(commandLine)
+	if err != nil {
+		return err
+	}
+	spec, err := authz.ResolveCommandDispatchAuth(path)
+	if err != nil {
+		return err
+	}
+	sess := c.CurrentSession()
+	missing := make([]string, 0)
+	for _, s := range spec.RequiredScopes {
+		if !sess.Scopes.Has(s) {
+			missing = append(missing, string(s))
+		}
+	}
+	can := len(missing) == 0
+	out := map[string]any{
+		"command":         commandLine,
+		"path":            path,
+		"allowed":         can,
+		"required_scopes": spec.RequiredScopes,
+		"missing_scopes":  missing,
+	}
+	return output(cmd, out)
+}
+
+func AuthExplain(ctx context.Context, cmd *cli.Command) error {
+	commandLine := strings.TrimSpace(cmd.String("command"))
+	if commandLine == "" {
+		return fmt.Errorf("command is required")
+	}
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireSession(); err != nil {
+		return err
+	}
+	path, err := normalizeCommandPath(commandLine)
+	if err != nil {
+		return err
+	}
+	spec, err := authz.ResolveCommandDispatchAuth(path)
+	if err != nil {
+		return err
+	}
+	sess := c.CurrentSession()
+	granted := make([]string, 0, len(sess.Scopes))
+	for s := range sess.Scopes {
+		granted = append(granted, string(s))
+	}
+	missing := make([]string, 0)
+	for _, s := range spec.RequiredScopes {
+		if !sess.Scopes.Has(s) {
+			missing = append(missing, string(s))
+		}
+	}
+	out := map[string]any{
+		"command":         commandLine,
+		"path":            path,
+		"required_scopes": spec.RequiredScopes,
+		"granted_scopes":  granted,
+		"missing_scopes":  missing,
+		"allow_unauth":    spec.AllowUnauth,
+		"require_acl":     spec.RequireACL,
+	}
+	return output(cmd, out)
+}
+
 func AuthInit(ctx context.Context, cmd *cli.Command) error {
 	c, err := client.GetClient()
 	if err != nil {
@@ -232,6 +317,18 @@ func AuthInit(ctx context.Context, cmd *cli.Command) error {
 		success("Default organization created: %s (%s)", organization.Name, organization.ID)
 	}
 
+	// Bootstrap ACL grant so deny-first ACL remains enforced while admin can operate.
+	if _, err := c.Access.Grant(ctx, access.GrantOptions{
+		GrantorID:    ident.ID,
+		GranteeID:    ident.ID,
+		ResourceID:   "*",
+		ResourceType: "global",
+		Scopes:       []types.Scope{types.ScopeAdminAll},
+	}); err != nil {
+		return fmt.Errorf("failed to create bootstrap admin ACL grant: %w", err)
+	}
+	success("Bootstrap admin ACL grant created")
+
 	return nil
 }
 
@@ -273,4 +370,28 @@ func resolveLoginEmail(ctx context.Context, c *client.Client, email, username st
 	default:
 		return "", fmt.Errorf("username %q is ambiguous; use --email", username)
 	}
+}
+
+func normalizeCommandPath(commandLine string) (string, error) {
+	toks := strings.Fields(strings.TrimSpace(commandLine))
+	if len(toks) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+	if toks[0] == "secretr" {
+		toks = toks[1:]
+	}
+	pathToks := make([]string, 0, 3)
+	for _, t := range toks {
+		if strings.HasPrefix(t, "-") {
+			break
+		}
+		pathToks = append(pathToks, t)
+		if len(pathToks) >= 4 {
+			break
+		}
+	}
+	if len(pathToks) == 0 {
+		return "", fmt.Errorf("unable to resolve command path")
+	}
+	return strings.Join(pathToks, " "), nil
 }

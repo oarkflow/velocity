@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -65,14 +67,7 @@ func ShareCreate(ctx context.Context, cmd *cli.Command) error {
 		if identityErr != nil {
 			return fmt.Errorf("recipient identity not found: %w", identityErr)
 		}
-		recipientPubKey = identity.PublicKey
-		if len(recipientPubKey) == 0 {
-			if encPubStr, ok := identity.Metadata["encryption_public_key"].(string); ok && strings.TrimSpace(encPubStr) != "" {
-				if decoded, decErr := base64.StdEncoding.DecodeString(encPubStr); decErr == nil {
-					recipientPubKey = decoded
-				}
-			}
-		}
+		recipientPubKey = resolveIdentityEncryptionPublicKey(identity)
 	}
 
 	shr, err := c.Share.CreateShare(ctx, share.CreateShareOptions{
@@ -90,6 +85,58 @@ func ShareCreate(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	success("Share created: %s", shr.ID)
+	return nil
+}
+
+func ShareRequest(ctx context.Context, cmd *cli.Command) error {
+	shareType := strings.ToLower(strings.TrimSpace(cmd.String("type")))
+	resource := cmd.String("resource")
+	recipient := cmd.String("recipient")
+	expiresIn := cmd.Duration("expires-in")
+	maxAccess := cmd.Int("max-access")
+	oneTime := cmd.Bool("one-time")
+
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	if err := c.RequireScope(types.ScopeShareCreate); err != nil {
+		return err
+	}
+
+	resourceType, resourceID, err := resolveShareResourceForCreate(ctx, c, shareType, resource)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(recipient) == "" {
+		return fmt.Errorf("recipient is required for share request")
+	}
+	recipientID := types.ID(strings.TrimSpace(recipient))
+	identity, err := c.Identity.GetIdentity(ctx, recipientID)
+	if err != nil {
+		return fmt.Errorf("recipient identity not found: %w", err)
+	}
+	recipientPubKey := resolveIdentityEncryptionPublicKey(identity)
+	if len(recipientPubKey) == 0 {
+		return fmt.Errorf("recipient public key is required")
+	}
+	reqShare, err := c.Share.CreateShareRequest(ctx, share.CreateShareOptions{
+		Type:            resourceType,
+		ResourceID:      resourceID,
+		RecipientID:     &recipientID,
+		RecipientPubKey: recipientPubKey,
+		ExpiresIn:       expiresIn,
+		MaxAccess:       maxAccess,
+		CreatorID:       c.CurrentIdentityID(),
+		OneTime:         oneTime,
+	})
+	if err != nil {
+		return err
+	}
+	success("Share request created: %s", reqShare.ID)
+	info("Status: %s", reqShare.Status)
 	return nil
 }
 
@@ -122,6 +169,83 @@ func ShareRevoke(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 	success("Share revoked")
+	return nil
+}
+
+func ShareApprove(ctx context.Context, cmd *cli.Command) error {
+	id := types.ID(strings.TrimSpace(cmd.String("id")))
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireScope(types.ScopeShareRevoke); err != nil {
+		return err
+	}
+	shr, err := c.Share.ApproveShare(ctx, id, c.CurrentIdentityID())
+	if err != nil {
+		return err
+	}
+	success("Share approved: %s", shr.ID)
+	return nil
+}
+
+func ShareDeny(ctx context.Context, cmd *cli.Command) error {
+	id := types.ID(strings.TrimSpace(cmd.String("id")))
+	reason := strings.TrimSpace(cmd.String("reason"))
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireScope(types.ScopeShareRevoke); err != nil {
+		return err
+	}
+	shr, err := c.Share.DenyShare(ctx, id, c.CurrentIdentityID(), reason)
+	if err != nil {
+		return err
+	}
+	success("Share denied: %s (status=%s)", shr.ID, shr.Status)
+	return nil
+}
+
+func ShareStatus(ctx context.Context, cmd *cli.Command) error {
+	id := types.ID(strings.TrimSpace(cmd.String("id")))
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireScope(types.ScopeShareRead); err != nil {
+		return err
+	}
+	shr, err := c.Share.GetShare(ctx, id)
+	if err != nil {
+		return err
+	}
+	return output(cmd, shr)
+}
+
+func SharePolicyBind(ctx context.Context, cmd *cli.Command) error {
+	id := types.ID(strings.TrimSpace(cmd.String("id")))
+	policyID := types.ID(strings.TrimSpace(cmd.String("policy-id")))
+	onlineRequired := cmd.Bool("online-decrypt-required")
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireScope(types.ScopePolicyBind); err != nil {
+		return err
+	}
+	shr, err := c.Share.BindPolicy(ctx, id, c.CurrentIdentityID(), policyID, onlineRequired)
+	if err != nil {
+		return err
+	}
+	success("Share policy bound: %s", shr.ID)
 	return nil
 }
 
@@ -288,18 +412,21 @@ func ShareLANSend(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
 	if err := c.RequireScope(types.ScopeShareExport); err != nil {
+		c.Close()
 		return err
 	}
 
 	shr, pkgID, exported, err := buildSharePackageForTransfer(ctx, c, id)
 	if err != nil {
+		c.Close()
 		return err
 	}
 	if shr.CreatorID != c.CurrentIdentityID() {
+		c.Close()
 		return fmt.Errorf("only share creator can LAN-send this share")
 	}
+	c.Close()
 
 	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
@@ -320,12 +447,36 @@ func ShareLANSend(ctx context.Context, cmd *cli.Command) error {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(exported)
-		select {
-		case <-done:
-		default:
-			close(done)
+		total := len(exported)
+		start, end, hasRange := parseByteRange(r.Header.Get("Range"), total)
+		servedComplete := false
+		if hasRange {
+			if start >= total {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+				http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if end >= total {
+				end = total - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(exported[start : end+1])
+			// Range response delivered the tail up to EOF; this can complete a resumed transfer.
+			servedComplete = end == total-1
+		} else {
+			w.Header().Set("Content-Length", strconv.Itoa(total))
+			_, _ = w.Write(exported)
+			servedComplete = true
+		}
+		if servedComplete {
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
 		}
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -365,6 +516,7 @@ func ShareLANReceive(ctx context.Context, cmd *cli.Command) error {
 	rawURL := strings.TrimSpace(cmd.String("url"))
 	outputPath := strings.TrimSpace(cmd.String("output"))
 	password := cmd.String("password")
+	statePath := strings.TrimSpace(cmd.String("state"))
 	if rawURL == "" {
 		return fmt.Errorf("url is required")
 	}
@@ -394,21 +546,13 @@ func ShareLANReceive(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return fmt.Errorf("failed to load recipient decryption key: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return err
+	if statePath == "" {
+		statePath, err = defaultTransferStatePath(rawURL)
+		if err != nil {
+			return err
+		}
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("failed to fetch package: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	packageData, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	packageData, st, err := downloadPackageWithResume(ctx, rawURL, statePath)
 	if err != nil {
 		return err
 	}
@@ -421,6 +565,9 @@ func ShareLANReceive(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	st.Status = "imported"
+	st.UpdatedAt = time.Now().UTC()
+	_ = saveTransferState(statePath, st)
 	if outputPath != "" {
 		if err := os.WriteFile(outputPath, imported.Data, 0600); err != nil {
 			return err
@@ -433,6 +580,83 @@ func ShareLANReceive(ctx context.Context, cmd *cli.Command) error {
 	success("LAN share imported: %s", imported.ShareID)
 	info("Payload printed as base64; use --output to write raw bytes")
 	return nil
+}
+
+func ShareResume(ctx context.Context, cmd *cli.Command) error {
+	statePath := strings.TrimSpace(cmd.String("state"))
+	if statePath == "" {
+		return fmt.Errorf("state is required")
+	}
+	st, err := loadTransferState(statePath)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(st.URL) == "" {
+		return fmt.Errorf("resume state missing url")
+	}
+	outputPath := strings.TrimSpace(cmd.String("output"))
+	if outputPath == "" {
+		outputPath = strings.TrimSpace(st.OutputPath)
+	}
+	password := cmd.String("password")
+
+	c, err := client.GetClient()
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.RequireScope(types.ScopeShareAccept); err != nil {
+		return err
+	}
+	if strings.TrimSpace(password) == "" {
+		password, err = promptPassword("Enter your password to import share: ")
+		if err != nil {
+			return err
+		}
+	}
+	priv, err := c.Identity.GetEncryptionPrivateKey(ctx, c.CurrentIdentityID(), password)
+	if err != nil {
+		return fmt.Errorf("failed to load recipient decryption key: %w", err)
+	}
+
+	packageData, st, err := downloadPackageWithResume(ctx, st.URL, statePath)
+	if err != nil {
+		return err
+	}
+	if outputPath != "" {
+		st.OutputPath = outputPath
+	}
+	imported, err := c.Share.ImportOfflinePackage(ctx, packageData, priv)
+	if err != nil {
+		return err
+	}
+	st.Status = "imported"
+	st.UpdatedAt = time.Now().UTC()
+	_ = saveTransferState(statePath, st)
+	if outputPath != "" {
+		if err := os.WriteFile(outputPath, imported.Data, 0600); err != nil {
+			return err
+		}
+		success("LAN share imported: %s", imported.ShareID)
+		info("Payload written to: %s", outputPath)
+		return nil
+	}
+	fmt.Println(base64.StdEncoding.EncodeToString(imported.Data))
+	success("LAN share imported: %s", imported.ShareID)
+	info("Payload printed as base64; use --output to write raw bytes")
+	return nil
+}
+
+func ShareTransferStatus(ctx context.Context, cmd *cli.Command) error {
+	statePath := strings.TrimSpace(cmd.String("state"))
+	if statePath == "" {
+		return fmt.Errorf("state is required")
+	}
+	st, err := loadTransferState(statePath)
+	if err != nil {
+		return err
+	}
+	return output(cmd, st)
 }
 
 func ShareWebRTCOffer(ctx context.Context, cmd *cli.Command) error {
@@ -460,35 +684,33 @@ func ShareWebRTCOffer(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
 	if err := c.RequireScope(types.ScopeShareExport); err != nil {
+		c.Close()
 		return err
 	}
 	if id == "" {
 		if shareType == "" || resource == "" || recipient == "" {
+			c.Close()
 			return fmt.Errorf("provide --id or (--type, --resource, --recipient)")
 		}
 		if err := c.RequireScope(types.ScopeShareCreate); err != nil {
+			c.Close()
 			return err
 		}
 		resourceType, resourceID, err := resolveShareResourceForCreate(ctx, c, shareType, resource)
 		if err != nil {
+			c.Close()
 			return err
 		}
 		recipientID := types.ID(recipient)
 		identity, err := c.Identity.GetIdentity(ctx, recipientID)
 		if err != nil {
+			c.Close()
 			return fmt.Errorf("recipient identity not found: %w", err)
 		}
-		recipientPubKey := identity.PublicKey
+		recipientPubKey := resolveIdentityEncryptionPublicKey(identity)
 		if len(recipientPubKey) == 0 {
-			if encPubStr, ok := identity.Metadata["encryption_public_key"].(string); ok && strings.TrimSpace(encPubStr) != "" {
-				if decoded, decErr := base64.StdEncoding.DecodeString(encPubStr); decErr == nil {
-					recipientPubKey = decoded
-				}
-			}
-		}
-		if len(recipientPubKey) == 0 {
+			c.Close()
 			return fmt.Errorf("recipient public key is required")
 		}
 		created, err := c.Share.CreateShare(ctx, share.CreateShareOptions{
@@ -499,6 +721,7 @@ func ShareWebRTCOffer(ctx context.Context, cmd *cli.Command) error {
 			RecipientPubKey: recipientPubKey,
 		})
 		if err != nil {
+			c.Close()
 			return err
 		}
 		id = created.ID
@@ -506,11 +729,14 @@ func ShareWebRTCOffer(ctx context.Context, cmd *cli.Command) error {
 
 	shr, pkgID, pkgBytes, err := buildSharePackageForTransfer(ctx, c, id)
 	if err != nil {
+		c.Close()
 		return err
 	}
 	if shr.CreatorID != c.CurrentIdentityID() {
+		c.Close()
 		return fmt.Errorf("only share creator can perform webrtc-offer")
 	}
+	c.Close()
 
 	pc, err := newWebRTCPeer(stun)
 	if err != nil {
@@ -862,6 +1088,154 @@ func lanAdvertiseAddr(listenAddr string) string {
 	return net.JoinHostPort("127.0.0.1", port)
 }
 
+type transferState struct {
+	URL          string    `json:"url"`
+	StatePath    string    `json:"state_path"`
+	PackagePath  string    `json:"package_path"`
+	OutputPath   string    `json:"output_path,omitempty"`
+	BytesTotal   int64     `json:"bytes_total,omitempty"`
+	BytesWritten int64     `json:"bytes_written"`
+	Status       string    `json:"status"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func parseByteRange(header string, total int) (start, end int, ok bool) {
+	h := strings.TrimSpace(header)
+	if !strings.HasPrefix(h, "bytes=") {
+		return 0, 0, false
+	}
+	spec := strings.TrimPrefix(h, "bytes=")
+	parts := strings.SplitN(spec, "-", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	s, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || s < 0 {
+		return 0, 0, false
+	}
+	e := total - 1
+	if strings.TrimSpace(parts[1]) != "" {
+		if parsedEnd, eErr := strconv.Atoi(strings.TrimSpace(parts[1])); eErr == nil && parsedEnd >= s {
+			e = parsedEnd
+		}
+	}
+	return s, e, true
+}
+
+func defaultTransferStatePath(rawURL string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(rawURL)))
+	id := hex.EncodeToString(sum[:8])
+	return filepath.Join(home, ".secretr", "transfers", id+".json"), nil
+}
+
+func loadTransferState(path string) (*transferState, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var st transferState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func saveTransferState(path string, st *transferState) error {
+	if st == nil {
+		return fmt.Errorf("nil transfer state")
+	}
+	st.StatePath = path
+	st.UpdatedAt = time.Now().UTC()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0600)
+}
+
+func downloadPackageWithResume(ctx context.Context, rawURL, statePath string) ([]byte, *transferState, error) {
+	st := &transferState{
+		URL:    rawURL,
+		Status: "downloading",
+	}
+	if existing, err := loadTransferState(statePath); err == nil && existing != nil {
+		st = existing
+	}
+	if st.PackagePath == "" {
+		st.PackagePath = strings.TrimSuffix(statePath, filepath.Ext(statePath)) + ".pkg.part"
+	}
+	if err := os.MkdirAll(filepath.Dir(st.PackagePath), 0700); err != nil {
+		return nil, nil, err
+	}
+	var offset int64
+	if fi, err := os.Stat(st.PackagePath); err == nil {
+		offset = fi.Size()
+	}
+	part, err := os.OpenFile(st.PackagePath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer part.Close()
+	if _, err := part.Seek(offset, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if offset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, nil, fmt.Errorf("failed to fetch package: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if resp.StatusCode == http.StatusOK && offset > 0 {
+		if err := part.Truncate(0); err != nil {
+			return nil, nil, err
+		}
+		if _, err := part.Seek(0, io.SeekStart); err != nil {
+			return nil, nil, err
+		}
+		offset = 0
+	}
+	n, err := io.Copy(part, io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		st.Status = "failed"
+		st.BytesWritten = offset + n
+		_ = saveTransferState(statePath, st)
+		return nil, st, err
+	}
+	st.BytesWritten = offset + n
+	if resp.ContentLength > 0 {
+		st.BytesTotal = offset + resp.ContentLength
+	} else {
+		st.BytesTotal = st.BytesWritten
+	}
+	st.Status = "downloaded"
+	if err := saveTransferState(statePath, st); err != nil {
+		return nil, st, err
+	}
+	data, err := os.ReadFile(st.PackagePath)
+	if err != nil {
+		return nil, st, err
+	}
+	return data, st, nil
+}
+
 type shareWebRTCSignal struct {
 	Type      string `json:"type"`
 	SDP       string `json:"sdp"`
@@ -998,14 +1372,7 @@ func buildSharePackageForTransfer(ctx context.Context, c *client.Client, id type
 		if identityErr != nil {
 			return nil, "", nil, fmt.Errorf("could not resolve recipient public key: %w", identityErr)
 		}
-		recipientPubKey = identity.PublicKey
-		if len(recipientPubKey) == 0 {
-			if encPubStr, ok := identity.Metadata["encryption_public_key"].(string); ok && strings.TrimSpace(encPubStr) != "" {
-				if decoded, decErr := base64.StdEncoding.DecodeString(encPubStr); decErr == nil {
-					recipientPubKey = decoded
-				}
-			}
-		}
+		recipientPubKey = resolveIdentityEncryptionPublicKey(identity)
 	}
 	if len(recipientPubKey) == 0 {
 		return nil, "", nil, fmt.Errorf("recipient public key is required")
@@ -1079,6 +1446,18 @@ func resolveShareResourceData(ctx context.Context, c *client.Client, shr *types.
 	default:
 		return nil, fmt.Errorf("unsupported share type for export: %s", shr.Type)
 	}
+}
+
+func resolveIdentityEncryptionPublicKey(identity *types.Identity) []byte {
+	if identity == nil {
+		return nil
+	}
+	if encPubStr, ok := identity.Metadata["encryption_public_key"].(string); ok && strings.TrimSpace(encPubStr) != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(encPubStr); err == nil && len(decoded) > 0 {
+			return decoded
+		}
+	}
+	return identity.PublicKey
 }
 
 func resolveShareResourceForCreate(ctx context.Context, c *client.Client, shareType, resource string) (string, types.ID, error) {

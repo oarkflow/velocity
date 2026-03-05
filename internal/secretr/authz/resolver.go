@@ -29,6 +29,9 @@ func (r *DefaultResourceResolver) ResolveCLI(cmd *cli.Command, session *types.Se
 	if resourceID == "" && cmd != nil && len(cmd.Args().Slice()) > 0 {
 		resourceID = strings.TrimSpace(cmd.Args().Slice()[0])
 	}
+	if resourceID == "" && spec.RequireACL {
+		resourceID = "*"
+	}
 	metadata := map[string]any{
 		"command":         path,
 		"mfa_verified":    session != nil && session.MFAVerified,
@@ -64,6 +67,9 @@ func (r *DefaultResourceResolver) ResolveCLIArg(session *types.Session, path str
 
 func (r *DefaultResourceResolver) ResolveAPI(req *http.Request, session *types.Session, spec APIRouteAuthSpec) (string, string, licclient.UsageContext, map[string]any) {
 	resourceID := resolveAPIResourceIDForResolver(req, spec)
+	if resourceID == "" && spec.RequireACL {
+		resourceID = "*"
+	}
 	metadata := map[string]any{
 		"method":          req.Method,
 		"path":            req.URL.Path,
