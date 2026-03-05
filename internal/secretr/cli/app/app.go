@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -1097,7 +1098,7 @@ func (a *App) shareCommands() *cli.Command {
 				Before: a.gate.RequireScopes(types.ScopeShareCreate),
 				Action: commands.ShareCreate,
 				Flags: []cli.Flag{
-					&cli.StringFlag{Name: "type", Usage: "Share type: secret, file, folder, object", Required: true},
+					&cli.StringFlag{Name: "type", Usage: "Share type: secret, file, folder, object, envelope", Required: true},
 					&cli.StringFlag{Name: "resource", Aliases: []string{"r"}, Usage: "Resource name or ID", Required: true},
 					&cli.StringFlag{Name: "recipient", Usage: "Recipient identity ID"},
 					&cli.DurationFlag{Name: "expires-in", Usage: "Share expiration"},
@@ -1137,6 +1138,92 @@ func (a *App) shareCommands() *cli.Command {
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
 					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Output file", Required: true},
+				},
+			},
+			{
+				Name:   "import",
+				Usage:  "Import offline share package",
+				Before: a.gate.RequireScopes(types.ScopeShareAccept),
+				Action: commands.ShareImport,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Usage: "Input share package file", Required: true},
+					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Optional output file for imported payload"},
+					&cli.StringFlag{Name: "password", Usage: "Recipient password (if omitted, prompt securely)"},
+				},
+			},
+			{
+				Name:   "qr-generate",
+				Usage:  "Generate QR code for share accept URL/payload",
+				Before: a.gate.RequireScopes(types.ScopeShareExport),
+				Action: commands.ShareQRGenerate,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+					&cli.StringFlag{Name: "api-url", Usage: "Base API URL for online accept (e.g. https://host:9090)"},
+					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Output PNG path (requires qrencode)"},
+				},
+			},
+			{
+				Name:   "qr-decode",
+				Usage:  "Decode QR image payload",
+				Before: a.gate.RequireScopes(types.ScopeShareRead),
+				Action: commands.ShareQRDecode,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "input", Aliases: []string{"i"}, Usage: "Input QR image file (requires zbarimg)", Required: true},
+				},
+			},
+			{
+				Name:   "lan-send",
+				Usage:  "Serve an encrypted share package over local LAN HTTP",
+				Before: a.gate.RequireScopes(types.ScopeShareExport),
+				Action: commands.ShareLANSend,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Share ID", Required: true},
+					&cli.StringFlag{Name: "bind", Usage: "Listen address (e.g. 0.0.0.0:8787)", Value: "0.0.0.0:8787"},
+					&cli.StringFlag{Name: "api-url", Usage: "Advertised base URL override (e.g. http://192.168.1.10:8787)"},
+					&cli.DurationFlag{Name: "ttl", Usage: "How long server stays up waiting for receiver", Value: 10 * time.Minute},
+					&cli.BoolFlag{Name: "qr", Usage: "Render URL as terminal QR if qrencode is installed"},
+				},
+			},
+			{
+				Name:   "lan-receive",
+				Usage:  "Fetch an encrypted share package from LAN URL and import it",
+				Before: a.gate.RequireScopes(types.ScopeShareAccept),
+				Action: commands.ShareLANReceive,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "url", Usage: "Package URL from sender", Required: true},
+					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Optional output file for imported payload"},
+					&cli.StringFlag{Name: "password", Usage: "Recipient password (if omitted, prompt securely)"},
+				},
+			},
+			{
+				Name:   "webrtc-offer",
+				Usage:  "Automatic WebRTC sender (optional share create + offer/answer handshake + transfer)",
+				Before: a.gate.RequireScopes(types.ScopeShareExport),
+				Action: commands.ShareWebRTCOffer,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "id", Usage: "Existing share ID (if omitted, create one using --type/--resource/--recipient)"},
+					&cli.StringFlag{Name: "type", Usage: "Share type when creating: secret, file, folder, object, envelope"},
+					&cli.StringFlag{Name: "resource", Usage: "Resource name/path/ID when creating share"},
+					&cli.StringFlag{Name: "recipient", Usage: "Recipient identity ID when creating share"},
+					&cli.StringFlag{Name: "bind", Usage: "Listen address (e.g. 0.0.0.0:8789)", Value: "0.0.0.0:8789"},
+					&cli.StringFlag{Name: "api-url", Usage: "Advertised base URL override (e.g. http://192.168.1.10:8789)"},
+					&cli.DurationFlag{Name: "ttl", Usage: "How long signaling endpoint is kept alive", Value: 10 * time.Minute},
+					&cli.BoolFlag{Name: "qr", Usage: "Render receiver URL as terminal QR if qrencode is installed"},
+					&cli.StringFlag{Name: "stun", Usage: "STUN URL", Value: "stun:stun.l.google.com:19302"},
+					&cli.DurationFlag{Name: "timeout", Usage: "Overall timeout", Value: 5 * time.Minute},
+				},
+			},
+			{
+				Name:   "webrtc-answer",
+				Usage:  "Automatic WebRTC receiver (fetch offer URL, send answer, receive/import package)",
+				Before: a.gate.RequireScopes(types.ScopeShareAccept),
+				Action: commands.ShareWebRTCAnswer,
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "url", Usage: "Sender URL (from webrtc-offer output)", Required: true},
+					&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Usage: "Optional output file for imported payload"},
+					&cli.StringFlag{Name: "password", Usage: "Recipient password (if omitted, prompt securely)"},
+					&cli.StringFlag{Name: "stun", Usage: "STUN URL", Value: "stun:stun.l.google.com:19302"},
+					&cli.DurationFlag{Name: "timeout", Usage: "Overall timeout", Value: 5 * time.Minute},
 				},
 			},
 		},

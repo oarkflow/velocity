@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oarkflow/velocity/internal/secretr/core/crypto"
 	"github.com/oarkflow/velocity/internal/secretr/storage"
 )
 
@@ -21,12 +22,18 @@ func TestOfflinePackageExportImport(t *testing.T) {
 	m := NewManager(ManagerConfig{Store: store})
 	ctx := context.Background()
 
-	recipient := []byte("abcdefghijklmnopqrstuvwxyz123456")
+	ce := crypto.NewEngine("")
+	recipientPub, recipientPriv, err := ce.GenerateX25519KeyPair()
+	if err != nil {
+		t.Fatalf("generate x25519 keys: %v", err)
+	}
+	defer recipientPriv.Free()
+
 	shareObj, err := m.CreateShare(ctx, CreateShareOptions{
 		Type:            "secret",
 		ResourceID:      "db.password",
 		CreatorID:       "creator-1",
-		RecipientPubKey: recipient,
+		RecipientPubKey: recipientPub,
 		ExpiresIn:       time.Hour,
 	})
 	if err != nil {
@@ -36,7 +43,7 @@ func TestOfflinePackageExportImport(t *testing.T) {
 	pkg, err := m.CreateOfflinePackage(ctx, OfflinePackageOptions{
 		ShareID:         shareObj.ID,
 		ResourceData:    []byte("super-secret"),
-		RecipientPubKey: recipient,
+		RecipientPubKey: recipientPub,
 		ExpiresIn:       time.Hour,
 	})
 	if err != nil {
@@ -48,7 +55,7 @@ func TestOfflinePackageExportImport(t *testing.T) {
 		t.Fatalf("export offline package: %v", err)
 	}
 
-	imported, err := m.ImportOfflinePackage(ctx, data, recipient)
+	imported, err := m.ImportOfflinePackage(ctx, data, recipientPriv.Bytes())
 	if err != nil {
 		t.Fatalf("import offline package: %v", err)
 	}

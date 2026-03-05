@@ -960,15 +960,57 @@
     ]
   },
   {
+    "path": "share import",
+    "scopes": [
+      "share:accept"
+    ]
+  },
+  {
+    "path": "share lan-receive",
+    "scopes": [
+      "share:accept"
+    ]
+  },
+  {
+    "path": "share lan-send",
+    "scopes": [
+      "share:export"
+    ]
+  },
+  {
     "path": "share list",
     "scopes": [
       "share:read"
     ]
   },
   {
+    "path": "share qr-decode",
+    "scopes": [
+      "share:read"
+    ]
+  },
+  {
+    "path": "share qr-generate",
+    "scopes": [
+      "share:export"
+    ]
+  },
+  {
     "path": "share revoke",
     "scopes": [
       "share:revoke"
+    ]
+  },
+  {
+    "path": "share webrtc-answer",
+    "scopes": [
+      "share:accept"
+    ]
+  },
+  {
+    "path": "share webrtc-offer",
+    "scopes": [
+      "share:export"
     ]
   },
   {

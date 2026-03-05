@@ -24,9 +24,9 @@ var (
 
 // Manager handles secure sharing operations
 type Manager struct {
-	store      *storage.Store
-	crypto     *crypto.Engine
-	shareStore *storage.TypedStore[types.Share]
+	store        *storage.Store
+	crypto       *crypto.Engine
+	shareStore   *storage.TypedStore[types.Share]
 	packageStore *storage.TypedStore[OfflinePackage]
 }
 
@@ -98,7 +98,7 @@ func (m *Manager) CreateShare(ctx context.Context, opts CreateShareOptions) (*ty
 
 // CreateShareOptions holds share creation options
 type CreateShareOptions struct {
-	Type            string   // "secret" or "file"
+	Type            string // "secret" or "file"
 	ResourceID      types.ID
 	CreatorID       types.ID
 	RecipientID     *types.ID
@@ -282,11 +282,23 @@ func (m *Manager) CreateOfflinePackage(ctx context.Context, opts OfflinePackageO
 		return nil, err
 	}
 
-	// Encrypt the package key for the recipient
-	encryptedKey, err := m.crypto.Encrypt(opts.RecipientPubKey[:32], packageKey.Bytes(), nil)
+	// Encrypt the package key for the recipient via X25519 shared secret.
+	ephemPub, ephemPriv, err := m.crypto.GenerateX25519KeyPair()
 	if err != nil {
 		return nil, err
 	}
+	defer ephemPriv.Free()
+	sharedSecret, err := m.crypto.ComputeSharedSecret(ephemPriv.Bytes(), opts.RecipientPubKey)
+	if err != nil {
+		return nil, err
+	}
+	defer sharedSecret.Free()
+	encryptedDEK, err := m.crypto.Encrypt(sharedSecret.Bytes(), packageKey.Bytes(), nil)
+	if err != nil {
+		return nil, err
+	}
+	// Format: [ephemeral_pub_key(32)][encrypted_package_key]
+	encryptedKey := append(ephemPub, encryptedDEK...)
 
 	id, _ := m.crypto.GenerateRandomID()
 	hash := m.crypto.Hash(encryptedData)
@@ -359,8 +371,18 @@ func (m *Manager) ImportOfflinePackage(ctx context.Context, data []byte, recipie
 		return nil, errors.New("share: package integrity check failed")
 	}
 
-	// Decrypt the package key
-	packageKey, err := m.crypto.Decrypt(recipientPrivKey[:32], pkg.EncryptedKey, nil)
+	// Decrypt the package key via X25519 shared secret.
+	if len(pkg.EncryptedKey) < 32 {
+		return nil, errors.New("share: invalid encrypted key format")
+	}
+	ephemPub := pkg.EncryptedKey[:32]
+	cipherDEK := pkg.EncryptedKey[32:]
+	sharedSecret, err := m.crypto.ComputeSharedSecret(recipientPrivKey, ephemPub)
+	if err != nil {
+		return nil, errors.New("share: failed to derive shared secret")
+	}
+	defer sharedSecret.Free()
+	packageKey, err := m.crypto.Decrypt(sharedSecret.Bytes(), cipherDEK, nil)
 	if err != nil {
 		return nil, errors.New("share: failed to decrypt package key")
 	}
@@ -372,10 +394,10 @@ func (m *Manager) ImportOfflinePackage(ctx context.Context, data []byte, recipie
 	}
 
 	return &ImportResult{
-		ShareID:      pkg.ShareID,
-		Data:         decryptedData,
-		Verified:     true,
-		ImportedAt:   time.Now(),
+		ShareID:    pkg.ShareID,
+		Data:       decryptedData,
+		Verified:   true,
+		ImportedAt: time.Now(),
 	}, nil
 }
 
@@ -405,13 +427,13 @@ func (m *Manager) Reshare(ctx context.Context, originalShareID types.ID, opts Re
 
 	// Create new share with reduced permissions
 	newShare, err := m.CreateShare(ctx, CreateShareOptions{
-		Type:        original.Type,
-		ResourceID:  original.ResourceID,
-		CreatorID:   opts.ResharerID,
-		RecipientID: opts.NewRecipientID,
-		ExpiresIn:   opts.ExpiresIn,
-		MaxAccess:   opts.MaxAccess,
-		OneTime:     opts.OneTime,
+		Type:         original.Type,
+		ResourceID:   original.ResourceID,
+		CreatorID:    opts.ResharerID,
+		RecipientID:  opts.NewRecipientID,
+		ExpiresIn:    opts.ExpiresIn,
+		MaxAccess:    opts.MaxAccess,
+		OneTime:      opts.OneTime,
 		AllowReshare: false, // Don't allow further resharing
 		Metadata: types.Metadata{
 			"original_share_id": string(originalShareID),
@@ -452,8 +474,8 @@ func (m *Manager) CreateExternalShare(ctx context.Context, opts ExternalShareOpt
 		MaxAccess:  1, // External shares are one-time by default
 		OneTime:    true,
 		Metadata: types.Metadata{
-			"external":     true,
-			"access_token": string(token),
+			"external":        true,
+			"access_token":    string(token),
 			"recipient_email": opts.RecipientEmail,
 		},
 	})

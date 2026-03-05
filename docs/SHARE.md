@@ -1,13 +1,8 @@
 # SHARE Command Deep-Dive
 
-This document is the implementation-level reference for `secretr share`.
+`secretr share` provides secure sharing for `secret`, `file`, `object`, `folder`, and `envelope` resources.
 
-It covers:
-- real behavior from current code
-- required vs optional flags and positional args
-- expected resource resolution and offline package behavior
-- RBAC + entitlement + ACL gating
-- API parity and known defects
+This guide is implementation-accurate for current CLI/API behavior, including offline packages, LAN transfer, and automatic WebRTC handshake.
 
 ## 1. Command Surface
 
@@ -20,100 +15,188 @@ Subcommands:
 - `secretr share revoke`
 - `secretr share accept`
 - `secretr share export`
+- `secretr share import`
+- `secretr share qr-generate`
+- `secretr share qr-decode`
+- `secretr share lan-send`
+- `secretr share lan-receive`
+- `secretr share webrtc-offer`
+- `secretr share webrtc-answer`
 
-Implementation sources:
+Primary implementation files:
 - `internal/secretr/cli/commands/share.go`
+- `internal/secretr/cli/app/app.go`
 - `internal/secretr/core/share/manager.go`
+- `internal/secretr/api/server.go`
 
-## 2. Share Model and Behavior
+## 2. Resource Types and What `--resource` Means
 
-Supported share types:
-- `secret`
-- `file`
-- `object`
-- `folder`
+`share create --type ... --resource ...` expects:
 
-Create behavior:
-- validates target resource exists before creating share
-- recipient is optional
-- if recipient is omitted, share is not recipient-bound
-- supports expiration (`--expires-in`), max access count (`--max-access`), and one-time usage (`--one-time`)
+- `secret`: secret key/name (for example `general:ENCRYPTED_SECRET`)
+- `file`: file/object ID resolvable by file vault
+- `object`: object path/id from velocity object store
+- `folder`: folder path/prefix
+- `envelope`: local envelope file path (CLI) or file-vault object id/path (API)
 
-Access behavior (`accept`):
-- fails if share revoked or expired
-- fails for one-time share already used
-- fails if max access count reached
-- if recipient is set, accessor must match recipient
-- increments `access_count` and sets `accessed_at`
+## 3. Security and Enforcement Model
 
-Export behavior (`export`):
-- fetches share payload bytes based on share type
-- requires recipient public key for offline package encryption
-- recipient key source order:
-  1. `share.recipient_key`
-  2. recipient identity public key (if recipient ID is present)
-- output file is written with mode `0600`
+Every share operation is deny-first and requires all checks to pass:
+- RBAC scope check
+- entitlement scope check
+- ACL/resource policy check
 
-Offline package format:
-- JSON of `share.OfflinePackage`
-- fields include:
-  - `id`
-  - `share_id`
-  - `encrypted_data`
-  - `encrypted_key`
-  - `recipient_pub_key`
-  - `hash`
-  - `signature`
-  - `created_at`
-  - `expires_at`
+Common required scopes:
+- `share:create`
+- `share:read`
+- `share:revoke`
+- `share:accept`
+- `share:export`
 
-## 3. Flags Matrix (Required vs Optional)
+Notes:
+- Missing scope metadata is deny.
+- Unauthorized attempts are audited.
+- Export/transfer paths enforce creator ownership.
+
+## 4. Share Lifecycle
+
+1. `create`: create share record, optional recipient binding and limits.
+2. `accept`: validates share state and records access.
+3. `export`: creates encrypted offline package (`json`).
+4. `import`: decrypts offline package with recipient encryption private key.
+5. `revoke`: creator-only revocation.
+
+State checks during `accept`:
+- revoked -> deny
+- expired -> deny
+- one-time already used -> deny
+- max access exceeded -> deny
+- recipient mismatch -> deny
+
+## 5. Offline Package Crypto
+
+Offline packages use per-package DEK and X25519 key agreement:
+- package data encrypted with random DEK
+- DEK encrypted via X25519 shared secret (recipient key + ephemeral sender key)
+- package includes ephemeral public key prefix for recipient-side key derivation
+- package hash/integrity checked on import
+
+## 6. Required vs Optional Flags Matrix
 
 ### `secretr share`
 
-| Flag | Required | Type | Notes |
+| Flag | Required | Type | Description |
 |---|---|---|---|
-| none | - | - | top-level group command |
+| none | - | - | command group only |
 
 ### `secretr share create`
 
-| Flag | Required | Type | Notes |
+| Flag | Required | Type | Description |
 |---|---|---|---|
-| `--type` | yes | `string` | `secret|file|folder|object` |
-| `--resource`, `-r` | yes | `string` | resource ID/path/name |
+| `--type` | yes | `string` | `secret|file|folder|object|envelope` |
+| `--resource`, `-r` | yes | `string` | resource key/path/id |
 | `--recipient` | no | `string` | recipient identity ID |
-| `--expires-in` | no | `duration` | share expiration |
-| `--max-access` | no | `int` | max successful accesses |
-| `--one-time` | no | `bool` | allows one successful access |
+| `--expires-in` | no | `duration` | share expiry duration |
+| `--max-access` | no | `int` | max successful accepts |
+| `--one-time` | no | `bool` | allow single accept only |
 
 ### `secretr share list`
 
-| Flag | Required | Type | Notes |
+| Flag | Required | Type | Description |
 |---|---|---|---|
-| none | - | - | lists shares created by current identity |
+| none | - | - | list shares created by current identity |
 
 ### `secretr share revoke`
 
-| Flag | Required | Type | Notes |
+| Flag | Required | Type | Description |
 |---|---|---|---|
 | `--id` | yes | `string` | share ID |
 
 ### `secretr share accept`
 
-| Flag | Required | Type | Notes |
+| Flag | Required | Type | Description |
 |---|---|---|---|
 | `--id` | yes | `string` | share ID |
 
 ### `secretr share export`
 
-| Flag | Required | Type | Notes |
+| Flag | Required | Type | Description |
 |---|---|---|---|
 | `--id` | yes | `string` | share ID |
 | `--output`, `-o` | yes | `string` | output package path |
 
-## 4. Positional Arguments Matrix
+### `secretr share import`
 
-All share commands currently use flags only.
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--input`, `-i` | yes | `string` | input package JSON file |
+| `--output`, `-o` | no | `string` | write imported raw payload to file |
+| `--password` | no | `string` | recipient password; prompts if omitted |
+
+### `secretr share qr-generate`
+
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--id` | yes | `string` | share ID |
+| `--api-url` | no | `string` | base API URL to encode |
+| `--output`, `-o` | no | `string` | png output path (requires `qrencode`) |
+
+### `secretr share qr-decode`
+
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--input`, `-i` | yes | `string` | QR image input (requires `zbarimg`) |
+
+### `secretr share lan-send`
+
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--id` | yes | `string` | share ID |
+| `--bind` | no | `string` | listen address, default `0.0.0.0:8787` |
+| `--api-url` | no | `string` | advertised URL override |
+| `--ttl` | no | `duration` | wait/server lifetime, default `10m` |
+| `--qr` | no | `bool` | print QR to terminal if `qrencode` exists |
+
+### `secretr share lan-receive`
+
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--url` | yes | `string` | sender package URL |
+| `--output`, `-o` | no | `string` | write imported raw payload |
+| `--password` | no | `string` | recipient password; prompts if omitted |
+
+### `secretr share webrtc-offer`
+
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--id` | conditional | `string` | existing share ID |
+| `--type` | conditional | `string` | required if `--id` omitted |
+| `--resource` | conditional | `string` | required if `--id` omitted |
+| `--recipient` | conditional | `string` | required if `--id` omitted |
+| `--bind` | no | `string` | signaling listener, default `0.0.0.0:8789` |
+| `--api-url` | no | `string` | advertised base URL override |
+| `--ttl` | no | `duration` | signaling endpoint lifetime, default `10m` |
+| `--qr` | no | `bool` | print receiver URL as QR |
+| `--stun` | no | `string` | STUN server URL |
+| `--timeout` | no | `duration` | handshake/transfer timeout |
+
+Conditional rule:
+- either `--id`
+- or all of `--type --resource --recipient`
+
+### `secretr share webrtc-answer`
+
+| Flag | Required | Type | Description |
+|---|---|---|---|
+| `--url` | yes | `string` | sender URL from `webrtc-offer` output |
+| `--output`, `-o` | no | `string` | write imported raw payload |
+| `--password` | no | `string` | recipient password; prompts if omitted |
+| `--stun` | no | `string` | STUN server URL |
+| `--timeout` | no | `duration` | handshake/transfer timeout |
+
+## 7. Positional Arguments Matrix
+
+All `share` subcommands currently use flags only.
 
 | Command | Required Positional Args | Optional Positional Args |
 |---|---|---|
@@ -123,94 +206,116 @@ All share commands currently use flags only.
 | `secretr share revoke` | none | none |
 | `secretr share accept` | none | none |
 | `secretr share export` | none | none |
+| `secretr share import` | none | none |
+| `secretr share qr-generate` | none | none |
+| `secretr share qr-decode` | none | none |
+| `secretr share lan-send` | none | none |
+| `secretr share lan-receive` | none | none |
+| `secretr share webrtc-offer` | none | none |
+| `secretr share webrtc-answer` | none | none |
 
-## 5. Copy-Paste Use Cases
+## 8. Copy-Paste Use Cases
 
-Create share for secret:
+### A) Create + list + accept + revoke
+
 ```bash
-secretr share create \
-  --type secret \
-  --resource ENCRYPTED_SECRET \
-  --recipient <RECIPIENT_ID> \
-  --expires-in 24h \
-  --max-access 3
-```
-
-Create one-time folder share:
-```bash
-secretr share create --type folder --resource /apps/demo --one-time
-```
-
-List your created shares:
-```bash
+secretr share create --type secret --resource general:ENCRYPTED_SECRET --recipient <RECIPIENT_ID> --expires-in 24h --max-access 3
 secretr share list
-```
-
-Accept incoming share:
-```bash
 secretr share accept --id <SHARE_ID>
-```
-
-Export share for offline transfer:
-```bash
-secretr share export --id <SHARE_ID> --output ./offline-share.json
-```
-
-Revoke share:
-```bash
 secretr share revoke --id <SHARE_ID>
 ```
 
-## 6. RBAC + Entitlement + ACL
+### B) Offline package export/import
 
-Current manifest scopes:
-- `share create` -> `share:create`
-- `share list` -> `share:read`
-- `share revoke` -> `share:revoke`
-- `share accept` -> `share:accept`
-- `share export` -> `share:export`
+Sender:
+```bash
+secretr share export --id <SHARE_ID> --output ./share-package.json
+```
 
-Entitlements:
-- matching `scope_slug` values are required
-- deny-first checks enforce `RBAC && Entitlement && ACL`
+Receiver:
+```bash
+secretr share import --input ./share-package.json --output ./imported.bin
+```
 
-ACL behavior:
-- resource type resolves to `share`
-- resource IDs come from `--id`/`--resource` when available
-- list operations may hit collection-level ACL edge cases in strict setups
+### C) LAN transfer (no central server)
 
-## 7. API Parity
+Sender:
+```bash
+secretr share lan-send --id <SHARE_ID> --bind 0.0.0.0:8787 --qr
+```
 
-No dedicated REST routes for share operations currently.
+Receiver:
+```bash
+secretr share lan-receive --url http://<SENDER_LAN_IP>:8787/package/<PACKAGE_ID> --output ./received.bin
+```
 
-Only generic command-dispatch route exists:
-- `POST /api/v1/commands/share/...`
-- currently returns `not_implemented`
+### D) Automatic WebRTC with existing share
 
-## 8. Audit and Observability
+Sender:
+```bash
+secretr share webrtc-offer --id <SHARE_ID> --bind 0.0.0.0:8789 --qr
+```
 
-Observed layers:
-- CLI command audit: `type=cli`, `action=command_execute`
-- authz decision audit: `type=authz`
-- API request audit: `type=api`, `action=request` (for REST usage)
+Receiver:
+```bash
+secretr share webrtc-answer --url http://<SENDER_LAN_IP>:8789/webrtc/<TOKEN> --output ./received.bin
+```
 
-## 9. Known Gaps and Defects
+### E) Automatic WebRTC create+send in one command (secret/object/envelope)
 
-1. Missing `defer c.Close()` in `ShareExport`:
-- other share handlers close client; export currently does not
+Secret:
+```bash
+secretr share webrtc-offer --type secret --resource general:ENCRYPTED_SECRET --recipient <RECIPIENT_ID> --bind 0.0.0.0:8789 --qr
+```
 
-2. Resharing control not surfaced in CLI create:
-- manager supports resharing metadata policy, but CLI create lacks explicit control for it
+Object:
+```bash
+secretr share webrtc-offer --type object --resource <OBJECT_PATH_OR_ID> --recipient <RECIPIENT_ID> --bind 0.0.0.0:8789
+```
 
-3. API parity missing:
-- share-specific HTTP endpoints are not implemented
+Envelope:
+```bash
+secretr share webrtc-offer --type envelope --resource /path/to/envelope.json --recipient <RECIPIENT_ID> --bind 0.0.0.0:8789
+```
 
-4. Collection ACL friction:
-- `share list` has no single resource ID and may deny under strict ACL rule sets
+## 9. API Parity
 
-## 10. Recommended Fixes
+Current REST routes:
+- `GET /api/v1/shares`
+- `POST /api/v1/shares`
+- `POST /api/v1/shares/accept/{id}`
+- `POST /api/v1/shares/revoke/{id}`
+- `GET /api/v1/shares/export/{id}`
+- `POST /api/v1/shares/import`
 
-1. Add `defer c.Close()` in `ShareExport` for consistency.
-2. Add explicit `--allow-reshare` (or deny-by-default metadata) in `share create`.
-3. Implement dedicated `/api/v1/shares` endpoints (create/list/accept/revoke/export).
-4. Add collection-level ACL policy for list operations.
+Behavior highlights:
+- share create validates resource type/id
+- export enforces creator ownership
+- import accepts package JSON/base64 and decrypts with recipient key
+- folder resource export supported via archive generation
+
+## 10. Troubleshooting
+
+`recipient public key is required`:
+- ensure recipient identity has encryption key metadata/public key.
+
+`ACL denied`:
+- check resource ownership, ACL grants, and route/command scope mapping.
+
+`entitlement_scope_required`:
+- license entitlements must include matching `share:*` scopes.
+
+`timeout waiting for receiver answer`:
+- verify receiver can access sender URL and both peers can establish ICE path.
+
+`zbarimg binary not found` / `qrencode binary not found`:
+- install the OS packages or avoid QR subcommands.
+
+## 11. Audit Coverage
+
+Share operations emit:
+- authz decision events (`allow`/`deny` with reason)
+- CLI/API action audit events
+- share access/revocation state changes in persistent stores
+
+Use `audit` commands/API to inspect execution history and denials.

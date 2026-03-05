@@ -3304,8 +3304,143 @@
     ]
   },
   {
+    "path": "share import",
+    "flags": [
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share lan-receive",
+    "flags": [
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "url",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share lan-send",
+    "flags": [
+      {
+        "name": "api-url",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "bind",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "qr",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "ttl",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
     "path": "share list",
     "flags": [],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share qr-decode",
+    "flags": [
+      {
+        "name": "input",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share qr-generate",
+    "flags": [
+      {
+        "name": "api-url",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -3321,6 +3456,105 @@
         "name": "id",
         "class": "resource_selector",
         "require_acl": true
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share webrtc-answer",
+    "flags": [
+      {
+        "name": "output",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "password",
+        "class": "sensitive",
+        "require_acl": false
+      },
+      {
+        "name": "stun",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "timeout",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "url",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "share webrtc-offer",
+    "flags": [
+      {
+        "name": "api-url",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "bind",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "id",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "qr",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "recipient",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "resource",
+        "class": "resource_selector",
+        "require_acl": true
+      },
+      {
+        "name": "stun",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "timeout",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "ttl",
+        "class": "control",
+        "require_acl": false
+      },
+      {
+        "name": "type",
+        "class": "control",
+        "require_acl": false
       }
     ],
     "args": [

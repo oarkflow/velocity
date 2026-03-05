@@ -2,13 +2,17 @@
 package api
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -220,11 +224,13 @@ func (s *Server) setupRoutes() {
 	s.registerRoute("/api/v1/shares/accept/", []string{http.MethodPost}, true, s.handleShareAccept)
 	s.registerRoute("/api/v1/shares/revoke/", []string{http.MethodPost}, true, s.handleShareRevoke)
 	s.registerRoute("/api/v1/shares/export/", []string{http.MethodGet}, true, s.handleShareExport)
+	s.registerRoute("/api/v1/shares/import", []string{http.MethodPost}, true, s.handleShareImport)
 	addSpec(http.MethodGet, "/api/v1/shares", []types.Scope{types.ScopeShareRead}, "share", true, false)
 	addSpec(http.MethodPost, "/api/v1/shares", []types.Scope{types.ScopeShareCreate}, "share", true, false)
 	addSpec(http.MethodPost, "/api/v1/shares/accept/", []types.Scope{types.ScopeShareAccept}, "share", true, false)
 	addSpec(http.MethodPost, "/api/v1/shares/revoke/", []types.Scope{types.ScopeShareRevoke}, "share", true, false)
 	addSpec(http.MethodGet, "/api/v1/shares/export/", []types.Scope{types.ScopeShareExport}, "share", true, false)
+	addSpec(http.MethodPost, "/api/v1/shares/import", []types.Scope{types.ScopeShareAccept}, "share", true, false)
 
 	// Monitoring endpoints
 	s.registerRoute("/api/v1/monitoring/dashboard", []string{http.MethodGet, http.MethodPost}, true, s.handleDashboard)
@@ -1192,12 +1198,19 @@ type PolicySimulateRequest struct {
 }
 
 type ShareCreateRequest struct {
-	Type        string        `json:"type"`
-	ResourceID  string        `json:"resource_id"`
-	RecipientID string        `json:"recipient_id"`
-	ExpiresIn   time.Duration `json:"expires_in"`
-	MaxAccess   int           `json:"max_access"`
-	OneTime     bool          `json:"one_time"`
+	Type            string        `json:"type"`
+	ResourceID      string        `json:"resource_id"`
+	RecipientID     string        `json:"recipient_id"`
+	RecipientPubKey string        `json:"recipient_pub_key"`
+	ExpiresIn       time.Duration `json:"expires_in"`
+	MaxAccess       int           `json:"max_access"`
+	OneTime         bool          `json:"one_time"`
+}
+
+type ShareImportRequest struct {
+	PackageB64  string `json:"package_b64"`
+	PackageJSON string `json:"package_json"`
+	Password    string `json:"password"`
 }
 
 // RateLimiter provides simple token bucket rate limiting
@@ -2135,19 +2148,31 @@ func (s *Server) handleShares(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
 			return
 		}
+		typ := strings.ToLower(strings.TrimSpace(req.Type))
+		resourceID := strings.TrimSpace(req.ResourceID)
+		if err := s.validateShareResourceForAPI(r.Context(), session, typ, resourceID); err != nil {
+			s.errorResponse(w, http.StatusBadRequest, err)
+			return
+		}
 		var recipientID *types.ID
 		if rid := strings.TrimSpace(req.RecipientID); rid != "" {
 			id := types.ID(rid)
 			recipientID = &id
 		}
+		recipientPubKey, err := s.resolveRecipientPubKeyForShareAPI(r.Context(), recipientID, strings.TrimSpace(req.RecipientPubKey))
+		if err != nil {
+			s.errorResponse(w, http.StatusBadRequest, err)
+			return
+		}
 		created, err := s.share.CreateShare(r.Context(), share.CreateShareOptions{
-			Type:        strings.TrimSpace(req.Type),
-			ResourceID:  types.ID(strings.TrimSpace(req.ResourceID)),
-			CreatorID:   session.IdentityID,
-			RecipientID: recipientID,
-			ExpiresIn:   req.ExpiresIn,
-			MaxAccess:   req.MaxAccess,
-			OneTime:     req.OneTime,
+			Type:            typ,
+			ResourceID:      types.ID(resourceID),
+			CreatorID:       session.IdentityID,
+			RecipientID:     recipientID,
+			RecipientPubKey: recipientPubKey,
+			ExpiresIn:       req.ExpiresIn,
+			MaxAccess:       req.MaxAccess,
+			OneTime:         req.OneTime,
 		})
 		if err != nil {
 			s.errorResponse(w, http.StatusBadRequest, err)
@@ -2233,9 +2258,17 @@ func (s *Server) handleShareExport(w http.ResponseWriter, r *http.Request) {
 		s.errorResponse(w, http.StatusNotFound, err)
 		return
 	}
-	if len(shareRec.RecipientKey) == 0 {
-		s.jsonError(w, http.StatusBadRequest, "invalid_input", "share recipient key is required for export")
+	if shareRec.CreatorID != session.IdentityID {
+		s.jsonError(w, http.StatusForbidden, types.ErrCodeACLDenied, "only share creator can export this share")
 		return
+	}
+	if len(shareRec.RecipientKey) == 0 {
+		recipientPubKey, err := s.resolveRecipientPubKeyForShareAPI(r.Context(), shareRec.RecipientID, "")
+		if err != nil {
+			s.errorResponse(w, http.StatusBadRequest, err)
+			return
+		}
+		shareRec.RecipientKey = recipientPubKey
 	}
 	resourceData, err := s.resolveShareResourceDataForAPI(r.Context(), session, shareRec)
 	if err != nil {
@@ -2262,6 +2295,131 @@ func (s *Server) handleShareExport(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(exported)
 }
 
+func (s *Server) handleShareImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		return
+	}
+	session, ok := s.requireSession(w, r, "Authentication required")
+	if !ok {
+		return
+	}
+	if s.share == nil || s.identity == nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "service_unavailable", "Share/identity service not available")
+		return
+	}
+	var req ShareImportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid request body")
+		return
+	}
+	var packageData []byte
+	if strings.TrimSpace(req.PackageB64) != "" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(req.PackageB64))
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, "invalid_input", "Invalid package_b64")
+			return
+		}
+		packageData = decoded
+	} else if strings.TrimSpace(req.PackageJSON) != "" {
+		packageData = []byte(strings.TrimSpace(req.PackageJSON))
+	} else {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "package_b64 or package_json is required")
+		return
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		s.jsonError(w, http.StatusBadRequest, "invalid_input", "password is required")
+		return
+	}
+	priv, err := s.identity.GetEncryptionPrivateKey(r.Context(), session.IdentityID, req.Password)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	imported, err := s.share.ImportOfflinePackage(r.Context(), packageData, priv)
+	if err != nil {
+		s.errorResponse(w, http.StatusBadRequest, err)
+		return
+	}
+	s.jsonResponse(w, http.StatusOK, map[string]any{
+		"share_id":    imported.ShareID,
+		"verified":    imported.Verified,
+		"imported_at": imported.ImportedAt,
+		"data_b64":    base64.StdEncoding.EncodeToString(imported.Data),
+	})
+}
+
+func (s *Server) resolveRecipientPubKeyForShareAPI(ctx context.Context, recipientID *types.ID, explicitB64 string) ([]byte, error) {
+	if strings.TrimSpace(explicitB64) != "" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(explicitB64))
+		if err != nil {
+			return nil, fmt.Errorf("invalid recipient_pub_key")
+		}
+		return decoded, nil
+	}
+	if recipientID == nil || *recipientID == "" {
+		return nil, nil
+	}
+	if s.identity == nil {
+		return nil, fmt.Errorf("identity service not available")
+	}
+	identity, err := s.identity.GetIdentity(ctx, *recipientID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load recipient identity: %w", err)
+	}
+	pub := identity.PublicKey
+	if len(pub) == 0 {
+		if encPubStr, ok := identity.Metadata["encryption_public_key"].(string); ok && strings.TrimSpace(encPubStr) != "" {
+			decoded, err := base64.StdEncoding.DecodeString(encPubStr)
+			if err == nil {
+				pub = decoded
+			}
+		}
+	}
+	if len(pub) == 0 {
+		return nil, fmt.Errorf("recipient public key is required")
+	}
+	return pub, nil
+}
+
+func (s *Server) validateShareResourceForAPI(ctx context.Context, session *types.Session, typ, resourceID string) error {
+	if resourceID == "" {
+		return fmt.Errorf("resource_id is required")
+	}
+	switch typ {
+	case "secret":
+		if s.secrets == nil {
+			return fmt.Errorf("secret service not available")
+		}
+		if _, err := s.secrets.GetMetadata(ctx, resourceID); err != nil {
+			return fmt.Errorf("secret resource not found: %s", resourceID)
+		}
+		return nil
+	case "file", "object", "envelope":
+		if s.files == nil {
+			return fmt.Errorf("file service not available")
+		}
+		if _, err := s.files.GetMetadata(ctx, resourceID); err != nil {
+			return fmt.Errorf("file/object resource not found: %s", resourceID)
+		}
+		return nil
+	case "folder":
+		if s.files == nil {
+			return fmt.Errorf("file service not available")
+		}
+		list, err := s.files.List(ctx, files.ListOptions{Prefix: resourceID})
+		if err != nil {
+			return fmt.Errorf("folder resource not found: %s", resourceID)
+		}
+		if len(list) == 0 {
+			return fmt.Errorf("folder resource not found: %s", resourceID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported share type %q", typ)
+	}
+}
+
 func (s *Server) resolveShareResourceDataForAPI(ctx context.Context, session *types.Session, shr *types.Share) ([]byte, error) {
 	if shr == nil {
 		return nil, fmt.Errorf("share is required")
@@ -2273,7 +2431,7 @@ func (s *Server) resolveShareResourceDataForAPI(ctx context.Context, session *ty
 		}
 		mfa := session != nil && session.MFAVerified
 		return s.secrets.Get(ctx, string(shr.ResourceID), session.IdentityID, mfa)
-	case "file", "object":
+	case "file", "object", "envelope":
 		if s.files == nil {
 			return nil, fmt.Errorf("file service not available")
 		}
@@ -2285,9 +2443,71 @@ func (s *Server) resolveShareResourceDataForAPI(ctx context.Context, session *ty
 			return nil, err
 		}
 		return buf.Bytes(), nil
+	case "folder":
+		if s.files == nil {
+			return nil, fmt.Errorf("file service not available")
+		}
+		return s.buildFolderArchiveFromFileVault(ctx, session, string(shr.ResourceID))
 	default:
 		return nil, fmt.Errorf("share export does not support type %q via API yet", shr.Type)
 	}
+}
+
+func (s *Server) buildFolderArchiveFromFileVault(ctx context.Context, session *types.Session, folder string) ([]byte, error) {
+	filesList, err := s.files.List(ctx, files.ListOptions{Prefix: folder})
+	if err != nil {
+		return nil, err
+	}
+	if len(filesList) == 0 {
+		return nil, fmt.Errorf("folder not found: %s", folder)
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	base := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(folder)), "/")
+	if base != "" && !strings.HasSuffix(base, "/") {
+		base += "/"
+	}
+	for _, fileMeta := range filesList {
+		if fileMeta == nil {
+			continue
+		}
+		var dataBuf bytes.Buffer
+		if err := s.files.Download(ctx, fileMeta.Name, files.DownloadOptions{
+			AccessorID:  session.IdentityID,
+			MFAVerified: session != nil && session.MFAVerified,
+		}, &dataBuf); err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, err
+		}
+		name := filepath.ToSlash(fileMeta.Name)
+		name = strings.TrimPrefix(name, base)
+		name = strings.TrimPrefix(name, "/")
+		if name == "" {
+			name = filepath.Base(fileMeta.Name)
+		}
+		hdr := &tar.Header{Name: name, Mode: 0600, Size: int64(dataBuf.Len())}
+		if err := tw.WriteHeader(hdr); err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, err
+		}
+		if _, err := io.Copy(tw, &dataBuf); err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		_ = gz.Close()
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (s *Server) handleCommandDispatch(w http.ResponseWriter, r *http.Request) {

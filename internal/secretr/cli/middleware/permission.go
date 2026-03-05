@@ -578,11 +578,18 @@ var CommandPermissions = map[string][]types.Scope{
 	"audit redact": {types.ScopeAuditRedact, types.ScopeAdminAll},
 
 	// Share commands
-	"share create": {types.ScopeShareCreate},
-	"share list":   {types.ScopeShareRead},
-	"share revoke": {types.ScopeShareRevoke},
-	"share accept": {types.ScopeShareAccept},
-	"share export": {types.ScopeShareExport},
+	"share create":        {types.ScopeShareCreate},
+	"share list":          {types.ScopeShareRead},
+	"share revoke":        {types.ScopeShareRevoke},
+	"share accept":        {types.ScopeShareAccept},
+	"share export":        {types.ScopeShareExport},
+	"share import":        {types.ScopeShareAccept},
+	"share qr-generate":   {types.ScopeShareExport},
+	"share qr-decode":     {types.ScopeShareRead},
+	"share lan-send":      {types.ScopeShareExport},
+	"share lan-receive":   {types.ScopeShareAccept},
+	"share webrtc-offer":  {types.ScopeShareExport},
+	"share webrtc-answer": {types.ScopeShareAccept},
 
 	// Backup commands
 	"backup create":   {types.ScopeBackupCreate},

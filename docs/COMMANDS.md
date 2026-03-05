@@ -3002,18 +3002,18 @@ secretr share accept --id=demo-id
 | `--one-time` | bool | no | `false` | One-time access only |
 | `--recipient` | string | no | `-` | Recipient identity ID |
 | `--resource` (`-r`) | string | yes | `-` | Resource name or ID |
-| `--type` | string | yes | `-` | Share type: secret, file |
+| `--type` | string | yes | `-` | Share type: secret, file, folder, object, envelope |
 
 Minimal Example:
 
 ```bash
-secretr share create --resource=demo --type=demo
+secretr share create --resource=general:ENCRYPTED_SECRET --type=secret
 ```
 
 Full Flags Example:
 
 ```bash
-secretr share create --expires-in=24h --max-access=1 --recipient=demo --resource=demo --type=demo
+secretr share create --expires-in=24h --max-access=1 --recipient=<IDENTITY_ID> --resource=/apps/api/config.json --type=object
 ```
 
 ### secretr share export
@@ -3035,6 +3035,74 @@ Full Flags Example:
 
 ```bash
 secretr share export --id=demo-id --output=/tmp/output.json
+```
+
+### secretr share import
+
+- **What**: Import offline share package
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--input` (`-i`) | string | yes | `-` | Input share package file |
+| `--output` (`-o`) | string | no | `-` | Optional output file for imported payload |
+| `--password` | string | no | `-` | Recipient password (prompts if omitted) |
+
+Minimal Example:
+
+```bash
+secretr share import --input=/tmp/output.json
+```
+
+Full Flags Example:
+
+```bash
+secretr share import --input=/tmp/output.json --output=/tmp/imported.bin --password='********'
+```
+
+### secretr share lan-send
+
+- **What**: Serve encrypted share package over local LAN HTTP
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--id` | string | yes | `-` | Share ID |
+| `--api-url` | string | no | `-` | Advertised base URL override |
+| `--bind` | string | no | `0.0.0.0:8787` | Listen address |
+| `--qr` | bool | no | `false` | Render terminal QR if qrencode is installed |
+| `--ttl` | duration | no | `10m0s` | Sender lifetime while waiting |
+
+Minimal Example:
+
+```bash
+secretr share lan-send --id=demo-id
+```
+
+Full Flags Example:
+
+```bash
+secretr share lan-send --id=demo-id --bind=0.0.0.0:8787 --api-url=http://192.168.1.10:8787 --ttl=10m --qr
+```
+
+### secretr share lan-receive
+
+- **What**: Fetch package from LAN sender and import
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--url` | string | yes | `-` | Package URL from sender |
+| `--output` (`-o`) | string | no | `-` | Optional output file for imported payload |
+| `--password` | string | no | `-` | Recipient password (prompts if omitted) |
+
+Minimal Example:
+
+```bash
+secretr share lan-receive --url=http://192.168.1.10:8787/package/<PACKAGE_ID>
+```
+
+Full Flags Example:
+
+```bash
+secretr share lan-receive --url=http://192.168.1.10:8787/package/<PACKAGE_ID> --output=/tmp/received.bin --password='********'
 ```
 
 ### secretr share list
@@ -3067,6 +3135,101 @@ Full Flags Example:
 
 ```bash
 secretr share revoke --id=demo-id
+```
+
+### secretr share qr-generate
+
+- **What**: Generate QR code for share accept URL/payload
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--id` | string | yes | `-` | Share ID |
+| `--api-url` | string | no | `-` | Base API URL for online accept |
+| `--output` (`-o`) | string | no | `-` | PNG output path (requires qrencode) |
+
+Minimal Example:
+
+```bash
+secretr share qr-generate --id=demo-id
+```
+
+Full Flags Example:
+
+```bash
+secretr share qr-generate --id=demo-id --api-url=https://host:9090 --output=/tmp/share.png
+```
+
+### secretr share qr-decode
+
+- **What**: Decode QR image payload
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--input` (`-i`) | string | yes | `-` | Input QR image path (requires zbarimg) |
+
+Minimal Example:
+
+```bash
+secretr share qr-decode --input=/tmp/share.png
+```
+
+Full Flags Example:
+
+```bash
+secretr share qr-decode --input=/tmp/share.png
+```
+
+### secretr share webrtc-offer
+
+- **What**: Automatic WebRTC sender (can create+transfer in one command)
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--id` | string | conditional | `-` | Existing share ID (or provide type/resource/recipient) |
+| `--type` | string | conditional | `-` | Required if `--id` omitted |
+| `--resource` | string | conditional | `-` | Required if `--id` omitted |
+| `--recipient` | string | conditional | `-` | Required if `--id` omitted |
+| `--api-url` | string | no | `-` | Advertised base URL override |
+| `--bind` | string | no | `0.0.0.0:8789` | Signaling listen address |
+| `--qr` | bool | no | `false` | Render receiver URL as QR |
+| `--stun` | string | no | `stun:stun.l.google.com:19302` | STUN URL |
+| `--timeout` | duration | no | `5m0s` | Timeout |
+| `--ttl` | duration | no | `10m0s` | Signaling endpoint lifetime |
+
+Minimal Example:
+
+```bash
+secretr share webrtc-offer --id=demo-id
+```
+
+Full Flags Example:
+
+```bash
+secretr share webrtc-offer --type=secret --resource=general:ENCRYPTED_SECRET --recipient=<IDENTITY_ID> --bind=0.0.0.0:8789 --api-url=http://192.168.1.10:8789 --ttl=10m --stun=stun:stun.l.google.com:19302 --timeout=5m --qr
+```
+
+### secretr share webrtc-answer
+
+- **What**: Automatic WebRTC receiver (fetch offer URL, send answer, receive/import)
+
+| Flag | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `--url` | string | yes | `-` | Sender URL from webrtc-offer output |
+| `--output` (`-o`) | string | no | `-` | Optional output file for imported payload |
+| `--password` | string | no | `-` | Recipient password (prompts if omitted) |
+| `--stun` | string | no | `stun:stun.l.google.com:19302` | STUN URL |
+| `--timeout` | duration | no | `5m0s` | Timeout |
+
+Minimal Example:
+
+```bash
+secretr share webrtc-answer --url=http://192.168.1.10:8789/webrtc/<TOKEN>
+```
+
+Full Flags Example:
+
+```bash
+secretr share webrtc-answer --url=http://192.168.1.10:8789/webrtc/<TOKEN> --output=/tmp/received.bin --password='********' --stun=stun:stun.l.google.com:19302 --timeout=5m
 ```
 
 ## ssh
@@ -3137,4 +3300,3 @@ Full Flags Example:
 ```bash
 secretr ssh start --profile-id=demo-id
 ```
-

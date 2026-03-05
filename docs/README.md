@@ -255,15 +255,34 @@ secretr policy simulate --policy <POLICY_ID> --action secret:delete --resource p
 
 ### 5.9 `share`
 
-Purpose: secure sharing for `secret|file|folder|object`.
+Purpose: secure sharing for `secret|file|folder|object|envelope` with:
+- direct create/list/accept/revoke
+- offline package export/import
+- LAN transfer
+- automatic WebRTC offer/answer handshake + transfer
 
 ```bash
+# Create share
 secretr share create --type secret --resource general:ENCRYPTED_SECRET --recipient <IDENTITY_ID> --one-time --max-access 1
-secretr share create --type object --resource /apps/api/config.json --recipient <IDENTITY_ID>
-secretr share list --format json
-secretr share accept --id <SHARE_ID>
+
+# Offline package
 secretr share export --id <SHARE_ID> --output /tmp/share-package.json
+secretr share import --input /tmp/share-package.json --output /tmp/imported.bin
+
+# LAN
+secretr share lan-send --id <SHARE_ID> --bind 0.0.0.0:8787 --qr
+secretr share lan-receive --url http://<SENDER_IP>:8787/package/<PACKAGE_ID> --output /tmp/received.bin
+
+# Automatic WebRTC (existing share)
+secretr share webrtc-offer --id <SHARE_ID> --bind 0.0.0.0:8789 --qr
+secretr share webrtc-answer --url http://<SENDER_IP>:8789/webrtc/<TOKEN> --output /tmp/received.bin
+
+# Automatic WebRTC (create + transfer in one command)
+secretr share webrtc-offer --type object --resource /apps/api/config.json --recipient <IDENTITY_ID> --bind 0.0.0.0:8789 --qr
 ```
+
+Detailed command reference:
+- `docs/SHARE.md`
 
 ### 5.10 `backup`
 
@@ -1171,8 +1190,15 @@ Flag Matrix
 | `secretr share accept` | `--id` | - |
 | `secretr share create` | `--resource (-r)`, `--type` | `--expires-in`, `--max-access`, `--one-time`, `--recipient` |
 | `secretr share export` | `--id`, `--output (-o)` | - |
+| `secretr share import` | `--input (-i)` | `--output (-o)`, `--password` |
+| `secretr share lan-send` | `--id` | `--api-url`, `--bind`, `--qr`, `--ttl` |
+| `secretr share lan-receive` | `--url` | `--output (-o)`, `--password` |
 | `secretr share list` | - | - |
+| `secretr share qr-decode` | `--input (-i)` | - |
+| `secretr share qr-generate` | `--id` | `--api-url`, `--output (-o)` |
 | `secretr share revoke` | `--id` | - |
+| `secretr share webrtc-answer` | `--url` | `--output (-o)`, `--password`, `--stun`, `--timeout` |
+| `secretr share webrtc-offer` | `--id` or (`--type` + `--resource` + `--recipient`) | `--api-url`, `--bind`, `--qr`, `--stun`, `--timeout`, `--ttl` |
 
 Positional Args Matrix
 
@@ -1182,8 +1208,15 @@ Positional Args Matrix
 | `secretr share accept` | - | - |
 | `secretr share create` | - | - |
 | `secretr share export` | - | - |
+| `secretr share import` | - | - |
+| `secretr share lan-send` | - | - |
+| `secretr share lan-receive` | - | - |
 | `secretr share list` | - | - |
+| `secretr share qr-decode` | - | - |
+| `secretr share qr-generate` | - | - |
 | `secretr share revoke` | - | - |
+| `secretr share webrtc-answer` | - | - |
+| `secretr share webrtc-offer` | - | - |
 
 ### ssh
 
