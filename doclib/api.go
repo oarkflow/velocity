@@ -17,6 +17,7 @@ type Manager struct {
 	Lifecycle *LifecycleManager
 	Audit     *AuditManager
 	Dispatch  *DispatchManager
+	Comment   *CommentManager
 }
 
 // NewManager creates a fully-wired Manager.
@@ -27,6 +28,7 @@ func NewManager(db *velocity.DB) *Manager {
 	share := NewShareManager(db, doc, org, audit)
 	lc := NewLifecycleManager(db, doc, audit)
 	dispatch := NewDispatchManager(db, doc, audit)
+	comment := NewCommentManager(db, doc)
 	return &Manager{
 		Org:       org,
 		Doc:       doc,
@@ -34,6 +36,7 @@ func NewManager(db *velocity.DB) *Manager {
 		Lifecycle: lc,
 		Audit:     audit,
 		Dispatch:  dispatch,
+		Comment:   comment,
 	}
 }
 
@@ -45,12 +48,19 @@ func RegisterRoutes(app *fiber.App, mgr *Manager, jwtMiddleware fiber.Handler) {
 	// ---- Org hierarchy ----
 	g.Post("/orgs", mgr.handleCreateCompany)
 	g.Get("/orgs", mgr.handleListCompanies)
+	g.Get("/orgs/:companyID", mgr.handleGetCompany)
 	g.Post("/orgs/:companyID/depts", mgr.handleCreateDept)
 	g.Get("/orgs/:companyID/depts", mgr.handleListDepts)
+	g.Get("/depts/:deptID", mgr.handleGetDept)
 	g.Post("/depts/:deptID/units", mgr.handleCreateUnit)
 	g.Get("/depts/:deptID/units", mgr.handleListUnits)
+	g.Get("/units/:unitID", mgr.handleGetUnit)
 	g.Post("/units/:unitID/members", mgr.handleAddMember)
+	g.Get("/units/:unitID/members", mgr.handleListUnitMembers)
 	g.Delete("/units/:unitID/members/:uid", mgr.handleRemoveMember)
+	g.Get("/users/:userID/memberships", mgr.handleGetUserMemberships)
+	g.Get("/users/:userID/documents", mgr.handleGetUserDocuments)
+	g.Get("/users", mgr.handleListUsers)
 
 	// ---- Documents ----
 	g.Post("/documents", mgr.handleCreateDocument)
@@ -59,6 +69,12 @@ func RegisterRoutes(app *fiber.App, mgr *Manager, jwtMiddleware fiber.Handler) {
 	g.Get("/documents/:docID/content", mgr.handleGetContent)
 	g.Put("/documents/:docID", mgr.handleUpdateDocument)
 	g.Delete("/documents/:docID", mgr.handleDeleteDocument)
+	g.Get("/documents/:docID/related", mgr.handleGetRelated)
+	g.Post("/documents/:docID/comments", mgr.handleAddComment)
+	g.Get("/documents/:docID/comments", mgr.handleListComments)
+
+	// ---- Dashboard ----
+	g.Get("/dashboard/stats", mgr.handleDashboardStats)
 
 	// ---- Lifecycle ----
 	g.Put("/documents/:docID/status", mgr.handleTransitionStatus)
@@ -585,6 +601,180 @@ func (m *Manager) handleGetEnvelope(c fiber.Ctx) error {
 		return fiberErr(err)
 	}
 	return c.JSON(envelope)
+}
+
+// ============================================================
+// New org detail handlers
+// ============================================================
+
+func (m *Manager) handleGetCompany(c fiber.Ctx) error {
+	companyID := c.Params("companyID")
+	company, err := m.Org.GetCompany(companyID)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(company)
+}
+
+func (m *Manager) handleGetDept(c fiber.Ctx) error {
+	deptID := c.Params("deptID")
+	dept, err := m.Org.GetDepartment(deptID)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(dept)
+}
+
+func (m *Manager) handleGetUnit(c fiber.Ctx) error {
+	unitID := c.Params("unitID")
+	unit, err := m.Org.GetUnit(unitID)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(unit)
+}
+
+func (m *Manager) handleListUnitMembers(c fiber.Ctx) error {
+	unitID := c.Params("unitID")
+	members, err := m.Org.ListUnitMembers(unitID)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(fiber.Map{"members": members, "total": len(members)})
+}
+
+func (m *Manager) handleGetUserMemberships(c fiber.Ctx) error {
+	userID := c.Params("userID")
+	memberships, err := m.Org.GetMemberships(userID)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(fiber.Map{"memberships": memberships, "total": len(memberships)})
+}
+
+func (m *Manager) handleGetUserDocuments(c fiber.Ctx) error {
+	userID := c.Params("userID")
+	actor := actorFromCtx(c)
+	f := DocumentFilter{
+		RequesterID: actor,
+		OwnerUserID: userID,
+		Limit:       fiber.Query[int](c, "limit", 50),
+		Offset:      fiber.Query[int](c, "offset", 0),
+	}
+	docs, err := m.Doc.QueryDocuments(f)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(fiber.Map{"documents": docs, "total": len(docs)})
+}
+
+func (m *Manager) handleListUsers(c fiber.Ctx) error {
+	users, err := m.Org.ListAllUsers()
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(fiber.Map{"users": users, "total": len(users)})
+}
+
+// ============================================================
+// Related documents handler
+// ============================================================
+
+func (m *Manager) handleGetRelated(c fiber.Ctx) error {
+	docID := c.Params("docID")
+	actor := actorFromCtx(c)
+	if !m.Doc.CanAccess(actor, docID, "read") {
+		return fiber.NewError(fiber.StatusForbidden, "access denied")
+	}
+	limit := fiber.Query[int](c, "limit", 10)
+	related, err := m.Doc.FindRelated(docID, actor, limit)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(fiber.Map{"documents": related, "total": len(related)})
+}
+
+// ============================================================
+// Comment handlers
+// ============================================================
+
+func (m *Manager) handleAddComment(c fiber.Ctx) error {
+	docID := c.Params("docID")
+	actor := actorFromCtx(c)
+	if !m.Doc.CanAccess(actor, docID, "read") {
+		return fiber.NewError(fiber.StatusForbidden, "access denied")
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.Bind().Body(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid JSON")
+	}
+	comment, err := m.Comment.AddComment(docID, actor, req.Content)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(comment)
+}
+
+func (m *Manager) handleListComments(c fiber.Ctx) error {
+	docID := c.Params("docID")
+	actor := actorFromCtx(c)
+	if !m.Doc.CanAccess(actor, docID, "read") {
+		return fiber.NewError(fiber.StatusForbidden, "access denied")
+	}
+	comments, err := m.Comment.ListComments(docID)
+	if err != nil {
+		return fiberErr(err)
+	}
+	return c.JSON(fiber.Map{"comments": comments, "total": len(comments)})
+}
+
+// ============================================================
+// Dashboard stats handler
+// ============================================================
+
+func (m *Manager) handleDashboardStats(c fiber.Ctx) error {
+	actor := actorFromCtx(c)
+	f := DocumentFilter{RequesterID: actor, Limit: 1000}
+	docs, err := m.Doc.QueryDocuments(f)
+	if err != nil {
+		return fiberErr(err)
+	}
+
+	byStatus := make(map[string]int)
+	byClassification := make(map[string]int)
+	var recent []*DocumentMeta
+	for _, d := range docs {
+		byStatus[string(d.Status)]++
+		byClassification[string(d.ClassificationLevel)]++
+	}
+
+	// Recent docs: last 10 by created_at (docs are unsorted, so find top 10)
+	if len(docs) > 0 {
+		// Copy and sort by created_at desc
+		sorted := make([]*DocumentMeta, len(docs))
+		copy(sorted, docs)
+		for i := 0; i < len(sorted); i++ {
+			for j := i + 1; j < len(sorted); j++ {
+				if sorted[j].CreatedAt.After(sorted[i].CreatedAt) {
+					sorted[i], sorted[j] = sorted[j], sorted[i]
+				}
+			}
+		}
+		limit := 10
+		if len(sorted) < limit {
+			limit = len(sorted)
+		}
+		recent = sorted[:limit]
+	}
+
+	return c.JSON(fiber.Map{
+		"total_documents":     len(docs),
+		"by_status":           byStatus,
+		"by_classification":   byClassification,
+		"recent_documents":    recent,
+	})
 }
 
 // ============================================================

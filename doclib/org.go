@@ -288,6 +288,42 @@ func (m *OrgManager) IsManagerOrHead(userID, unitID string) bool {
 	return dept.HeadUserID == userID
 }
 
+// ListUnitMembers returns all active memberships for a given unit.
+func (m *OrgManager) ListUnitMembers(unitID string) ([]*Membership, error) {
+	keys, err := m.db.Keys(orgMembershipPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*Membership, 0)
+	for _, k := range keys {
+		var mem Membership
+		if err := m.get(k, &mem); err == nil && mem.Active && mem.UnitID == unitID {
+			out = append(out, &mem)
+		}
+	}
+	return out, nil
+}
+
+// ListAllUsers returns all unique user IDs from active memberships.
+func (m *OrgManager) ListAllUsers() ([]string, error) {
+	keys, err := m.db.Keys(orgMembershipPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	for _, k := range keys {
+		var mem Membership
+		if err := m.get(k, &mem); err == nil && mem.Active {
+			seen[mem.UserID] = struct{}{}
+		}
+	}
+	users := make([]string, 0, len(seen))
+	for u := range seen {
+		users = append(users, u)
+	}
+	return users, nil
+}
+
 // ---- helpers ----
 
 func (m *OrgManager) put(key string, v interface{}) error {
