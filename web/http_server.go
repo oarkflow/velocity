@@ -24,6 +24,7 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/recover"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/doclib"
 )
 
 // HTTPServer represents an HTTP server for the Velocity database
@@ -82,6 +83,11 @@ func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer
 
 	server.setupRoutes()
 	server.setupObjectStorageRoutes()
+
+	// Mount document library routes.
+	doclibMgr := doclib.NewManager(db)
+	doclib.RegisterRoutes(app, doclibMgr, server.jwtAuthMiddleware())
+
 	return server
 }
 
@@ -231,6 +237,8 @@ func (s *HTTPServer) handleLogin(c fiber.Ctx) error {
 		"username": user.Username,
 		"role":     user.Role,
 		"tenant":   user.Tenant,
+		"unit_id":  user.UnitID,
+		"dept_id":  user.DeptID,
 		"exp":      time.Now().Add(24 * time.Hour).Unix(), // Token expires in 24 hours
 		"iat":      time.Now().Unix(),
 	})
@@ -251,6 +259,8 @@ func (s *HTTPServer) handleLogin(c fiber.Ctx) error {
 			"email":    user.Email,
 			"role":     user.Role,
 			"tenant":   user.Tenant,
+			"unit_id":  user.UnitID,
+			"dept_id":  user.DeptID,
 		},
 	})
 }

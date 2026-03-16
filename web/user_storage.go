@@ -25,6 +25,8 @@ type User struct {
 	Tenant    string    `db:"tenant" json:"tenant"`
 	Namespace string    `db:"namespace" json:"namespace"`
 	Scope     string    `db:"scope" json:"scope"`
+	UnitID    string    `db:"unit_id" json:"unit_id"`
+	DeptID    string    `db:"dept_id" json:"dept_id"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
@@ -102,6 +104,8 @@ func setupUserTables(db *squealx.DB) error {
 		tenant TEXT NOT NULL DEFAULT 'default-company',
 		namespace TEXT NOT NULL DEFAULT 'default-namespace',
 		scope TEXT NOT NULL DEFAULT 'default-scope',
+		unit_id TEXT NOT NULL DEFAULT '',
+		dept_id TEXT NOT NULL DEFAULT '',
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
@@ -112,8 +116,14 @@ func setupUserTables(db *squealx.DB) error {
 	`
 
 	// Use Exec since there are no named parameters in the schema string
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	// Idempotent migrations: add unit_id / dept_id to pre-existing databases.
+	for _, col := range []string{"unit_id", "dept_id"} {
+		_, _ = db.Exec("ALTER TABLE users ADD COLUMN " + col + " TEXT NOT NULL DEFAULT ''")
+	}
+	return nil
 }
 
 // setupDefaultRoles sets up default roles and permissions
@@ -169,8 +179,8 @@ func (s *SQLiteUserStorage) CreateUser(ctx context.Context, user *User) error {
 	user.Password = hashed
 
 	query := `
-		INSERT INTO users (username, email, password, role, tenant, namespace, scope, created_at, updated_at)
-		VALUES (:username, :email, :password, :role, :tenant, :namespace, :scope, :created_at, :updated_at)
+		INSERT INTO users (username, email, password, role, tenant, namespace, scope, unit_id, dept_id, created_at, updated_at)
+		VALUES (:username, :email, :password, :role, :tenant, :namespace, :scope, :unit_id, :dept_id, :created_at, :updated_at)
 	`
 
 	_, err = s.db.NamedExecContext(ctx, query, user)
@@ -232,6 +242,8 @@ func (s *SQLiteUserStorage) UpdateUser(ctx context.Context, user *User) error {
 			tenant = :tenant,
 			namespace = :namespace,
 			scope = :scope,
+			unit_id = :unit_id,
+			dept_id = :dept_id,
 			updated_at = :updated_at
 		WHERE id = :id
 	`
