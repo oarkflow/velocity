@@ -1,0 +1,1555 @@
+package velocity
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/oarkflow/previewer"
+)
+
+const (
+	// Object storage prefixes
+	ObjectDataPrefix    = "obj:data:"
+	ObjectMetaPrefix    = "obj:meta:"
+	ObjectVersionPrefix = "obj:version:"
+	ObjectACLPrefix     = "obj:acl:"
+	ObjectFolderPrefix  = "obj:folder:"
+	ObjectIndexPrefix   = "obj:index:"
+
+	// Folder separator
+	FolderSeparator = "/"
+
+	// Default version
+	DefaultVersion = "v1"
+)
+
+var (
+	ErrObjectNotFound = errors.New("object not found")
+	ErrObjectExists   = errors.New("object already exists")
+	ErrInvalidPath    = errors.New("invalid object path")
+	ErrAccessDenied   = errors.New("access denied")
+	ErrInvalidVersion = errors.New("invalid version")
+	ErrFolderNotEmpty = errors.New("folder not empty")
+)
+
+// ObjectMetadata represents metadata for a stored object
+type ObjectMetadata struct {
+	ObjectID       string            `json:"object_id"`
+	Path           string            `json:"path"`
+	Folder         string            `json:"folder"`
+	Name           string            `json:"name"`
+	ContentType    string            `json:"content_type"`
+	Size           int64             `json:"size"`
+	Hash           string            `json:"hash"` // SHA256 hash
+	Encrypted      bool              `json:"encrypted"`
+	EncryptionAlgo string            `json:"encryption_algo,omitempty"`
+	Version        string            `json:"version"`
+	VersionID      string            `json:"version_id"`
+	IsLatest       bool              `json:"is_latest"`
+	CreatedAt      time.Time         `json:"created_at"`
+	ModifiedAt     time.Time         `json:"modified_at"`
+	CreatedBy      string            `json:"created_by"`
+	ModifiedBy     string            `json:"modified_by"`
+	Tags           map[string]string `json:"tags,omitempty"`
+	CustomMetadata map[string]string `json:"custom_metadata,omitempty"`
+	Checksum       string            `json:"checksum"`
+	StorageClass   string            `json:"storage_class"`
+}
+
+// ObjectACL represents access control for an object
+type ObjectACL struct {
+	ObjectID    string              `json:"object_id"`
+	Owner       string              `json:"owner"`
+	Permissions map[string][]string `json:"permissions"` // user/role -> []permission
+	Public      bool                `json:"public"`
+	CreatedAt   time.Time           `json:"created_at"`
+	ModifiedAt  time.Time           `json:"modified_at"`
+}
+
+// Permission constants
+const (
+	PermissionRead   = "read"
+	PermissionWrite  = "write"
+	PermissionDelete = "delete"
+	PermissionACL    = "acl"
+	PermissionFull   = "full"
+)
+
+// ObjectVersion represents a version of an object
+type ObjectVersion struct {
+	VersionID    string    `json:"version_id"`
+	ObjectID     string    `json:"object_id"`
+	Size         int64     `json:"size"`
+	Hash         string    `json:"hash"`
+	CreatedAt    time.Time `json:"created_at"`
+	CreatedBy    string    `json:"created_by"`
+	IsLatest     bool      `json:"is_latest"`
+	DeleteMarker bool      `json:"delete_marker"`
+}
+
+// FolderMetadata represents a folder/directory
+type FolderMetadata struct {
+	Path       string            `json:"path"`
+	Name       string            `json:"name"`
+	Parent     string            `json:"parent"`
+	CreatedAt  time.Time         `json:"created_at"`
+	CreatedBy  string            `json:"created_by"`
+	ModifiedAt time.Time         `json:"modified_at"`
+	Tags       map[string]string `json:"tags,omitempty"`
+}
+
+// ObjectListOptions for filtering and pagination
+type ObjectListOptions struct {
+	Prefix     string
+	Folder     string
+	MaxKeys    int
+	StartAfter string
+	Recursive  bool
+	IncludeACL bool
+	User       string // for permission filtering
+}
+
+// StoreObject stores an object with zero-trust security
+func (db *DB) StoreObject(path, contentType, user string, data []byte, opts *ObjectOptions) (*ObjectMetadata, error) {
+	return db.StoreObjectStream(path, contentType, user, bytes.NewReader(data), int64(len(data)), opts)
+}
+
+// ObjectOptions for storing objects
+type ObjectOptions struct {
+	Version         string
+	Tags            map[string]string
+	CustomMetadata  map[string]string
+	Encrypt         bool
+	ACL             *ObjectACL
+	StorageClass    string
+	SystemOperation bool // Skip compliance checks for system operations
+}
+
+// StoreObjectStream stores an object from a stream with encryption and versioning
+func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, size int64, opts *ObjectOptions) (*ObjectMetadata, error) {
+	if path == "" {
+		return nil, ErrInvalidPath
+	}
+
+	// Validate and normalize path
+	path = normalizePath(path)
+	if !isValidPath(path) {
+		return nil, ErrInvalidPath
+	}
+
+	if opts == nil {
+		opts = &ObjectOptions{
+			Version: DefaultVersion,
+			Encrypt: true,
+		}
+	}
+
+	if opts.Version == "" {
+		opts.Version = DefaultVersion
+	}
+
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("write", path, user, opts.Encrypt, opts.CustomMetadata, nil, opts.SystemOperation); err != nil {
+		return nil, err
+	}
+
+	// Ensure object storage directory exists
+	if db.filesDir == "" {
+		db.filesDir = filepath.Join(db.path, "files")
+		os.MkdirAll(db.filesDir, 0755)
+	}
+
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	if err := os.MkdirAll(objectsDir, 0700); err != nil {
+		return nil, err
+	}
+
+	// Generate object ID
+	objectID := generateObjectID()
+	versionID := generateVersionID()
+
+	// Create folder structure if needed
+	folder := extractFolder(path)
+	if folder != "" {
+		// Use system user if this is a system operation to bypass compliance
+		folderUser := user
+		if opts.SystemOperation {
+			folderUser = "system"
+		}
+		if err := db.CreateFolder(folder, folderUser); err != nil && !errors.Is(err, ErrObjectExists) {
+			return nil, err
+		}
+	}
+
+	// Create temp file
+	tmp, err := os.CreateTemp(objectsDir, "upload-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tmp.Close(); _ = os.Remove(tmp.Name()) }()
+
+	// Compute hash while copying
+	hash := sha256.New()
+	// Track plaintext bytes read
+	var plaintextBytes int64
+	cr := &countReader{R: r, Count: &plaintextBytes}
+	tee := io.TeeReader(cr, hash)
+
+	if opts.Encrypt && db.crypto != nil {
+		// Securely derive key if needed or use objectID
+		encryptedReader := db.crypto.NewEncryptReader(tee, []byte(objectID))
+		_, err = io.Copy(tmp, encryptedReader)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		_, err = io.Copy(tmp, tee)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	size = plaintextBytes
+	hashStr := hex.EncodeToString(hash.Sum(nil))
+
+	// Create metadata
+	meta := &ObjectMetadata{
+		ObjectID:       objectID,
+		Path:           path,
+		Folder:         folder,
+		Name:           extractName(path),
+		ContentType:    contentType,
+		Size:           size,
+		Hash:           hashStr,
+		Encrypted:      opts.Encrypt && db.crypto != nil,
+		EncryptionAlgo: "ChaCha20-Poly1305",
+		Version:        opts.Version,
+		VersionID:      versionID,
+		IsLatest:       true,
+		CreatedAt:      time.Now().UTC(),
+		ModifiedAt:     time.Now().UTC(),
+		CreatedBy:      user,
+		ModifiedBy:     user,
+		Tags:           opts.Tags,
+		CustomMetadata: opts.CustomMetadata,
+		Checksum:       hashStr,
+		StorageClass:   opts.StorageClass,
+	}
+
+	if meta.StorageClass == "" {
+		meta.StorageClass = "STANDARD"
+	}
+
+	// Move temp file to final location
+	finalPath := filepath.Join(objectsDir, objectID, versionID)
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0700); err != nil {
+		return nil, err
+	}
+
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmp.Name(), finalPath); err != nil {
+		return nil, err
+	}
+
+	// Check if object already exists and mark old versions as not latest
+	existingMeta, err := db.GetObjectMetadata(path)
+	if err == nil {
+		existingMeta.IsLatest = false
+		if err := db.saveObjectMetadata(existingMeta); err != nil {
+			// Log error but continue
+		}
+	}
+
+	// Store metadata
+	if err := db.saveObjectMetadata(meta); err != nil {
+		_ = os.Remove(finalPath)
+		return nil, err
+	}
+
+	// Store version info
+	version := &ObjectVersion{
+		VersionID:    versionID,
+		ObjectID:     objectID,
+		Size:         size,
+		Hash:         hashStr,
+		CreatedAt:    time.Now().UTC(),
+		CreatedBy:    user,
+		IsLatest:     true,
+		DeleteMarker: false,
+	}
+	if err := db.saveObjectVersion(path, version); err != nil {
+		// Log error but continue
+	}
+
+	// Create or update ACL
+	if opts.ACL != nil {
+		if err := db.SetObjectACL(path, opts.ACL); err != nil {
+			// Log error but continue
+		}
+	} else {
+		// Create default ACL
+		defaultACL := &ObjectACL{
+			ObjectID:    objectID,
+			Owner:       user,
+			Permissions: map[string][]string{user: {PermissionFull}},
+			Public:      false,
+			CreatedAt:   time.Now().UTC(),
+			ModifiedAt:  time.Now().UTC(),
+		}
+		if err := db.SetObjectACL(path, defaultACL); err != nil {
+			// Log error but continue
+		}
+	}
+
+	// Create index entry for path lookup
+	if err := db.indexObject(path, objectID); err != nil {
+		// Log error but continue
+	}
+
+	return meta, nil
+}
+
+// GetObject retrieves an object by path
+// GetObjectInternal retrieves an object bypassing compliance checks.
+// This is an internal method for system operations (retention, backups, etc.)
+// and should NOT be exposed to external users.
+func (db *DB) GetObjectInternal(path, user string) ([]byte, *ObjectMetadata, error) {
+	return db.getObjectWithSystemFlag(path, user, true)
+}
+
+func (db *DB) GetObject(path, user string) ([]byte, *ObjectMetadata, error) {
+	return db.getObjectWithSystemFlag(path, user, false)
+}
+
+func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte, *ObjectMetadata, error) {
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Compliance validation (bypassed for internal system operations)
+	result, err := db.validateObjectCompliance("read", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, systemOp)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Check if latest version is a delete marker by looking at version info
+	// Version keys are stored as: "obj:version:<path>:<versionID>"
+	versionPrefix := ObjectVersionPrefix + path + ":"
+	versions, err := db.Keys(versionPrefix + "*")
+	if err == nil && len(versions) > 0 {
+		// Check each version to find the latest one
+		for _, versionKey := range versions {
+			versionBytes, err := db.Get([]byte(versionKey))
+			if err == nil {
+				var version ObjectVersion
+				if json.Unmarshal(versionBytes, &version) == nil {
+					if version.IsLatest && version.DeleteMarker {
+						return nil, nil, ErrObjectNotFound
+					}
+				}
+			}
+		}
+	}
+
+	// Check permissions (bypassed for system operations)
+	if !db.hasPermissionInternal(path, user, PermissionRead, systemOp) {
+		return nil, nil, ErrAccessDenied
+	}
+
+	// Read from filesystem
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	filePath := filepath.Join(objectsDir, meta.ObjectID, meta.VersionID)
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+
+	var data []byte
+	if meta.Encrypted && db.crypto != nil {
+		dr := db.crypto.NewDecryptReader(f, []byte(meta.ObjectID))
+		data, err = io.ReadAll(dr)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		data, err = io.ReadAll(f)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Apply masking if required
+	if result != nil && result.AppliedTag != nil && db.complianceTagManager != nil {
+		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= DataClassConfidential {
+			masked := db.complianceTagManager.maskingEngine.MaskString(string(data), result.AppliedTag.DataClass)
+			data = []byte(masked)
+		}
+	}
+
+	return data, meta, nil
+}
+
+// GetObjectStream retrieves an object as a stream
+func (db *DB) GetObjectStream(path, user string) (io.ReadCloser, *ObjectMetadata, error) {
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Compliance and permissions check
+	if !db.hasPermissionInternal(path, user, PermissionRead, false) {
+		return nil, nil, ErrAccessDenied
+	}
+
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	filePath := filepath.Join(objectsDir, meta.ObjectID, meta.VersionID)
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if meta.Encrypted && db.crypto != nil {
+		dr := db.crypto.NewDecryptReader(f, []byte(meta.ObjectID))
+		return &readCloserWrapper{Reader: dr, Closer: f}, meta, nil
+	}
+
+	return f, meta, nil
+}
+
+type readCloserWrapper struct {
+	io.Reader
+	io.Closer
+}
+
+// DeleteObjectInternal deletes an object (soft delete) bypassing compliance checks.
+// This is an internal method for system operations and should NOT be exposed to external users.
+func (db *DB) DeleteObjectInternal(path, user string) error {
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return err
+	}
+
+	// Skip compliance validation for internal operations
+
+	// Create delete marker version
+	versionID := generateVersionID()
+	version := &ObjectVersion{
+		VersionID:    versionID,
+		ObjectID:     meta.ObjectID,
+		Size:         0,
+		Hash:         "",
+		CreatedAt:    time.Now().UTC(),
+		CreatedBy:    user,
+		IsLatest:     true,
+		DeleteMarker: true,
+	}
+
+	// Mark current version as not latest
+	meta.IsLatest = false
+	if err := db.saveObjectMetadata(meta); err != nil {
+		return err
+	}
+
+	// Save delete marker
+	if err := db.saveObjectVersion(path, version); err != nil {
+		return err
+	}
+
+	// Remove index
+	indexKey := []byte(ObjectIndexPrefix + path)
+	_ = db.Delete(indexKey)
+
+	return nil
+}
+
+// DeleteObject deletes an object (soft delete with version marker)
+func (db *DB) DeleteObject(path, user string) error {
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return err
+	}
+
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("delete", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, false); err != nil {
+		return err
+	}
+
+	// Check permissions
+	if !db.hasPermissionInternal(path, user, PermissionDelete, false) {
+		return ErrAccessDenied
+	}
+
+	// Create delete marker version
+	versionID := generateVersionID()
+	version := &ObjectVersion{
+		VersionID:    versionID,
+		ObjectID:     meta.ObjectID,
+		Size:         0,
+		Hash:         "",
+		CreatedAt:    time.Now().UTC(),
+		CreatedBy:    user,
+		IsLatest:     true,
+		DeleteMarker: true,
+	}
+
+	// Mark current version as not latest
+	meta.IsLatest = false
+	if err := db.saveObjectMetadata(meta); err != nil {
+		return err
+	}
+
+	// Save delete marker
+	if err := db.saveObjectVersion(path, version); err != nil {
+		return err
+	}
+
+	// Remove index
+	indexKey := []byte(ObjectIndexPrefix + path)
+	_ = db.Delete(indexKey)
+
+	return nil
+}
+
+func (db *DB) validateObjectCompliance(operation, path, user string, encrypted bool, metadata map[string]string, createdAt *time.Time, systemOp bool) (*ComplianceValidationResult, error) {
+	if db.complianceTagManager == nil {
+		return nil, nil
+	}
+
+	req := &ComplianceOperationRequest{
+		Path:      path,
+		Operation: operation,
+		Actor:     user,
+		Encrypted: encrypted,
+		Timestamp: time.Now(),
+	}
+
+	// Check if this is a system operation
+	if systemOp || strings.EqualFold(user, "retention_system") {
+		req.SystemOperation = true
+	}
+
+	if metadata != nil {
+		if sys, ok := metadata["system_operation"]; ok && strings.EqualFold(sys, "true") {
+			req.SystemOperation = true
+		}
+		if region, ok := metadata["region"]; ok {
+			req.Region = region
+		}
+		if subjectID, ok := metadata["subject_id"]; ok {
+			req.SubjectID = subjectID
+		}
+		if purpose, ok := metadata["purpose"]; ok {
+			req.Purpose = purpose
+		}
+		if reqID, ok := metadata["break_glass_request_id"]; ok {
+			req.BreakGlassRequestID = reqID
+		}
+		if mfa, ok := metadata["mfa_verified"]; ok && strings.EqualFold(mfa, "true") {
+			req.MFAVerified = true
+		}
+		if algo, ok := metadata["crypto_algorithm"]; ok {
+			req.CryptoAlgorithm = algo
+		}
+
+		if createdAt != nil && !createdAt.IsZero() {
+			ageDays := int(time.Since(*createdAt).Hours() / 24)
+			if ageDays > 0 {
+				req.DataAge = ageDays
+			}
+		}
+	}
+
+	result, err := db.complianceTagManager.ValidateOperation(context.Background(), req)
+	if err != nil {
+		return nil, err
+	}
+	if !result.Allowed {
+		return nil, ErrAccessDenied
+	}
+	return result, nil
+}
+
+// HardDeleteObject permanently deletes an object and all versions
+func (db *DB) HardDeleteObject(path, user string) error {
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return err
+	}
+
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("delete", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, false); err != nil {
+		return err
+	}
+
+	// Check permissions
+	if !db.hasPermissionInternal(path, user, PermissionDelete, false) {
+		return ErrAccessDenied
+	}
+
+	// Delete all versions from filesystem
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	objectDir := filepath.Join(objectsDir, meta.ObjectID)
+	if err := os.RemoveAll(objectDir); err != nil {
+		return err
+	}
+
+	// Delete metadata
+	metaKey := []byte(ObjectMetaPrefix + path)
+	_ = db.Delete(metaKey)
+
+	// Delete ACL
+	aclKey := []byte(ObjectACLPrefix + path)
+	_ = db.Delete(aclKey)
+
+	// Delete versions
+	versionKey := []byte(ObjectVersionPrefix + path)
+	_ = db.Delete(versionKey)
+
+	// Delete index
+	indexKey := []byte(ObjectIndexPrefix + path)
+	_ = db.Delete(indexKey)
+
+	return nil
+}
+
+// ListObjects lists objects in a folder
+func (db *DB) ListObjects(opts ObjectListOptions) ([]ObjectMetadata, error) {
+	objects := make([]ObjectMetadata, 0)
+
+	// Scan all metadata keys
+	offset := 0
+	limit := 100
+	count := 0
+	maxKeys := opts.MaxKeys
+	if maxKeys == 0 {
+		maxKeys = 1000
+	}
+
+	for {
+		keys, _ := db.KeysPage(offset, limit)
+		if len(keys) == 0 {
+			break
+		}
+
+		for _, key := range keys {
+			keyStr := string(key)
+			if !strings.HasPrefix(keyStr, ObjectMetaPrefix) {
+				continue
+			}
+
+			path := strings.TrimPrefix(keyStr, ObjectMetaPrefix)
+
+			// Apply filters
+			if opts.Prefix != "" && !strings.HasPrefix(path, opts.Prefix) {
+				continue
+			}
+
+			if opts.Folder != "" {
+				if opts.Recursive {
+					if !strings.HasPrefix(path, opts.Folder+FolderSeparator) {
+						continue
+					}
+				} else {
+					folder := extractFolder(path)
+					if folder != opts.Folder {
+						continue
+					}
+				}
+			}
+
+			if opts.StartAfter != "" && path <= opts.StartAfter {
+				continue
+			}
+
+			// Get metadata
+			raw, err := db.Get(key)
+			if err != nil {
+				continue
+			}
+
+			var meta ObjectMetadata
+			if err := json.Unmarshal(raw, &meta); err != nil {
+				continue
+			}
+
+			// Only show latest versions
+			if !meta.IsLatest {
+				continue
+			}
+
+			// Check permissions if user specified
+			if opts.User != "" && !db.hasPermissionInternal(path, opts.User, PermissionRead, false) {
+				continue
+			}
+
+			objects = append(objects, meta)
+			count++
+
+			if count >= maxKeys {
+				break
+			}
+		}
+
+		if count >= maxKeys || len(keys) < limit {
+			break
+		}
+		offset += limit
+	}
+
+	// Sort by path
+	sort.Slice(objects, func(i, j int) bool {
+		return objects[i].Path < objects[j].Path
+	})
+
+	return objects, nil
+}
+
+// CreateFolder creates a folder in the object storage
+func (db *DB) CreateFolder(path, user string) error {
+	path = normalizePath(path)
+	if !isValidPath(path) {
+		return ErrInvalidPath
+	}
+
+	// Compliance validation (system users bypass checks)
+	systemOp := strings.EqualFold(user, "system") || strings.HasSuffix(strings.ToLower(user), "_system")
+	if _, err := db.validateObjectCompliance("write", path, user, false, nil, nil, systemOp); err != nil {
+		return err
+	}
+
+	// Check if folder already exists
+	folderKey := []byte(ObjectFolderPrefix + path)
+	if db.Has(folderKey) {
+		return ErrObjectExists
+	}
+
+	// Create parent folders if needed
+	parent := extractFolder(path)
+	if parent != "" {
+		if err := db.CreateFolder(parent, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+	}
+
+	// Create folder metadata
+	folder := &FolderMetadata{
+		Path:       path,
+		Name:       extractName(path),
+		Parent:     parent,
+		CreatedAt:  time.Now().UTC(),
+		CreatedBy:  user,
+		ModifiedAt: time.Now().UTC(),
+	}
+
+	folderBytes, err := json.Marshal(folder)
+	if err != nil {
+		return err
+	}
+
+	// Use PutWithTTL(0) to ensure folder metadata never expires
+	return db.PutWithTTL(folderKey, folderBytes, 0)
+}
+
+// DeleteFolder deletes a folder (must be empty)
+func (db *DB) DeleteFolder(path, user string) error {
+	path = normalizePath(path)
+
+	// Compliance validation
+	if _, err := db.validateObjectCompliance("delete", path, user, false, nil, nil, false); err != nil {
+		return err
+	}
+
+	// Check if folder exists
+	folderKey := []byte(ObjectFolderPrefix + path)
+	if !db.Has(folderKey) {
+		return ErrObjectNotFound
+	}
+
+	// Check if folder is empty
+	opts := ObjectListOptions{
+		Folder:    path,
+		MaxKeys:   1,
+		Recursive: false,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+	if len(objects) > 0 {
+		return ErrFolderNotEmpty
+	}
+
+	return db.Delete(folderKey)
+}
+
+// GetFolder retrieves folder metadata
+func (db *DB) GetFolder(path string) (*FolderMetadata, error) {
+	path = normalizePath(path)
+
+	// Compliance validation (system user)
+	if _, err := db.validateObjectCompliance("read", path, "system", false, nil, nil, true); err != nil {
+		return nil, err
+	}
+
+	folderKey := []byte(ObjectFolderPrefix + path)
+	raw, err := db.Get(folderKey)
+	if err != nil {
+		return nil, ErrObjectNotFound
+	}
+
+	var folder FolderMetadata
+	if err := json.Unmarshal(raw, &folder); err != nil {
+		return nil, err
+	}
+
+	return &folder, nil
+}
+
+// ListFolders lists all folders or folders under a specific parent
+func (db *DB) ListFolders(parentPath string, recursive bool) ([]FolderMetadata, error) {
+	parentPath = normalizePath(parentPath)
+	folders := make([]FolderMetadata, 0)
+
+	offset := 0
+	limit := 100
+
+	for {
+		keys, _ := db.KeysPage(offset, limit)
+		if len(keys) == 0 {
+			break
+		}
+
+		for _, key := range keys {
+			keyStr := string(key)
+			if !strings.HasPrefix(keyStr, ObjectFolderPrefix) {
+				continue
+			}
+
+			path := strings.TrimPrefix(keyStr, ObjectFolderPrefix)
+
+			// Filter by parent
+			if parentPath != "" {
+				if recursive {
+					// Include all folders under parent
+					if !strings.HasPrefix(path, parentPath+FolderSeparator) && path != parentPath {
+						continue
+					}
+				} else {
+					// Only direct children
+					folder := extractFolder(path)
+					if folder != parentPath {
+						continue
+					}
+				}
+			}
+
+			raw, err := db.Get(key)
+			if err != nil {
+				continue
+			}
+
+			var folder FolderMetadata
+			if err := json.Unmarshal(raw, &folder); err != nil {
+				continue
+			}
+
+			folders = append(folders, folder)
+		}
+
+		if len(keys) < limit {
+			break
+		}
+		offset += limit
+	}
+
+	// Sort by path
+	sort.Slice(folders, func(i, j int) bool {
+		return folders[i].Path < folders[j].Path
+	})
+
+	return folders, nil
+}
+
+// FolderExists checks if a folder exists
+func (db *DB) FolderExists(path string) bool {
+	path = normalizePath(path)
+	folderKey := []byte(ObjectFolderPrefix + path)
+	return db.Has(folderKey)
+}
+
+// RenameFolder renames or moves a folder and all its contents
+func (db *DB) RenameFolder(oldPath, newPath, user string) error {
+	oldPath = normalizePath(oldPath)
+	newPath = normalizePath(newPath)
+
+	if !isValidPath(newPath) {
+		return ErrInvalidPath
+	}
+
+	// Check if source exists
+	if !db.FolderExists(oldPath) {
+		return ErrObjectNotFound
+	}
+
+	// Check if destination already exists
+	if db.FolderExists(newPath) {
+		return ErrObjectExists
+	}
+
+	// Create new parent folders if needed
+	newParent := extractFolder(newPath)
+	if newParent != "" {
+		if err := db.CreateFolder(newParent, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+	}
+
+	// Get all objects in the folder
+	opts := ObjectListOptions{
+		Folder:    oldPath,
+		Recursive: true,
+		MaxKeys:   10000,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+
+	// Move all objects
+	for _, obj := range objects {
+		// Calculate new path
+		relativePath := strings.TrimPrefix(obj.Path, oldPath+FolderSeparator)
+		newObjPath := newPath + FolderSeparator + relativePath
+
+		// Get object data
+		data, _, err := db.GetObject(obj.Path, user)
+		if err != nil {
+			continue
+		}
+
+		// Store at new location
+		_, err = db.StoreObject(newObjPath, obj.ContentType, user, data, &ObjectOptions{
+			Encrypt:        obj.Encrypted,
+			Tags:           obj.Tags,
+			CustomMetadata: obj.CustomMetadata,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Delete old object
+		_ = db.DeleteObject(obj.Path, user)
+	}
+
+	// Get all subfolders
+	subFolders, err := db.ListFolders(oldPath, true)
+	if err != nil {
+		return err
+	}
+
+	// Move all subfolders
+	for _, folder := range subFolders {
+		if folder.Path == oldPath {
+			continue
+		}
+
+		// Calculate new folder path
+		relativePath := strings.TrimPrefix(folder.Path, oldPath+FolderSeparator)
+		newFolderPath := newPath + FolderSeparator + relativePath
+
+		// Create new folder
+		if err := db.CreateFolder(newFolderPath, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+
+		// Delete old folder (force delete even if not empty)
+		oldKey := []byte(ObjectFolderPrefix + folder.Path)
+		_ = db.Delete(oldKey)
+	}
+
+	// Create the new folder
+	newFolder := &FolderMetadata{
+		Path:       newPath,
+		Name:       extractName(newPath),
+		Parent:     extractFolder(newPath),
+		CreatedAt:  time.Now().UTC(),
+		CreatedBy:  user,
+		ModifiedAt: time.Now().UTC(),
+	}
+
+	folderBytes, err := json.Marshal(newFolder)
+	if err != nil {
+		return err
+	}
+
+	newKey := []byte(ObjectFolderPrefix + newPath)
+	if err := db.PutWithTTL(newKey, folderBytes, 0); err != nil {
+		return err
+	}
+
+	// Delete the old folder
+	oldKey := []byte(ObjectFolderPrefix + oldPath)
+	return db.Delete(oldKey)
+}
+
+// GetFolderSize calculates the total size of all objects in a folder
+func (db *DB) GetFolderSize(path string, recursive bool) (int64, int, error) {
+	path = normalizePath(path)
+
+	opts := ObjectListOptions{
+		Folder:    path,
+		Recursive: recursive,
+		MaxKeys:   100000,
+	}
+
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var totalSize int64
+	for _, obj := range objects {
+		totalSize += obj.Size
+	}
+
+	return totalSize, len(objects), nil
+}
+
+// CopyFolder copies a folder and all its contents to a new location
+func (db *DB) CopyFolder(sourcePath, destPath, user string) error {
+	sourcePath = normalizePath(sourcePath)
+	destPath = normalizePath(destPath)
+
+	if !isValidPath(destPath) {
+		return ErrInvalidPath
+	}
+
+	// Check if source exists
+	if !db.FolderExists(sourcePath) {
+		return ErrObjectNotFound
+	}
+
+	// Check if destination already exists
+	if db.FolderExists(destPath) {
+		return ErrObjectExists
+	}
+
+	// Create destination folder
+	if err := db.CreateFolder(destPath, user); err != nil {
+		return err
+	}
+
+	// Get all objects in the source folder
+	opts := ObjectListOptions{
+		Folder:    sourcePath,
+		Recursive: true,
+		MaxKeys:   10000,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+
+	// Copy all objects
+	for _, obj := range objects {
+		// Calculate destination path
+		relativePath := strings.TrimPrefix(obj.Path, sourcePath+FolderSeparator)
+		destObjPath := destPath + FolderSeparator + relativePath
+
+		// Get object data
+		data, _, err := db.GetObject(obj.Path, user)
+		if err != nil {
+			continue
+		}
+
+		// Store at new location
+		_, err = db.StoreObject(destObjPath, obj.ContentType, user, data, &ObjectOptions{
+			Encrypt:        obj.Encrypted,
+			Tags:           obj.Tags,
+			CustomMetadata: obj.CustomMetadata,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	// Get all subfolders
+	subFolders, err := db.ListFolders(sourcePath, true)
+	if err != nil {
+		return err
+	}
+
+	// Copy all subfolders
+	for _, folder := range subFolders {
+		if folder.Path == sourcePath {
+			continue
+		}
+
+		// Calculate destination folder path
+		relativePath := strings.TrimPrefix(folder.Path, sourcePath+FolderSeparator)
+		destFolderPath := destPath + FolderSeparator + relativePath
+
+		// Create destination folder
+		if err := db.CreateFolder(destFolderPath, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// DeleteFolderRecursive deletes a folder and all its contents
+func (db *DB) DeleteFolderRecursive(path, user string) error {
+	path = normalizePath(path)
+
+	// Check if folder exists
+	if !db.FolderExists(path) {
+		return ErrObjectNotFound
+	}
+
+	// Get all objects in the folder
+	opts := ObjectListOptions{
+		Folder:    path,
+		Recursive: true,
+		MaxKeys:   10000,
+	}
+	objects, err := db.ListObjects(opts)
+	if err != nil {
+		return err
+	}
+
+	// Delete all objects
+	for _, obj := range objects {
+		if err := db.DeleteObject(obj.Path, user); err != nil {
+			// Continue deleting even if some fail
+			continue
+		}
+	}
+
+	// Get all subfolders (in reverse order to delete children first)
+	subFolders, err := db.ListFolders(path, true)
+	if err != nil {
+		return err
+	}
+
+	// Sort in reverse order (deepest first)
+	sort.Slice(subFolders, func(i, j int) bool {
+		return subFolders[i].Path > subFolders[j].Path
+	})
+
+	// Delete all subfolders
+	for _, folder := range subFolders {
+		folderKey := []byte(ObjectFolderPrefix + folder.Path)
+		_ = db.Delete(folderKey)
+	}
+
+	// Delete the main folder
+	folderKey := []byte(ObjectFolderPrefix + path)
+	return db.Delete(folderKey)
+}
+
+// CreateFolders creates multiple folders at once
+func (db *DB) CreateFolders(paths []string, user string) error {
+	for _, path := range paths {
+		if err := db.CreateFolder(path, user); err != nil && !errors.Is(err, ErrObjectExists) {
+			return fmt.Errorf("failed to create folder %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// GetObjectMetadata retrieves metadata for an object
+func (db *DB) GetObjectMetadata(path string) (*ObjectMetadata, error) {
+	metaKey := []byte(ObjectMetaPrefix + path)
+	metaBytes, err := db.Get(metaKey)
+	if err != nil {
+		return nil, translateObjectError(err)
+	}
+
+	var meta ObjectMetadata
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return nil, err
+	}
+
+	return &meta, nil
+}
+
+// SetObjectACL sets access control for an object
+func (db *DB) SetObjectACL(path string, acl *ObjectACL) error {
+	aclKey := []byte(ObjectACLPrefix + path)
+	aclBytes, err := json.Marshal(acl)
+	if err != nil {
+		return err
+	}
+
+	// Use PutWithTTL(0) to ensure ACL never expires
+	return db.PutWithTTL(aclKey, aclBytes, 0)
+}
+
+// GetObjectACL retrieves access control for an object
+func (db *DB) GetObjectACL(path string) (*ObjectACL, error) {
+	aclKey := []byte(ObjectACLPrefix + path)
+	aclBytes, err := db.Get(aclKey)
+	if err != nil {
+		return nil, translateObjectError(err)
+	}
+
+	var acl ObjectACL
+	if err := json.Unmarshal(aclBytes, &acl); err != nil {
+		return nil, err
+	}
+
+	return &acl, nil
+}
+
+// CheckObjectPermission verifies whether user has the requested permission on object path.
+func (db *DB) CheckObjectPermission(path, user, permission string) (bool, error) {
+	path = normalizePath(path)
+	if !isValidPath(path) {
+		return false, ErrInvalidPath
+	}
+	if _, err := db.GetObjectMetadata(path); err != nil {
+		return false, err
+	}
+	return db.hasPermissionInternal(path, user, permission, false), nil
+}
+
+// Helper functions
+
+func (db *DB) saveObjectMetadata(meta *ObjectMetadata) error {
+	metaKey := []byte(ObjectMetaPrefix + meta.Path)
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	// Use PutWithTTL(0) to ensure metadata never expires
+	return db.PutWithTTL(metaKey, metaBytes, 0)
+}
+
+func (db *DB) saveObjectVersion(path string, version *ObjectVersion) error {
+	versionKey := []byte(ObjectVersionPrefix + path + ":" + version.VersionID)
+	versionBytes, err := json.Marshal(version)
+	if err != nil {
+		return err
+	}
+	// Use PutWithTTL(0) to ensure version info never expires
+	return db.PutWithTTL(versionKey, versionBytes, 0)
+}
+
+func (db *DB) indexObject(path, objectID string) error {
+	indexKey := []byte(ObjectIndexPrefix + path)
+	// Use PutWithTTL(0) to ensure index entries never expire
+	return db.PutWithTTL(indexKey, []byte(objectID), 0)
+}
+
+// hasPermissionInternal checks permissions with optional system bypass
+func (db *DB) hasPermissionInternal(path, user, permission string, systemOp bool) bool {
+	if user == "" {
+		return false
+	}
+
+	// System operations bypass permission checks (internal use only)
+	if systemOp {
+		return true
+	}
+
+	acl, err := db.GetObjectACL(path)
+	if err != nil {
+		return false
+	}
+
+	// Check if public and read permission
+	if acl.Public && permission == PermissionRead {
+		return true
+	}
+
+	// Check if owner
+	if acl.Owner == user {
+		return true
+	}
+
+	// Check explicit permissions
+	perms, ok := acl.Permissions[user]
+	if !ok {
+		return false
+	}
+
+	for _, p := range perms {
+		if p == PermissionFull || p == permission {
+			return true
+		}
+	}
+
+	return false
+}
+
+func normalizePath(path string) string {
+	// Remove leading/trailing slashes
+	path = strings.Trim(path, FolderSeparator)
+	// Replace multiple slashes with single
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+	return path
+}
+
+func isValidPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	// Check for invalid characters
+	if strings.Contains(path, "..") {
+		return false
+	}
+	return true
+}
+
+func extractFolder(path string) string {
+	idx := strings.LastIndex(path, FolderSeparator)
+	if idx == -1 {
+		return ""
+	}
+	return path[:idx]
+}
+
+func extractName(path string) string {
+	idx := strings.LastIndex(path, FolderSeparator)
+	if idx == -1 {
+		return path
+	}
+	return path[idx+1:]
+}
+
+func generateObjectID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("obj-%d", time.Now().UnixNano())
+	}
+	return "obj-" + hex.EncodeToString(buf)
+}
+
+func generateVersionID() string {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("ver-%d", time.Now().UnixNano())
+	}
+	return "ver-" + hex.EncodeToString(buf)
+}
+
+func translateObjectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "key not found") {
+		return ErrObjectNotFound
+	}
+	return err
+}
+
+// ViewObject retrieves an object from the database and previews it in a secure in-memory sandbox
+// No temporary files are created - everything stays in protected memory
+func (db *DB) ViewObject(path, userID string) error {
+	// Use secure in-memory preview - no disk writes
+	return db.ViewObjectSecure(path, userID)
+}
+
+// ViewObjectLegacy is the legacy implementation that uses temporary files
+// DEPRECATED: Use ViewObject (secure in-memory mode) instead
+func (db *DB) ViewObjectLegacy(path, userID string) error {
+	// Retrieve the object from the database
+	data, meta, err := db.GetObject(path, userID)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve object: %w", err)
+	}
+
+	// Create a temporary file to store the data
+	// Extract file extension from the path
+	ext := filepath.Ext(path)
+	if ext == "" {
+		// Try to determine extension from content type
+		ext = getExtensionFromContentType(meta.ContentType)
+	}
+
+	// Create temp file with appropriate extension and secure permissions
+	tempFile, err := os.CreateTemp("", "velocity-preview-*"+ext)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+
+	// Ensure temp file is cleaned up after preview, even on error
+	defer func() {
+		if removeErr := os.Remove(tempPath); removeErr != nil {
+			log.Printf("Warning: failed to clean up temp file %s: %v", tempPath, removeErr)
+		}
+	}()
+
+	// Set secure permissions (owner read/write only)
+	if err := os.Chmod(tempPath, 0600); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to set secure permissions on temp file: %w", err)
+	}
+
+	// Write data to temp file
+	if _, err := tempFile.Write(data); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to write to temp file: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	// Preview the file
+	return previewer.PreviewFile(tempPath)
+}
+
+// getExtensionFromContentType maps common content types to file extensions
+func getExtensionFromContentType(contentType string) string {
+	extensionMap := map[string]string{
+		"text/plain":               ".txt",
+		"text/html":                ".html",
+		"text/css":                 ".css",
+		"text/javascript":          ".js",
+		"text/markdown":            ".md",
+		"application/json":         ".json",
+		"application/xml":          ".xml",
+		"application/pdf":          ".pdf",
+		"application/zip":          ".zip",
+		"image/png":                ".png",
+		"image/jpeg":               ".jpg",
+		"image/gif":                ".gif",
+		"image/svg+xml":            ".svg",
+		"video/mp4":                ".mp4",
+		"audio/mpeg":               ".mp3",
+		"text/x-shellscript":       ".sh",
+		"application/x-sh":         ".sh",
+		"text/x-python":            ".py",
+		"text/x-go":                ".go",
+		"application/octet-stream": ".bin",
+	}
+
+	if ext, ok := extensionMap[contentType]; ok {
+		return ext
+	}
+	return ".txt" // Default extension
+}
+
+// ListObjectVersions lists all versions of an object
+func (db *DB) ListObjectVersions(path string) ([]ObjectVersion, error) {
+	path = normalizePath(path)
+	versionPrefix := ObjectVersionPrefix + path + ":"
+	keys, err := db.Keys(versionPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+
+	versions := make([]ObjectVersion, 0, len(keys))
+	for _, key := range keys {
+		val, err := db.Get([]byte(key))
+		if err != nil {
+			continue
+		}
+		var v ObjectVersion
+		if err := json.Unmarshal(val, &v); err == nil {
+			versions = append(versions, v)
+		}
+	}
+
+	// Sort versions by creation date (newest first)
+	sort.Slice(versions, func(i, j int) bool {
+		return versions[i].CreatedAt.After(versions[j].CreatedAt)
+	})
+
+	return versions, nil
+}
+
+// GetObjectVersion retrieves a specific version of an object
+func (db *DB) GetObjectVersion(path, versionID, user string) ([]byte, *ObjectMetadata, error) {
+	path = normalizePath(path)
+
+	// Get version info to find the ObjectID
+	versionKey := ObjectVersionPrefix + path + ":" + versionID
+	versionBytes, err := db.Get([]byte(versionKey))
+	if err != nil {
+		return nil, nil, ErrInvalidVersion
+	}
+
+	var version ObjectVersion
+	if err := json.Unmarshal(versionBytes, &version); err != nil {
+		return nil, nil, err
+	}
+
+	// Reconstruct metadata for this specific version.
+	meta, err := db.GetObjectMetadata(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	meta.VersionID = version.VersionID
+	meta.Size = version.Size
+	meta.Hash = version.Hash
+	meta.IsLatest = version.IsLatest
+
+	// Check permissions
+	if !db.hasPermissionInternal(path, user, PermissionRead, false) {
+		return nil, nil, ErrAccessDenied
+	}
+
+	// Read from filesystem
+	objectsDir := filepath.Join(db.filesDir, "objects")
+	filePath := filepath.Join(objectsDir, version.ObjectID, version.VersionID)
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Decrypt if necessary
+	if meta.Encrypted && db.crypto != nil {
+		if len(data) < 24 {
+			return nil, nil, fmt.Errorf("invalid encrypted data")
+		}
+		nonce := data[:24]
+		ciphertext := data[24:]
+		plaintext, err := db.crypto.Decrypt(nonce, ciphertext, []byte(version.ObjectID))
+		if err != nil {
+			return nil, nil, err
+		}
+		data = plaintext
+	}
+
+	return data, meta, nil
+}
+
+type countReader struct {
+	R     io.Reader
+	Count *int64
+}
+
+func (c *countReader) Read(p []byte) (n int, err error) {
+	n, err = c.R.Read(p)
+	if n > 0 {
+		*c.Count += int64(n)
+	}
+	return
+}
