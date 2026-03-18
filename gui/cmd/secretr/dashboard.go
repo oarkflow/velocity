@@ -5,8 +5,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-
-	"github.com/oarkflow/velocity/internal/secretr/gui/screens"
+	"github.com/oarkflow/velocity/gui/cmd/secretr/screens"
 	"github.com/oarkflow/velocity/internal/secretr/cli"
 )
 

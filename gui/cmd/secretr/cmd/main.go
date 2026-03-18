@@ -13,12 +13,12 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/dialog"
 
-	"github.com/oarkflow/velocity/internal/secretr/gui"
-	"github.com/oarkflow/velocity/internal/secretr/gui/screens"
-	"github.com/oarkflow/velocity/internal/secretr/cli"
-	"github.com/oarkflow/velocity/internal/secretr/core/identity"
 	"github.com/oarkflow/velocity"
 	velocitygui "github.com/oarkflow/velocity/gui"
+	gui "github.com/oarkflow/velocity/gui/cmd/secretr"
+	"github.com/oarkflow/velocity/gui/cmd/secretr/screens"
+	"github.com/oarkflow/velocity/internal/secretr/cli"
+	"github.com/oarkflow/velocity/internal/secretr/core/identity"
 )
 
 func main() {
