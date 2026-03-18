@@ -29,6 +29,7 @@ const (
 type CryptoProvider struct {
 	aead      cipher.AEAD
 	masterKey []byte
+	noop      bool // When true, skip encryption/decryption entirely
 }
 
 func newCryptoProvider(key []byte) (*CryptoProvider, error) {
@@ -47,7 +48,20 @@ func newCryptoProvider(key []byte) (*CryptoProvider, error) {
 	}, nil
 }
 
+// newNoopCryptoProvider creates a CryptoProvider that passes data through without encryption.
+// WARNING: This is INSECURE and should only be used for benchmarks.
+func newNoopCryptoProvider() *CryptoProvider {
+	return &CryptoProvider{
+		noop:      true,
+		masterKey: make([]byte, chacha20poly1305.KeySize),
+	}
+}
+
 func (cp *CryptoProvider) Encrypt(plaintext, aad []byte) (nonce, ciphertext []byte, err error) {
+	if cp.noop {
+		// Return empty nonce and plaintext directly (zero-copy)
+		return nil, plaintext, nil
+	}
 	nonce = make([]byte, chacha20poly1305.NonceSizeX)
 	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, nil, err
@@ -58,6 +72,9 @@ func (cp *CryptoProvider) Encrypt(plaintext, aad []byte) (nonce, ciphertext []by
 }
 
 func (cp *CryptoProvider) Decrypt(nonce, ciphertext, aad []byte) ([]byte, error) {
+	if cp.noop {
+		return ciphertext, nil
+	}
 	if len(nonce) != chacha20poly1305.NonceSizeX {
 		return nil, fmt.Errorf("invalid nonce length: %d", len(nonce))
 	}

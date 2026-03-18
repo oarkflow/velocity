@@ -99,6 +99,20 @@ func (w *DB) Crypto() *CryptoProvider {
 	return w.crypto
 }
 
+// scratch buffer for binary encoding to avoid binary.Write reflection overhead
+var walScratchPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 8)
+	},
+}
+
+// bufferPool reuses WAL buffers to avoid allocation on every syncUnsafe
+var walBufferPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, WALBufferSize))
+	},
+}
+
 func (w *WAL) Write(entry *Entry) error {
 	w.mutex.Lock()
 
@@ -109,25 +123,44 @@ func (w *WAL) Write(entry *Entry) error {
 		return err
 	}
 
-	keyLen := uint32(len(entry.Key))
-	nonceLen := uint16(len(nonce))
-	valueLen := uint32(len(ciphertext))
+	scratch := walScratchPool.Get().([]byte)
 
-	binary.Write(w.buffer, binary.LittleEndian, keyLen)
+	// keyLen (uint32)
+	binary.LittleEndian.PutUint32(scratch, uint32(len(entry.Key)))
+	w.buffer.Write(scratch[:4])
 	w.buffer.Write(entry.Key)
-	binary.Write(w.buffer, binary.LittleEndian, nonceLen)
-	w.buffer.Write(nonce)
-	binary.Write(w.buffer, binary.LittleEndian, valueLen)
-	w.buffer.Write(ciphertext)
-	binary.Write(w.buffer, binary.LittleEndian, entry.Timestamp)
-	binary.Write(w.buffer, binary.LittleEndian, entry.ExpiresAt)
 
-	var deleted uint8
+	// nonceLen (uint16)
+	binary.LittleEndian.PutUint16(scratch, uint16(len(nonce)))
+	w.buffer.Write(scratch[:2])
+	w.buffer.Write(nonce)
+
+	// valueLen (uint32)
+	binary.LittleEndian.PutUint32(scratch, uint32(len(ciphertext)))
+	w.buffer.Write(scratch[:4])
+	w.buffer.Write(ciphertext)
+
+	// timestamp (uint64)
+	binary.LittleEndian.PutUint64(scratch, entry.Timestamp)
+	w.buffer.Write(scratch[:8])
+
+	// expiresAt (uint64)
+	binary.LittleEndian.PutUint64(scratch, entry.ExpiresAt)
+	w.buffer.Write(scratch[:8])
+
+	// deleted (uint8)
 	if entry.Deleted {
-		deleted = 1
+		scratch[0] = 1
+	} else {
+		scratch[0] = 0
 	}
-	binary.Write(w.buffer, binary.LittleEndian, deleted)
-	binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
+	w.buffer.Write(scratch[:1])
+
+	// checksum (uint32)
+	binary.LittleEndian.PutUint32(scratch, entry.checksum)
+	w.buffer.Write(scratch[:4])
+
+	walScratchPool.Put(scratch)
 
 	if w.syncOnWrite || w.buffer.Len() >= w.buffer.Cap() {
 		if err := w.syncUnsafe(); err != nil {
@@ -141,7 +174,6 @@ func (w *WAL) Write(entry *Entry) error {
 }
 
 // WriteBatch writes multiple entries to WAL with a single sync at the end.
-// This is much faster than calling Write() for each entry.
 func (w *WAL) WriteBatch(entries []*Entry) error {
 	if len(entries) == 0 {
 		return nil
@@ -150,32 +182,42 @@ func (w *WAL) WriteBatch(entries []*Entry) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
+	scratch := walScratchPool.Get().([]byte)
+	defer walScratchPool.Put(scratch)
+
 	for _, entry := range entries {
-		// Encrypt value using AEAD with entry metadata as AAD (including expiry)
 		nonce, ciphertext, err := w.crypto.Encrypt(entry.Value, buildEntryAAD(entry.Key, entry.Timestamp, entry.ExpiresAt, entry.Deleted))
 		if err != nil {
 			return err
 		}
 
-		keyLen := uint32(len(entry.Key))
-		nonceLen := uint16(len(nonce))
-		valueLen := uint32(len(ciphertext))
-
-		binary.Write(w.buffer, binary.LittleEndian, keyLen)
+		binary.LittleEndian.PutUint32(scratch, uint32(len(entry.Key)))
+		w.buffer.Write(scratch[:4])
 		w.buffer.Write(entry.Key)
-		binary.Write(w.buffer, binary.LittleEndian, nonceLen)
-		w.buffer.Write(nonce)
-		binary.Write(w.buffer, binary.LittleEndian, valueLen)
-		w.buffer.Write(ciphertext)
-		binary.Write(w.buffer, binary.LittleEndian, entry.Timestamp)
-		binary.Write(w.buffer, binary.LittleEndian, entry.ExpiresAt)
 
-		var deleted uint8
+		binary.LittleEndian.PutUint16(scratch, uint16(len(nonce)))
+		w.buffer.Write(scratch[:2])
+		w.buffer.Write(nonce)
+
+		binary.LittleEndian.PutUint32(scratch, uint32(len(ciphertext)))
+		w.buffer.Write(scratch[:4])
+		w.buffer.Write(ciphertext)
+
+		binary.LittleEndian.PutUint64(scratch, entry.Timestamp)
+		w.buffer.Write(scratch[:8])
+
+		binary.LittleEndian.PutUint64(scratch, entry.ExpiresAt)
+		w.buffer.Write(scratch[:8])
+
 		if entry.Deleted {
-			deleted = 1
+			scratch[0] = 1
+		} else {
+			scratch[0] = 0
 		}
-		binary.Write(w.buffer, binary.LittleEndian, deleted)
-		binary.Write(w.buffer, binary.LittleEndian, entry.checksum)
+		w.buffer.Write(scratch[:1])
+
+		binary.LittleEndian.PutUint32(scratch, entry.checksum)
+		w.buffer.Write(scratch[:4])
 	}
 
 	if w.syncOnWrite || w.buffer.Len() >= w.buffer.Cap() {

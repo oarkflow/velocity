@@ -100,9 +100,11 @@ func (bw *BatchWriter) flushUnsafe() error {
 		ptrs[i] = &bw.entries[i]
 	}
 
-	// Batch write to WAL with single sync
-	if err := bw.db.wal.WriteBatch(ptrs); err != nil {
-		return err
+	// Batch write to WAL with single sync (skip if WAL disabled)
+	if bw.db.wal != nil {
+		if err := bw.db.wal.WriteBatch(ptrs); err != nil {
+			return err
+		}
 	}
 
 	// Batch write to memtable

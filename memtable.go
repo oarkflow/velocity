@@ -50,14 +50,16 @@ func (mt *MemTable) Put(key, value []byte) {
 	entry.Timestamp = uint64(time.Now().UnixNano())
 	entry.ExpiresAt = 0
 	entry.Deleted = false
-	entry.checksum = crc32.ChecksumIEEE(append(key, value...))
+	// Compute checksum without allocating a temporary concatenation
+	entry.checksum = crc32.Update(crc32.ChecksumIEEE(key), crc32.IEEETable, value)
 
+	keyStr := string(key)
 	oldSize := int64(0)
-	if old, ok := mt.entries.Load(string(key)); ok {
+	if old, ok := mt.entries.Load(keyStr); ok {
 		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
 	}
 
-	mt.entries.Store(string(key), entry)
+	mt.entries.Store(keyStr, entry)
 	atomic.AddInt64(&mt.size, int64(len(entry.Key)+len(entry.Value))-oldSize)
 }
 

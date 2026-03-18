@@ -80,6 +80,9 @@ type DB struct {
 	// Production configuration
 	nodeID    string
 	jwtSecret string
+
+	// Performance flags
+	disableWAL bool // Skip WAL writes for maximum throughput (data loss risk)
 }
 
 var defaultPath = "./data/velocity"
@@ -160,6 +163,11 @@ type Config struct {
 	SearchSchemas      map[string]*SearchSchema // Optional per-prefix schemas
 	NodeID             string                   // Unique identifier for this node
 	JWTSecret          string                   // Secret for API authentication
+
+	// Performance options - disable for maximum throughput benchmarks
+	DisableEncryption bool // Skip encryption/decryption (INSECURE - benchmarks only)
+	DisableWAL        bool // Skip WAL writes (data loss risk - benchmarks only)
+	DisableFsync      bool // Skip fsync on WAL writes (data loss risk on crash)
 }
 
 const (
@@ -191,58 +199,78 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		cfg.MaxUploadSize = DefaultMaxUploadSize
 	}
 
-	// Initialize master key configuration if not provided
-	if cfg.MasterKeyConfig == (MasterKeyConfig{}) {
-		cfg.MasterKeyConfig = DefaultMasterKeyConfig()
-	}
+	var cryptoProvider *CryptoProvider
+	var key []byte
+	var masterKeyManager *MasterKeyManager
+	var wal *WAL
 
-	// Create master key manager
-	masterKeyManager := NewMasterKeyManager(currentPath, cfg.MasterKeyConfig)
+	if cfg.DisableEncryption {
+		// Use no-op crypto for maximum benchmark throughput
+		cryptoProvider = newNoopCryptoProvider()
+		key = cryptoProvider.masterKey
+		masterKeyManager = nil
+	} else {
+		// Initialize master key configuration if not provided
+		if cfg.MasterKeyConfig == (MasterKeyConfig{}) {
+			cfg.MasterKeyConfig = DefaultMasterKeyConfig()
+		}
 
-	// Get master key using the manager
-	// Priority: MasterKey from config > EncryptionKey from config > manager default behavior
-	var explicitKey []byte
-	if len(cfg.MasterKey) > 0 {
-		explicitKey = cfg.MasterKey
-	} else if len(cfg.EncryptionKey) > 0 {
-		explicitKey = cfg.EncryptionKey
-	}
-	key, err := ensureMasterKeyWithManager(masterKeyManager, explicitKey)
-	if err != nil {
-		return nil, err
-	}
+		// Create master key manager
+		masterKeyManager = NewMasterKeyManager(currentPath, cfg.MasterKeyConfig)
 
-	// Apply device fingerprint key binding if enabled
-	if cfg.DeviceFingerprint {
-		key, err = combineWithDeviceKey(key)
+		// Get master key using the manager
+		var explicitKey []byte
+		if len(cfg.MasterKey) > 0 {
+			explicitKey = cfg.MasterKey
+		} else if len(cfg.EncryptionKey) > 0 {
+			explicitKey = cfg.EncryptionKey
+		}
+		var err error
+		key, err = ensureMasterKeyWithManager(masterKeyManager, explicitKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to bind key to device: %w", err)
+			return nil, err
+		}
+
+		// Apply device fingerprint key binding if enabled
+		if cfg.DeviceFingerprint {
+			key, err = combineWithDeviceKey(key)
+			if err != nil {
+				return nil, fmt.Errorf("failed to bind key to device: %w", err)
+			}
+		}
+
+		// CRITICAL: Verify the key matches what was used to create the database
+		if err := verifyKeyMarker(currentPath, key); err != nil {
+			return nil, err
+		}
+
+		var cpErr error
+		cryptoProvider, cpErr = newCryptoProvider(key)
+		if cpErr != nil {
+			return nil, cpErr
 		}
 	}
 
-	// CRITICAL: Verify the key matches what was used to create the database
-	// This prevents data corruption when wrong key is provided on restart
-	if err := verifyKeyMarker(currentPath, key); err != nil {
-		return nil, err
-	}
-
-	cryptoProvider, err := newCryptoProvider(key)
-	if err != nil {
-		return nil, err
-	}
-
-	walPath := filepath.Join(currentPath, "wal.log")
-	wal, err := NewWAL(walPath, cryptoProvider)
-	if err != nil {
-		return nil, err
+	if !cfg.DisableWAL {
+		walPath := filepath.Join(currentPath, "wal.log")
+		var err error
+		wal, err = NewWAL(walPath, cryptoProvider)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.DisableFsync {
+			wal.SetSyncOnWrite(false)
+		}
 	}
 
 	// Replay WAL to restore memtable state
-	entries, err := wal.Replay()
-	if err != nil {
-		// If the WAL is corrupted, it's safer to surface the error so callers
-		// can decide how to proceed (repair, delete WAL, etc.)
-		return nil, fmt.Errorf("failed to replay WAL: %w", err)
+	var entries []*Entry
+	if wal != nil {
+		var err error
+		entries, err = wal.Replay()
+		if err != nil {
+			return nil, fmt.Errorf("failed to replay WAL: %w", err)
+		}
 	}
 
 	db := &DB{
@@ -262,6 +290,7 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		shutdownCh:         make(chan struct{}),
 		nodeID:             cfg.NodeID,
 		jwtSecret:          cfg.JWTSecret,
+		disableWAL:         cfg.DisableWAL,
 	}
 	if db.nodeID == "" {
 		host, _ := os.Hostname()
@@ -423,6 +452,17 @@ func (db *DB) SetPerformanceMode(mode string) {
 }
 
 func (db *DB) Put(key, value []byte) error {
+	// Ultra-fast path: when WAL and search index are disabled, skip mutex entirely
+	// sync.Map provides its own thread safety
+	if db.disableWAL && !db.searchIndexEnabled && db.cache == nil {
+		db.memTable.Put(key, value)
+		if db.memTable.Size() > db.memTableSize {
+			if !db.flushing.Load() {
+				go db.flushMemTable()
+			}
+		}
+		return nil
+	}
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	if db.searchIndexEnabled && !isIndexKey(key) {
@@ -457,13 +497,15 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	e.checksum = h.Sum32()
 
 	// Write to WAL
-	if db.wal == nil {
-		entryPool.Put(e)
-		return fmt.Errorf("WAL is not initialized")
-	}
-	if err := db.wal.Write(e); err != nil {
-		entryPool.Put(e)
-		return err
+	if !db.disableWAL {
+		if db.wal == nil {
+			entryPool.Put(e)
+			return fmt.Errorf("WAL is not initialized")
+		}
+		if err := db.wal.Write(e); err != nil {
+			entryPool.Put(e)
+			return err
+		}
 	}
 
 	// Put into memtable
@@ -488,39 +530,45 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 
 // Internal put method without locking - used when already holding a lock
 func (db *DB) put(key, value []byte) error {
-	// Get an entry from pool to reduce allocations
-	e := entryPool.Get().(*Entry)
-	e.Key = append(e.Key[:0], key...)
-	e.Value = append(e.Value[:0], value...)
-	e.Timestamp = uint64(time.Now().UnixNano())
-	e.Deleted = false
-	// Compute checksum using streaming to avoid temporary concatenation
-	h := crc32.NewIEEE()
-	h.Write(e.Key)
-	h.Write(e.Value)
-	e.checksum = h.Sum32()
+	if db.disableWAL {
+		// Fast path: skip entry creation and WAL, write directly to memtable
+		db.memTable.Put(key, value)
+	} else {
+		// Get an entry from pool to reduce allocations
+		e := entryPool.Get().(*Entry)
+		e.Key = append(e.Key[:0], key...)
+		e.Value = append(e.Value[:0], value...)
+		e.Timestamp = uint64(time.Now().UnixNano())
+		e.Deleted = false
+		// Compute checksum using streaming to avoid temporary concatenation
+		h := crc32.NewIEEE()
+		h.Write(e.Key)
+		h.Write(e.Value)
+		e.checksum = h.Sum32()
 
-	// Write to WAL first for durability
-	if db.wal == nil {
-		entryPool.Put(e)
-		return fmt.Errorf("WAL is not initialized")
-	}
-	err := db.wal.Write(e)
-	if err != nil {
-		entryPool.Put(e)
-		return err
-	}
+		// Write to WAL first for durability
+		if db.wal == nil {
+			entryPool.Put(e)
+			return fmt.Errorf("WAL is not initialized")
+		}
+		err := db.wal.Write(e)
+		if err != nil {
+			entryPool.Put(e)
+			return err
+		}
 
-	// Write to memtable (memtable will use its own pool)
-	db.memTable.Put(key, value)
+		// Write to memtable (reuse the entry we already built)
+		db.memTable.PutEntry(e)
+
+		// Return entry buffer to pool
+		entryPool.Put(e)
+	}
 
 	// Update cache
 	if db.cache != nil {
 		db.cache.Put(string(key), append([]byte{}, value...))
 	}
 
-	// Return entry buffer to pool
-	entryPool.Put(e)
 	if db.memTable.Size() > db.memTableSize {
 		// Only trigger flush if not already flushing
 		if !db.flushing.Load() {
@@ -646,9 +694,11 @@ func (db *DB) flushMemTable() error {
 	db.levels[level] = append(db.levels[level], sst)
 
 	// Truncate WAL after successfully flushing memtable to SSTable
-	if err := db.wal.Truncate(); err != nil {
-		log.Printf("velocity: WAL truncation failed: %v", err)
-		return err
+	if db.wal != nil {
+		if err := db.wal.Truncate(); err != nil {
+			log.Printf("velocity: WAL truncation failed: %v", err)
+			return err
+		}
 	}
 
 	return nil
@@ -670,7 +720,7 @@ func (db *DB) Close() error {
 	}
 
 	// Flush memtable to ensure all data is persisted
-	if db.memTable != nil && db.wal != nil {
+	if db.memTable != nil && (db.wal != nil || db.disableWAL) {
 		if err := db.flushMemTable(); err != nil {
 			log.Printf("velocity: memtable flush failed during close: %v", err)
 		}

@@ -24,6 +24,9 @@ func main() {
 	providers := []DBProvider{
 		NewVelocityProvider("./bench_velocity_native", false),
 		NewVelocityProvider("./bench_velocity_sql", true),
+		NewPebbleProvider("./bench_pebble"),
+		NewBoltDBProvider("./bench_boltdb"),
+		NewYogaDBProvider("./bench_yogadb"),
 		NewMySQLProvider(),
 		NewPostgresProvider(),
 	}

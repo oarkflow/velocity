@@ -58,8 +58,11 @@ func (p *VelocityProvider) Setup(ctx context.Context) error {
 		p.sqlDB = db
 	} else {
 		db, err := velocity.NewWithConfig(velocity.Config{
-			Path:            p.path,
-			PerformanceMode: "performance",
+			Path:              p.path,
+			PerformanceMode:   "performance",
+			DisableEncryption: true,
+			DisableWAL:        true,
+			DisableFsync:      true,
 		})
 		if err != nil {
 			return err
