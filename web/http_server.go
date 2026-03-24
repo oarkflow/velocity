@@ -780,6 +780,12 @@ func (s *HTTPServer) handleAdminDeleteThumbnail(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "deleted", "key": key})
 }
 
+// App returns the underlying Fiber app so that additional routes (e.g. S3API
+// or EnterpriseAPI) can be registered on it.
+func (s *HTTPServer) App() *fiber.App {
+	return s.app
+}
+
 // Start starts the HTTP server
 func (s *HTTPServer) Start() error {
 	log.Printf("Starting HTTP server on port %s", s.port)
