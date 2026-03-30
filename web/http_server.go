@@ -83,6 +83,12 @@ func NewHTTPServer(db *velocity.DB, port string, userDB UserStorage) *HTTPServer
 	server.setupRoutes()
 	server.setupObjectStorageRoutes()
 
+	// Register Knowledge Graph API if available
+	if kg := db.KnowledgeGraph(); kg != nil {
+		kgAPI := NewKGAPI(kg)
+		kgAPI.RegisterRoutes(app)
+	}
+
 	return server
 }
 

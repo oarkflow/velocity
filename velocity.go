@@ -83,6 +83,9 @@ type DB struct {
 
 	// Performance flags
 	disableWAL bool // Skip WAL writes for maximum throughput (data loss risk)
+
+	// Knowledge Graph engine
+	kg *KnowledgeGraphEngine
 }
 
 var defaultPath = "./data/velocity"
@@ -1493,4 +1496,21 @@ func (db *DB) compactLevel(level int) {
 			sst.Close()
 		}
 	}
+}
+
+// KnowledgeGraph returns the Knowledge Graph engine, creating it on first call.
+func (db *DB) KnowledgeGraph(config ...KGConfig) *KnowledgeGraphEngine {
+	if db.kg != nil {
+		return db.kg
+	}
+	cfg := KGConfig{}
+	if len(config) > 0 {
+		cfg = config[0]
+	}
+	kg, err := NewKnowledgeGraphEngine(db, cfg)
+	if err != nil {
+		return nil
+	}
+	db.kg = kg
+	return db.kg
 }
