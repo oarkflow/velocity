@@ -780,9 +780,9 @@ func (s *Store) Restore(ctx context.Context, backupData []byte, decryptKey []byt
 // HealthCheck performs a storage health check
 func (s *Store) HealthCheck(ctx context.Context) error {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
 		return ErrStorageClosed
 	}
 
@@ -804,7 +804,7 @@ func (s *Store) HealthCheck(ctx context.Context) error {
 	}
 
 	// Cleanup
-	s.Delete(ctx, "_system", testKey)
+	_ = s.Delete(ctx, "_system", testKey)
 
 	return nil
 }

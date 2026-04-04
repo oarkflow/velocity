@@ -58,13 +58,6 @@ func AdminUsers(ctx context.Context, cmd *cli.Command) error {
 	return output(cmd, idents)
 }
 
-func AdminSystem(ctx context.Context, cmd *cli.Command) error {
-	info("System status: ONLINE")
-	info("Version: 1.0.0")
-	info("Data Directory: %s", "confidential") // Should get from config
-	return nil
-}
-
 func AdminSecurity(ctx context.Context, cmd *cli.Command) error {
 	// Placeholder for global security settings display
 	info("Security settings:")

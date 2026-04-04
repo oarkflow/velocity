@@ -195,7 +195,7 @@ func walkCLISpec(cmd *cli.Command, prefix string, out map[string]CommandAuthSpec
 		}
 		path := strings.TrimSpace(strings.TrimSpace(prefix + " " + name))
 		required, resolved := resolveCommandScopesStrict(path, scopeResolver)
-		allowUnauth := path == "auth" || strings.HasPrefix(path, "auth ")
+		allowUnauth := path == "auth" || strings.HasPrefix(path, "auth ") || path == "info"
 		surface, hasSurface := commandSurfaceManifest[path]
 		specMissing := (!resolved || !hasSurface) && !allowUnauth
 
@@ -382,7 +382,7 @@ func ResolveCommandDispatchAuth(path string) (CommandDispatchAuthSpec, error) {
 	if cmdPath == "" {
 		return CommandDispatchAuthSpec{}, fmt.Errorf("empty command path")
 	}
-	if cmdPath == "auth" || cmdPath == "auth login" {
+	if cmdPath == "auth" || cmdPath == "auth login" || cmdPath == "info" {
 		return CommandDispatchAuthSpec{
 			Path:        cmdPath,
 			AllowUnauth: true,
@@ -505,7 +505,7 @@ func resolveCommandScopesStrict(path string, scopeResolver func(path string) []t
 	if scopes, ok := commandScopeManifest[path]; ok {
 		return scopes, true
 	}
-	if path == "auth" || strings.HasPrefix(path, "auth ") {
+	if path == "auth" || strings.HasPrefix(path, "auth ") || path == "info" {
 		return nil, true
 	}
 	return nil, false

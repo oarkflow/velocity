@@ -42,6 +42,14 @@ Production mode hardening:
 - CLI startup fails closed if audit chain integrity is broken
 - `--debug` flag is hidden
 
+### CI Hardening Workflow
+
+GitHub Actions includes `.github/workflows/secretr-hardening.yml` to enforce production/dev build separation on `pull_request` and pushes to `main`/`master`.
+
+It runs targeted authz/CLI tests in both modes (including `go test ./cmd/secretr`), regenerates authz manifests and fails on drift (`go run ./internal/secretr/authz/cmd/genmanifests` + `git diff --exit-code`), builds `dist/secretr` (production) and `dist/secretr-dev` (dev tag), and fails fast if the release artifact naming contains a dev tag.
+
+It also runs a strict production smoke check in an isolated `HOME` and validates JSON output from `secretr admin system --strict --format json`; exit status is asserted against `release_blockers` count to keep the check deterministic.
+
 ## 2. First-Time Setup (Copy-Paste)
 
 ### 2.1 Initialize + Login
@@ -555,6 +563,7 @@ secretr exec --command /usr/bin/env --prefix processgate | grep PROCESSGATE_AWS
 - User guide (this file): `internal/secretr/README.md`
 - Full CLI command + flags matrix: `internal/secretr/COMMANDS.md`
 - Full API endpoint + authz matrix: `internal/secretr/API_REFERENCE.md`
+- Production readiness checklist: `internal/secretr/PRODUCTION_READINESS_CHECKLIST.md`
 - Logging and audit deep-dive: `internal/secretr/AUDIT.md`
 - Envelope implementation deep-dive: `internal/secretr/ENVELOPE.md`
 - Per-top-level command deep-dives:

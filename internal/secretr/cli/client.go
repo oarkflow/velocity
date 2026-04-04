@@ -102,8 +102,6 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to init store: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "secretr: vault path: %s\n", storeConfig.Path)
-
 	// Initialize audit engine first (used by other managers)
 	auditEngine := audit.NewEngine(audit.EngineConfig{
 		Store: store,

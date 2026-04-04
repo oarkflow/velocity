@@ -181,7 +181,13 @@
   },
   {
     "path": "admin system",
-    "flags": [],
+    "flags": [
+      {
+        "name": "strict",
+        "class": "control",
+        "require_acl": false
+      }
+    ],
     "args": [
       {
         "position": -1,
@@ -2575,6 +2581,17 @@
         "require_acl": true
       }
     ],
+    "args": [
+      {
+        "position": -1,
+        "name": "*",
+        "require_acl": true
+      }
+    ]
+  },
+  {
+    "path": "info",
+    "flags": [],
     "args": [
       {
         "position": -1,

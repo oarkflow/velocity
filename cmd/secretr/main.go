@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/oarkflow/velocity/internal/secretr/cli/app"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 )
 
 func main() {
@@ -30,6 +31,10 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	if err := enforceProductionBuildGuard(); err != nil {
+		return err
+	}
+
 	// Initialize app with velocity integration
 	cliApp, err := app.NewApp(nil)
 	if err != nil {
@@ -38,4 +43,20 @@ func run(ctx context.Context) error {
 	defer cliApp.Close()
 
 	return cliApp.Run(ctx, os.Args)
+}
+
+func enforceProductionBuildGuard() error {
+	return validateProductionBuildRequirement(os.Getenv, securitymode.IsDevBuild)
+}
+
+func validateProductionBuildRequirement(getenv func(string) string, isDevBuild func() bool) error {
+	if getenv("SECRETR_REQUIRE_PROD_BUILD") != "true" {
+		return nil
+	}
+
+	if !isDevBuild() {
+		return nil
+	}
+
+	return fmt.Errorf("SECRETR_REQUIRE_PROD_BUILD=true requires a production build; current binary is a dev build")
 }

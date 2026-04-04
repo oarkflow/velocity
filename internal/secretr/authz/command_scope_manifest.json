@@ -708,6 +708,10 @@
     ]
   },
   {
+    "path": "info",
+    "scopes": []
+  },
+  {
     "path": "key",
     "scopes": [
       "key:read"

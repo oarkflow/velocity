@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -99,10 +100,56 @@ func outputTable(data any) error {
 		for _, i := range v {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", i.ID, i.Type, i.Severity, i.Status, i.DeclaredAt.Time().Format("2006-01-02 15:04:05"))
 		}
+	case infoStatus:
+		printCompactInfoBox(v)
+		return nil
+	case *infoStatus:
+		if v == nil {
+			return nil
+		}
+		printCompactInfoBox(*v)
+		return nil
 	default:
 		return outputYAML(data)
 	}
 	return nil
+}
+
+func printCompactInfoBox(v infoStatus) {
+	rows := [][2]string{
+		{"name", v.Name},
+		{"version", v.Version},
+		{"build", v.BuildTime},
+		{"commit", v.GitCommit},
+		{"mode", v.Mode},
+		{"go", v.GoVersion},
+		{"platform", v.OS + "/" + v.Arch},
+		{"data", v.DataDir},
+		{"vault", v.VaultPath},
+	}
+
+	// Keep stable compact ordering if values are empty/skipped later.
+	sort.SliceStable(rows, func(i, j int) bool { return i < j })
+
+	keyWidth := len("key")
+	valWidth := len("value")
+	for _, r := range rows {
+		if len(r[0]) > keyWidth {
+			keyWidth = len(r[0])
+		}
+		if len(r[1]) > valWidth {
+			valWidth = len(r[1])
+		}
+	}
+
+	border := "+" + strings.Repeat("-", keyWidth+2) + "+" + strings.Repeat("-", valWidth+2) + "+"
+	fmt.Println(border)
+	fmt.Printf("| %-*s | %-*s |\n", keyWidth, "key", valWidth, "value")
+	fmt.Println(border)
+	for _, r := range rows {
+		fmt.Printf("| %-*s | %-*s |\n", keyWidth, r[0], valWidth, r[1])
+	}
+	fmt.Println(border)
 }
 
 func promptPassword(prompt string) (string, error) {

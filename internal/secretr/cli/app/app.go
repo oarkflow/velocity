@@ -48,6 +48,8 @@ type SessionStore interface {
 
 // NewApp creates a new CLI application with velocity integration
 func NewApp(sessionStore SessionStore) (*App, error) {
+	commands.SetBuildInfo(Version, BuildTime, GitCommit)
+
 	app := &App{
 		sessionStore: sessionStore,
 	}
@@ -259,6 +261,11 @@ and reduces trust ambiguity.`,
 			return a.gate.RequireAuthenticated()(ctx, cmd)
 		},
 		Commands: []*cli.Command{
+			{
+				Name:   "info",
+				Usage:  "Show runtime and build information",
+				Action: commands.Info,
+			},
 			a.authCommands(),
 			a.identityCommands(),
 			a.deviceCommands(),
@@ -1780,6 +1787,9 @@ func (a *App) adminCommands() *cli.Command {
 				Name:   "system",
 				Usage:  "System status and health",
 				Action: commands.AdminSystem,
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "strict", Usage: "Exit non-zero when system is not production-ready"},
+				},
 			},
 			{
 				Name:   "security",
