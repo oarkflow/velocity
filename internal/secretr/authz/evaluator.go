@@ -8,6 +8,7 @@ import (
 	"time"
 
 	licclient "github.com/oarkflow/licensing-go"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
 
@@ -89,7 +90,7 @@ func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, erro
 		return dec, types.NewError(types.ErrCodeEntitlementDenied, err.Error())
 	}
 
-	if req.RequireACL && !req.AllowUnauth {
+	if req.RequireACL && !req.AllowUnauth && !securitymode.IsDevBuild() {
 		if req.ResourceID == "" {
 			if isCollectionScopeRequest(req.RequiredScopes) {
 				dec.Allowed = true

@@ -26,10 +26,11 @@ func NewDefaultResourceResolver() *DefaultResourceResolver {
 
 func (r *DefaultResourceResolver) ResolveCLI(cmd *cli.Command, session *types.Session, path string, spec CommandAuthSpec) (string, string, licclient.UsageContext, map[string]any) {
 	resourceID := resolveResourceIDFromCLIFlags(cmd)
-	if resourceID == "" && cmd != nil && len(cmd.Args().Slice()) > 0 {
-		resourceID = strings.TrimSpace(cmd.Args().Slice()[0])
+	args := cliArgsSlice(cmd)
+	if resourceID == "" && len(args) > 0 {
+		resourceID = strings.TrimSpace(args[0])
 	}
-	if resourceID == "" && spec.RequireACL {
+	if resourceID == "" && spec.RequireACL && !isCollectionScopeRequest(spec.RequiredScopes) {
 		resourceID = "*"
 	}
 	metadata := map[string]any{
@@ -67,7 +68,7 @@ func (r *DefaultResourceResolver) ResolveCLIArg(session *types.Session, path str
 
 func (r *DefaultResourceResolver) ResolveAPI(req *http.Request, session *types.Session, spec APIRouteAuthSpec) (string, string, licclient.UsageContext, map[string]any) {
 	resourceID := resolveAPIResourceIDForResolver(req, spec)
-	if resourceID == "" && spec.RequireACL {
+	if resourceID == "" && spec.RequireACL && !isCollectionScopeRequest(spec.RequiredScopes) {
 		resourceID = "*"
 	}
 	metadata := map[string]any{
@@ -89,7 +90,10 @@ func resolveResourceIDFromCLIFlags(cmd *cli.Command) string {
 	}
 	candidates := []string{"id", "name", "resource-id", "resource", "file", "path", "key", "org-id"}
 	for _, c := range candidates {
-		if v := strings.TrimSpace(cmd.String(c)); v != "" {
+		if !cliIsSet(cmd, c) {
+			continue
+		}
+		if v := strings.TrimSpace(cliString(cmd, c)); v != "" {
 			return v
 		}
 	}
@@ -101,11 +105,41 @@ func resolveSingleFlagValue(cmd *cli.Command, names []string) string {
 		return ""
 	}
 	for _, name := range names {
-		if v := strings.TrimSpace(cmd.String(name)); v != "" {
+		if v := strings.TrimSpace(cliString(cmd, name)); v != "" {
 			return v
 		}
 	}
 	return ""
+}
+
+func cliArgsSlice(cmd *cli.Command) []string {
+	if cmd == nil {
+		return nil
+	}
+	defer func() {
+		_ = recover()
+	}()
+	return cmd.Args().Slice()
+}
+
+func cliString(cmd *cli.Command, name string) string {
+	if cmd == nil {
+		return ""
+	}
+	defer func() {
+		_ = recover()
+	}()
+	return cmd.String(name)
+}
+
+func cliIsSet(cmd *cli.Command, name string) bool {
+	if cmd == nil {
+		return false
+	}
+	defer func() {
+		_ = recover()
+	}()
+	return cmd.IsSet(name)
 }
 
 func usageContextFromSession(session *types.Session, subject string) licclient.UsageContext {

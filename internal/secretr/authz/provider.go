@@ -3,9 +3,11 @@ package authz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,11 +48,17 @@ func (p *EnvEntitlementProvider) GetLicenseData(ctx context.Context, actorID typ
 	_ = ctx
 	_ = actorID
 	if p.path == "" {
+		if securitymode.IsDevBuild() {
+			return fullAccessDevLicenseData(), nil
+		}
 		return nil, nil
 	}
 
 	fi, err := os.Stat(p.path)
 	if err != nil {
+		if securitymode.IsDevBuild() && errors.Is(err, os.ErrNotExist) {
+			return fullAccessDevLicenseData(), nil
+		}
 		return nil, fmt.Errorf("authz: license file stat failed: %w", err)
 	}
 
@@ -77,4 +85,33 @@ func (p *EnvEntitlementProvider) GetLicenseData(ctx context.Context, actorID typ
 	p.mu.Unlock()
 
 	return &data, nil
+}
+
+func fullAccessDevLicenseData() *licclient.LicenseData {
+	features := make(map[string]licclient.FeatureGrant)
+	for scope := range knownScopes {
+		scopeSlug := strings.TrimSpace(string(scope))
+		if scopeSlug == "" {
+			continue
+		}
+		featureSlug := featureFromScope(scopeSlug)
+		fg, ok := features[featureSlug]
+		if !ok {
+			fg = licclient.FeatureGrant{
+				FeatureSlug: featureSlug,
+				Enabled:     true,
+				Scopes:      make(map[string]licclient.ScopeGrant),
+			}
+		}
+		fg.Scopes[scopeSlug] = licclient.ScopeGrant{
+			ScopeSlug:    scopeSlug,
+			Permission:   licclient.ScopePermissionAllow,
+			Restrictions: nil,
+		}
+		features[featureSlug] = fg
+	}
+
+	return &licclient.LicenseData{
+		Entitlements: &licclient.LicenseEntitlements{Features: features},
+	}
 }

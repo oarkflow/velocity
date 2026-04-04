@@ -7,6 +7,7 @@ import (
 	"time"
 
 	licclient "github.com/oarkflow/licensing-go"
+	"github.com/oarkflow/velocity/internal/secretr/securitymode"
 	"github.com/oarkflow/velocity/internal/secretr/types"
 )
 
@@ -93,6 +94,12 @@ func TestAuthorize_DenyByACL(t *testing.T) {
 	lic := &licclient.LicenseData{Entitlements: &licclient.LicenseEntitlements{Features: map[string]licclient.FeatureGrant{"secret": {FeatureSlug: "secret", Enabled: true, Scopes: map[string]licclient.ScopeGrant{"secret:read": {ScopeSlug: "secret:read", Permission: licclient.ScopePermissionAllow}}}}}}
 	a := NewAuthorizer(staticProvider{lic: lic}, denyACL{}, nil)
 	_, err := a.Authorize(context.Background(), Request{Session: mkSession(types.ScopeSecretRead), RequiredScopes: []types.Scope{types.ScopeSecretRead}, RequireACL: true, ResourceID: "secret1"})
+	if securitymode.IsDevBuild() {
+		if err != nil {
+			t.Fatalf("expected ACL bypass in dev build, got %v", err)
+		}
+		return
+	}
 	var te *types.Error
 	if err == nil || !errors.As(err, &te) || te.Code != types.ErrCodeACLDenied {
 		t.Fatalf("expected acl denied, got %v", err)

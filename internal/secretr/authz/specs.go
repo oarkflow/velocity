@@ -230,11 +230,20 @@ func walkCLISpec(cmd *cli.Command, prefix string, out map[string]CommandAuthSpec
 		}
 
 		argSpecs := buildArgSpecs(sub, required, specMissing, hasSurface, surface.Args)
+		if len(sub.Commands) > 0 {
+			for i := range argSpecs {
+				argSpecs[i].RequireACL = false
+			}
+		}
+		commandRequireACL := requiresACL(path)
+		if isCollectionScopeRequest(required) {
+			commandRequireACL = false
+		}
 		out[path] = CommandAuthSpec{
 			Path:           path,
 			RequiredScopes: required,
 			ResourceType:   inferResourceType(path),
-			RequireACL:     requiresACL(path),
+			RequireACL:     commandRequireACL,
 			Flags:          flagSpecs,
 			Args:           argSpecs,
 			AllowUnauth:    allowUnauth,
@@ -300,6 +309,12 @@ func inferResourceType(path string) string {
 }
 
 func requiresACL(path string) bool {
+	// Command groups like "secret", "file", "org" are containers for
+	// subcommands. Their Before hooks can execute during nested command runs, so
+	// they must not force resource-level ACL checks.
+	if !strings.Contains(strings.TrimSpace(path), " ") {
+		return false
+	}
 	rt := inferResourceType(path)
 	return rt != "" && rt != "auth" && rt != "admin"
 }

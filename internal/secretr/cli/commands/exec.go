@@ -21,16 +21,32 @@ import (
 // Exec Commands
 
 func ExecRun(ctx context.Context, cmd *cli.Command) error {
-	command := cmd.String("command")
+	command := strings.TrimSpace(cmd.String("command"))
 	// args := cmd.StringSlice("arg") // cli v3 uses Args()
 	args := cmd.Args().Slice()
+	if command == "" {
+		if len(args) == 0 {
+			return fmt.Errorf("usage: exec [flags] <command> [args...]")
+		}
+		command = args[0]
+		args = args[1:]
+	}
 
 	secretMappings := cmd.StringSlice("secret") // format: SECRET_ID:ENV_VAR or SECRET_ID:FILE_PATH:file
 	loadAll := cmd.Bool("all-secrets")
 	prefix := strings.TrimSpace(cmd.String("prefix"))
-	envFilter := strings.TrimSpace(cmd.String("env"))
+	envFilter := strings.TrimSpace(firstNonEmpty(
+		cmd.String("env"),
+		cmd.String("ns"),
+		cmd.String("namespace"),
+		cmd.String("group"),
+		cmd.String("tenant"),
+	))
 	envPrefix := strings.TrimSpace(cmd.String("env-prefix"))
 	stripPrefix := prefix
+	if stripPrefix == "" && envFilter != "" {
+		stripPrefix = envFilter
+	}
 	isolation := cmd.String("isolation")
 	seccompProfile := cmd.String("seccomp-profile")
 	strictSandbox := cmd.Bool("strict-sandbox")
@@ -67,8 +83,10 @@ func ExecRun(ctx context.Context, cmd *cli.Command) error {
 		loadAll = true
 		if envFilter == "" {
 			envFilter = "general"
+			stripPrefix = "general"
+		} else {
+			stripPrefix = envFilter
 		}
-		stripPrefix = "general"
 	}
 
 	// Use transient executor
@@ -232,6 +250,15 @@ func normalizeEnvToken(s string) string {
 		up = strings.ReplaceAll(up, "__", "_")
 	}
 	return up
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func stringifyJSONScalar(v any) string {

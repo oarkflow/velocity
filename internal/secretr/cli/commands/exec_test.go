@@ -59,3 +59,10 @@ func TestNormalizeEnvToken(t *testing.T) {
 		t.Fatalf("expected PROD_API, got %q", got)
 	}
 }
+
+func TestFirstNonEmpty(t *testing.T) {
+	got := firstNonEmpty(" ", "", "namespace", "tenant")
+	if got != "namespace" {
+		t.Fatalf("expected namespace, got %q", got)
+	}
+}
