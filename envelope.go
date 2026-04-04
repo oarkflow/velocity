@@ -13,6 +13,30 @@ import (
 	"time"
 )
 
+type envelopeActorContextKey string
+
+const envelopeActorKey envelopeActorContextKey = "velocity:envelope:actor"
+
+// WithEnvelopeActor annotates context so envelope operations can auto-log actor identity.
+func WithEnvelopeActor(ctx context.Context, actor string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, envelopeActorKey, actor)
+}
+
+func envelopeActorFromContext(ctx context.Context, fallback string) (string, bool) {
+	if ctx != nil {
+		if v, ok := ctx.Value(envelopeActorKey).(string); ok && v != "" {
+			return v, true
+		}
+	}
+	if fallback != "" {
+		return fallback, true
+	}
+	return "", false
+}
+
 var (
 	ErrEnvelopeNotFound = errors.New("envelope not found")
 	ErrTimeLockActive   = errors.New("time-lock is still active")
@@ -344,7 +368,15 @@ func (db *DB) ApproveTimeLockUnlock(ctx context.Context, envelopeID, approver, r
 		env.TimeLockStatus.UnlockApprovedAt = now
 		env.TimeLockStatus.UnlockApprovedBy = approver
 		env.TimeLockStatus.UnlockReason = reason
-		env.recordAudit("timelock.unlock", approver, reason, "")
+		actor, _ := envelopeActorFromContext(ctx, approver)
+		env.recordAudit("timelock.unlock", actor, reason, "")
+		env.appendCustodyEvent(&CustodyEvent{
+			Actor:         actor,
+			Action:        "timelock.unlock.approved",
+			Location:      "policy-engine",
+			EvidenceState: "unlock_approved",
+			Notes:         reason,
+		})
 		if err := db.saveEnvelope(env); err != nil {
 			return nil, err
 		}
@@ -354,7 +386,24 @@ func (db *DB) ApproveTimeLockUnlock(ctx context.Context, envelopeID, approver, r
 
 // LoadEnvelope retrieves an envelope for reading (public method for recipients)
 func (db *DB) LoadEnvelope(ctx context.Context, envelopeID string) (*Envelope, error) {
-	return db.loadEnvelope(envelopeID)
+	env, err := db.loadEnvelope(envelopeID)
+	if err != nil {
+		return nil, err
+	}
+	if actor, ok := envelopeActorFromContext(ctx, ""); ok {
+		env.recordAudit("envelope.load", actor, "envelope loaded", "")
+		env.appendCustodyEvent(&CustodyEvent{
+			Actor:         actor,
+			Action:        "envelope.loaded",
+			Location:      "runtime",
+			EvidenceState: "accessed",
+			Notes:         "automatic access log",
+		})
+		if err := db.saveEnvelope(env); err != nil {
+			return nil, err
+		}
+	}
+	return env, nil
 }
 
 // loadEnvelope fetches and unmarshals the JSON envelope.
@@ -578,9 +627,22 @@ func (p TimeLockPolicy) isActive(now time.Time) bool {
 // The exported file contains the complete envelope with all custody events, audit logs, and integrity data.
 func (db *DB) ExportEnvelope(ctx context.Context, envelopeID string, exportPath string) error {
 	// Load the envelope
-	envelope, err := db.LoadEnvelope(ctx, envelopeID)
+	envelope, err := db.loadEnvelope(envelopeID)
 	if err != nil {
 		return fmt.Errorf("failed to load envelope: %w", err)
+	}
+	if actor, ok := envelopeActorFromContext(ctx, ""); ok {
+		envelope.recordAudit("envelope.export", actor, "export envelope", "")
+		envelope.appendCustodyEvent(&CustodyEvent{
+			Actor:         actor,
+			Action:        "envelope.exported",
+			Location:      "exporter",
+			EvidenceState: "exported",
+			Notes:         exportPath,
+		})
+		if err := db.saveEnvelope(envelope); err != nil {
+			return fmt.Errorf("failed to persist export audit trail: %w", err)
+		}
 	}
 
 	// Marshal to JSON with indentation for readability
@@ -630,6 +692,17 @@ func (db *DB) ImportEnvelope(ctx context.Context, importPath string) (*Envelope,
 	if _, err := os.Stat(envelopePath); err == nil {
 		// Envelope already exists, load and return it
 		return db.LoadEnvelope(ctx, envelope.EnvelopeID)
+	}
+
+	if actor, ok := envelopeActorFromContext(ctx, ""); ok {
+		envelope.recordAudit("envelope.import", actor, "import envelope", "")
+		envelope.appendCustodyEvent(&CustodyEvent{
+			Actor:         actor,
+			Action:        "envelope.imported",
+			Location:      "importer",
+			EvidenceState: "imported",
+			Notes:         importPath,
+		})
 	}
 
 	// Save to local envelope directory

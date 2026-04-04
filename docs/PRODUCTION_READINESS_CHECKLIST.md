@@ -2,6 +2,11 @@
 
 Use this checklist before cutting or promoting a production release of Secretr/Velocity.
 
+## Mandatory Governance Gates
+
+- Compliance mapping gate: `docs/COMPLIANCE_MAPPING_FERPA_GDPR_HIPAA.md` must be current for in-scope release controls and ownership.
+- SRE governance gate: `docs/SRE_SLO_AND_DRILLS.md` SLO targets, drill cadence, and evidence checklist must be satisfied for the release window.
+
 ## Build/Release Gates
 
 - Build production binary without dev tag: `go build -o dist/secretr ./cmd/secretr`
@@ -29,6 +34,7 @@ Use this checklist before cutting or promoting a production release of Secretr/V
 - Run restore in non-production environment from latest backup
 - Verify post-restore integrity (`audit verify`, secret/object access checks)
 - Record Recovery Time Objective (RTO) and Recovery Point Objective (RPO) from drill
+- Store drill evidence using conventions in `docs/SRE_SLO_AND_DRILLS.md`
 
 ## Incident Response
 

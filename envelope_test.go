@@ -33,10 +33,10 @@ func TestEnvelopeFileStorage(t *testing.T) {
 	contentHash := sha256.Sum256(fileContent)
 
 	request := &EnvelopeRequest{
-		Label:          "CCTV Evidence File Test",
-		Type:           EnvelopeTypeCCTVArchive,
-		CreatedBy:      "test-officer",
-		CaseReference:  "TEST-001",
+		Label:         "CCTV Evidence File Test",
+		Type:          EnvelopeTypeCCTVArchive,
+		CreatedBy:     "test-officer",
+		CaseReference: "TEST-001",
 
 		Payload: EnvelopePayload{
 			Kind:         "file",
@@ -53,7 +53,7 @@ func TestEnvelopeFileStorage(t *testing.T) {
 
 		Policies: EnvelopePolicies{
 			Fingerprint: FingerprintPolicy{
-				Required: true,
+				Required:               true,
 				AuthorizedFingerprints: []string{"fp:test-detective"},
 			},
 		},
@@ -127,6 +127,69 @@ func TestEnvelopeFileStorage(t *testing.T) {
 	t.Logf("✅ File storage integrity verified: %d bytes preserved", len(fileContent))
 }
 
+func TestEnvelopeAutoLogsOnOperations(t *testing.T) {
+	tmpDir := t.TempDir()
+	db1, err := NewWithConfig(Config{Path: filepath.Join(tmpDir, "sender")})
+	if err != nil {
+		t.Fatalf("sender db: %v", err)
+	}
+	defer db1.Close()
+	db2, err := NewWithConfig(Config{Path: filepath.Join(tmpDir, "recipient")})
+	if err != nil {
+		t.Fatalf("recipient db: %v", err)
+	}
+	defer db2.Close()
+
+	ctxSender := WithEnvelopeActor(context.Background(), "sender-auto")
+	ctxRecipient := WithEnvelopeActor(context.Background(), "recipient-auto")
+
+	env, err := db1.CreateEnvelope(ctxSender, &EnvelopeRequest{
+		Label:                "auto-log envelope",
+		Type:                 EnvelopeTypeCustodyProof,
+		CreatedBy:            "sender-auto",
+		FingerprintSignature: "fp:sender-auto",
+		Payload:              EnvelopePayload{Kind: "secret", SecretReference: "ENV_SECRET"},
+	})
+	if err != nil {
+		t.Fatalf("create envelope: %v", err)
+	}
+
+	exportPath := filepath.Join(tmpDir, "env.json")
+	if err := db1.ExportEnvelope(ctxSender, env.EnvelopeID, exportPath); err != nil {
+		t.Fatalf("export envelope: %v", err)
+	}
+
+	imported, err := db2.ImportEnvelope(ctxRecipient, exportPath)
+	if err != nil {
+		t.Fatalf("import envelope: %v", err)
+	}
+
+	loaded, err := db2.LoadEnvelope(ctxRecipient, imported.EnvelopeID)
+	if err != nil {
+		t.Fatalf("load envelope: %v", err)
+	}
+
+	actions := map[string]bool{}
+	for _, a := range loaded.AuditLog {
+		actions[a.Action] = true
+	}
+	for _, req := range []string{"envelope.export", "envelope.import", "envelope.load"} {
+		if !actions[req] {
+			t.Fatalf("missing automatic audit action %s", req)
+		}
+	}
+
+	custodyActions := map[string]bool{}
+	for _, c := range loaded.CustodyLedger {
+		custodyActions[c.Action] = true
+	}
+	for _, req := range []string{"envelope.exported", "envelope.imported", "envelope.loaded"} {
+		if !custodyActions[req] {
+			t.Fatalf("missing automatic custody action %s", req)
+		}
+	}
+}
+
 func TestEnvelopeKeyValueStorage(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -145,16 +208,16 @@ func TestEnvelopeKeyValueStorage(t *testing.T) {
 
 	// Create envelope with key-value data
 	kvData := map[string]interface{}{
-		"suspect_name":    "John Doe",
-		"case_number":     "CR-2026-001234",
-		"evidence_count":  15,
-		"priority":        "high",
-		"sealed":          true,
-		"witness_list":    []string{"Alice", "Bob", "Charlie"},
+		"suspect_name":   "John Doe",
+		"case_number":    "CR-2026-001234",
+		"evidence_count": 15,
+		"priority":       "high",
+		"sealed":         true,
+		"witness_list":   []string{"Alice", "Bob", "Charlie"},
 		"timestamps": map[string]string{
-			"incident":  "2026-01-20T14:30:00Z",
-			"reported":  "2026-01-20T15:45:00Z",
-			"sealed":    "2026-01-21T09:00:00Z",
+			"incident": "2026-01-20T14:30:00Z",
+			"reported": "2026-01-20T15:45:00Z",
+			"sealed":   "2026-01-21T09:00:00Z",
 		},
 	}
 
@@ -280,17 +343,17 @@ func TestEnvelopeMultiplePayloadTypes(t *testing.T) {
 		encodingHint string
 	}{
 		{
-			name:        "Binary File",
-			payloadKind: "file",
-			data:        []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46}, // JPEG header
-			metadata:    map[string]string{"type": "image/jpeg"},
+			name:         "Binary File",
+			payloadKind:  "file",
+			data:         []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46}, // JPEG header
+			metadata:     map[string]string{"type": "image/jpeg"},
 			encodingHint: "binary",
 		},
 		{
-			name:        "Text Secret",
-			payloadKind: "secret",
-			data:        []byte("API_KEY=sk-1234567890abcdef"),
-			metadata:    map[string]string{"type": "api_key"},
+			name:         "Text Secret",
+			payloadKind:  "secret",
+			data:         []byte("API_KEY=sk-1234567890abcdef"),
+			metadata:     map[string]string{"type": "api_key"},
 			encodingHint: "utf-8",
 		},
 		{
@@ -310,9 +373,9 @@ func TestEnvelopeMultiplePayloadTypes(t *testing.T) {
 			hash := sha256.Sum256(tc.data)
 
 			request := &EnvelopeRequest{
-				Label:         "Test: " + tc.name,
-				Type:          EnvelopeTypeCourtEvidence,
-				CreatedBy:     "test-system",
+				Label:     "Test: " + tc.name,
+				Type:      EnvelopeTypeCourtEvidence,
+				CreatedBy: "test-system",
 
 				Payload: EnvelopePayload{
 					Kind:         tc.payloadKind,
@@ -1021,7 +1084,7 @@ func TestEnvelopeTamperedPayload(t *testing.T) {
 
 	// Import tampered envelope
 	db2, _ := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "tamper_db2"),
+		Path:            filepath.Join(tmpDir, "tamper_db2"),
 		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
 	})
 	defer db2.Close()
@@ -1115,7 +1178,7 @@ func TestEnvelopeBrokenCustodyChain(t *testing.T) {
 
 	// Import tampered envelope
 	db2, _ := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "chain_db2"),
+		Path:            filepath.Join(tmpDir, "chain_db2"),
 		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
 	})
 	defer db2.Close()
@@ -1237,7 +1300,7 @@ func TestEnvelopeInvalidStructure(t *testing.T) {
 
 			// Try to import
 			db2, _ := NewWithConfig(Config{
-				Path: filepath.Join(tmpDir, "invalid_db2_"+tc.name),
+				Path:            filepath.Join(tmpDir, "invalid_db2_"+tc.name),
 				MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
 			})
 			defer db2.Close()
@@ -1414,7 +1477,7 @@ func TestEnvelopeSequenceViolation(t *testing.T) {
 
 	// Import and check for sequence violations
 	db2, _ := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "sequence_db2"),
+		Path:            filepath.Join(tmpDir, "sequence_db2"),
 		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
 	})
 	defer db2.Close()
@@ -1500,7 +1563,7 @@ func TestEnvelopeReplayAttack(t *testing.T) {
 
 	// Import replayed envelope
 	db2, _ := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "replay_db2"),
+		Path:            filepath.Join(tmpDir, "replay_db2"),
 		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
 	})
 	defer db2.Close()

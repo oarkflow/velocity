@@ -2,13 +2,13 @@ package types
 
 // Envelope structures
 type Envelope struct {
-	ID           ID              `json:"id"`
-	Version      int             `json:"version"`
-	Header       EnvelopeHeader  `json:"header"`
-	EncryptedKey []byte          `json:"encrypted_key"` // DEK encrypted for recipient
-	Payload      []byte          `json:"payload"`       // Encrypted EnvelopePayload
-	Signature    []byte          `json:"signature"`
-	Custody      []CustodyEntry  `json:"custody"`
+	ID           ID             `json:"id"`
+	Version      int            `json:"version"`
+	Header       EnvelopeHeader `json:"header"`
+	EncryptedKey []byte         `json:"encrypted_key"` // DEK encrypted for recipient
+	Payload      []byte         `json:"payload"`       // Encrypted EnvelopePayload
+	Signature    []byte         `json:"signature"`
+	Custody      []CustodyEntry `json:"custody"`
 }
 
 type EnvelopeHeader struct {
@@ -33,18 +33,23 @@ type SecretPayload struct {
 }
 
 type FilePayload struct {
-	Name string `json:"name"`
-	Data []byte `json:"data"`
-	Type string `json:"type"`
+	Name     string   `json:"name"`
+	Data     []byte   `json:"data"`
+	Type     string   `json:"type"`
 	Metadata Metadata `json:"metadata,omitempty"`
 }
 
 type CustodyEntry struct {
 	Hash      []byte    `json:"hash"` // Chain hash
+	PrevHash  []byte    `json:"prev_hash,omitempty"`
 	Action    string    `json:"action"`
+	Category  string    `json:"category,omitempty"` // access, dependency, custody, event
+	Outcome   string    `json:"outcome,omitempty"`  // success, denied, failed
 	ActorID   ID        `json:"actor_id"`
 	Timestamp Timestamp `json:"timestamp"`
 	Location  string    `json:"location"`
+	Related   []string  `json:"related,omitempty"`
+	Details   Metadata  `json:"details,omitempty"`
 	Signature []byte    `json:"signature"`
 }
 
@@ -55,8 +60,6 @@ type BusinessRules struct {
 	RequireMFA         bool         `json:"require_mfa,omitempty"`
 	MaxAccessCount     int          `json:"max_access_count,omitempty"`
 }
-
-
 
 const (
 	ActionEnvelopeCreate = "create"

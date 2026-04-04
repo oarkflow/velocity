@@ -25,6 +25,7 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-sqlite3 v1.14.33 // indirect
+	github.com/miekg/pkcs11 v1.1.2 // indirect
 	github.com/oarkflow/cas v0.0.5 // indirect
 	github.com/oarkflow/convert v0.0.5 // indirect
 	github.com/oarkflow/date v0.0.4 // indirect

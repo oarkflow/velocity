@@ -323,6 +323,25 @@ Missing tests to add:
 - recipient email resolution
 - strict/non-strict custody persistence behavior
 
+## 13. Secure Auditing Coverage (Current)
+
+Envelope flows now provide broader secured-auditing fields and events:
+
+- Envelope signature verification on open when sender public key is resolvable.
+- Custody-chain actor signature verification on open (per entry) when actor keys are resolvable.
+- Custody entry schema supports forensic correlation fields:
+  - `prev_hash`, `category`, `outcome`, `related`, `details`
+- Open path emits extended event classes in audit:
+  - `envelope_access_chain`
+  - `envelope_dependency_chain`
+  - `envelope_custody_chain`
+  - `envelope_event_log`
+
+Dependency refs are computed from policy id, secret names, and file names in payload metadata.
+
+Example walkthrough:
+- `examples/envelope_audit_chain_demo.md`
+
 ## 12. Quick Practical Commands
 
 Create:

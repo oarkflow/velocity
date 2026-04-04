@@ -50,6 +50,14 @@ It runs targeted authz/CLI tests in both modes (including `go test ./cmd/secretr
 
 It also runs a strict production smoke check in an isolated `HOME` and validates JSON output from `secretr admin system --strict --format json`; exit status is asserted against `release_blockers` count to keep the check deterministic.
 
+### CI Release Governance Workflow
+
+GitHub Actions includes `.github/workflows/secretr-release-governance.yml` to enforce release governance on `pull_request`, pushes to `main`/`master`, and tag pushes.
+
+It enforces a non-interactive release validation chain: setup Go, run core tests (`go test ./cmd/secretr` and authz/CLI packages), build production binary (`dist/secretr`), generate SHA-256 checksums, produce an SPDX JSON SBOM for the binary, run vulnerability scanning with `govulncheck`, and sign binary/checksum/SBOM via keyless Sigstore Cosign (OIDC).
+
+The workflow grants `id-token: write` permission for keyless signing and uploads all governance outputs (artifacts, vulnerability report, signatures, and certificates) as build artifacts for traceability and release auditability.
+
 ## 2. First-Time Setup (Copy-Paste)
 
 ### 2.1 Initialize + Login
@@ -100,10 +108,14 @@ Example:
 - `processgate.aws.client_id`
 - `processgate.aws.secret`
 
-### 3.3 Vault Path Log
+### 3.3 Runtime Info
 
-CLI prints vault path each run:
-- `secretr: vault path: ...`
+Use `secretr info` for runtime/build metadata including data dir and vault path:
+
+```bash
+secretr info --format table
+secretr info --format json
+```
 
 ## 4. Command Groups at a Glance
 

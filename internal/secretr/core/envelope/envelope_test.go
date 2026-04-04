@@ -2,6 +2,7 @@ package envelope_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -31,13 +32,13 @@ func TestEnvelopeWorkflow(t *testing.T) {
 
 	ctx := context.Background()
 	env, err := engine.Create(ctx, envelope.CreateOptions{
-		SenderID:      senderID,
-		SenderPrivKey: senderPriv.Bytes(),
-		RecipientID:   recipID,
+		SenderID:        senderID,
+		SenderPrivKey:   senderPriv.Bytes(),
+		RecipientID:     recipID,
 		RecipientPubKey: recipPub,
-		Secrets:       []types.SecretPayload{secretPayload},
-		Message:       "For your eyes only",
-		ExpiresIn:     1 * time.Hour,
+		Secrets:         []types.SecretPayload{secretPayload},
+		Message:         "For your eyes only",
+		ExpiresIn:       1 * time.Hour,
 	})
 
 	if err != nil {
@@ -57,15 +58,22 @@ func TestEnvelopeWorkflow(t *testing.T) {
 
 	// 4. Open Envelope (Success Case)
 	openCtx := envelope.Context{
-		Time: time.Now(),
+		Time:       time.Now(),
 		TrustScore: 1.0,
 	}
 
 	payload, err := engine.Open(ctx, envelope.OpenOptions{
-		Envelope:        env,
-		RecipientID:     recipID,
+		Envelope:         env,
+		RecipientID:      recipID,
 		RecipientPrivKey: recipPriv.Bytes(),
-		Context:         openCtx,
+		SenderPublicKey:  senderPub,
+		ResolveActorPublicKey: func(actorID types.ID) ([]byte, error) {
+			if actorID == senderID {
+				return senderPub, nil
+			}
+			return nil, fmt.Errorf("unknown actor")
+		},
+		Context: openCtx,
 	})
 
 	if err != nil {
@@ -80,6 +88,53 @@ func TestEnvelopeWorkflow(t *testing.T) {
 	}
 }
 
+func TestEnvelopeOpenRejectsTamperedSignature(t *testing.T) {
+	policyEngine := policy.NewEngine(policy.EngineConfig{})
+	engine := envelope.NewEngine(policyEngine)
+	defer engine.Close()
+
+	senderPub, senderPriv, _ := engine.Crypto().GenerateKeyPair()
+	recipPub, recipPriv, _ := engine.Crypto().GenerateX25519KeyPair()
+
+	env, err := engine.Create(context.Background(), envelope.CreateOptions{
+		SenderID:        "sender",
+		SenderPrivKey:   senderPriv.Bytes(),
+		RecipientID:     "recipient",
+		RecipientPubKey: recipPub,
+		Message:         "sealed",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env.Signature[0] ^= 0x01
+
+	_, err = engine.Open(context.Background(), envelope.OpenOptions{
+		Envelope:         env,
+		RecipientID:      "recipient",
+		RecipientPrivKey: recipPriv.Bytes(),
+		SenderPublicKey:  senderPub,
+		ResolveActorPublicKey: func(actorID types.ID) ([]byte, error) {
+			return senderPub, nil
+		},
+		Context: envelope.Context{Time: time.Now(), TrustScore: 1},
+	})
+	if err == nil {
+		t.Fatal("expected signature verification failure")
+	}
+}
+
+func TestBuildDependencyRefs(t *testing.T) {
+	env := &types.Envelope{Header: types.EnvelopeHeader{PolicyID: "policy-1"}}
+	p := &types.EnvelopePayload{
+		Secrets: []types.SecretPayload{{Name: "ENV_SECRET"}},
+		Files:   []types.FilePayload{{Name: "report.pdf"}},
+	}
+	refs := envelope.BuildDependencyRefs(env, p)
+	if len(refs) != 3 {
+		t.Fatalf("expected 3 refs, got %d: %v", len(refs), refs)
+	}
+}
+
 func TestEnvelopeExpired(t *testing.T) {
 	policyEngine := policy.NewEngine(policy.EngineConfig{})
 	engine := envelope.NewEngine(policyEngine)
@@ -90,16 +145,16 @@ func TestEnvelopeExpired(t *testing.T) {
 
 	// Create already expired envelope (small negative duration)
 	env, _ := engine.Create(context.Background(), envelope.CreateOptions{
-		SenderID:      "sender",
-		SenderPrivKey: senderPriv.Bytes(),
-		RecipientID:   "recipient",
+		SenderID:        "sender",
+		SenderPrivKey:   senderPriv.Bytes(),
+		RecipientID:     "recipient",
 		RecipientPubKey: recipPub,
-		ExpiresIn:     -1 * time.Second,
+		ExpiresIn:       -1 * time.Second,
 	})
 
 	_, err := engine.Open(context.Background(), envelope.OpenOptions{
-		Envelope:        env,
-		RecipientID:     "recipient",
+		Envelope:         env,
+		RecipientID:      "recipient",
 		RecipientPrivKey: recipPriv.Bytes(),
 	})
 
@@ -120,20 +175,20 @@ func TestBusinessRules(t *testing.T) {
 	rules := types.BusinessRules{RequireMFA: true}
 
 	env, _ := engine.Create(context.Background(), envelope.CreateOptions{
-		SenderID:      "sender",
-		SenderPrivKey: senderPriv.Bytes(),
-		RecipientID:   "recipient",
+		SenderID:        "sender",
+		SenderPrivKey:   senderPriv.Bytes(),
+		RecipientID:     "recipient",
 		RecipientPubKey: recipPub,
-		Rules:         rules,
+		Rules:           rules,
 	})
 
 	// Try without MFA
 	ctxNoMFA := envelope.Context{MFAVerified: false}
 	_, err := engine.Open(context.Background(), envelope.OpenOptions{
-		Envelope:        env,
-		RecipientID:     "recipient",
+		Envelope:         env,
+		RecipientID:      "recipient",
 		RecipientPrivKey: recipPriv.Bytes(),
-		Context:         ctxNoMFA,
+		Context:          ctxNoMFA,
 	})
 
 	if err == nil {
@@ -143,10 +198,10 @@ func TestBusinessRules(t *testing.T) {
 	// Try with MFA
 	ctxWithMFA := envelope.Context{MFAVerified: true}
 	_, err = engine.Open(context.Background(), envelope.OpenOptions{
-		Envelope:        env,
-		RecipientID:     "recipient",
+		Envelope:         env,
+		RecipientID:      "recipient",
 		RecipientPrivKey: recipPriv.Bytes(),
-		Context:         ctxWithMFA,
+		Context:          ctxWithMFA,
 	})
 
 	if err != nil {

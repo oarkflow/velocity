@@ -246,7 +246,15 @@ func EnvelopeOpen(ctx context.Context, cmd *cli.Command) error {
 		Envelope:         &env,
 		RecipientID:      env.Header.RecipientID,
 		RecipientPrivKey: recipPriv,
-		Context:          currCtx,
+		SenderPublicKey:  senderPublicKeyForEnvelope(ctx, c, &env),
+		ResolveActorPublicKey: func(actorID types.ID) ([]byte, error) {
+			idn, e := c.Identity.GetIdentity(ctx, actorID)
+			if e != nil {
+				return nil, e
+			}
+			return idn.PublicKey, nil
+		},
+		Context: currCtx,
 	})
 
 	if err != nil {
@@ -268,9 +276,31 @@ func EnvelopeOpen(ctx context.Context, cmd *cli.Command) error {
 		}
 	}
 	payloadHash := sha256.Sum256(payloadDataForAudit(payload))
+	dependencyRefs := envelope.BuildDependencyRefs(&env, payload)
 	logEnvelopeAudit(ctx, c, "envelope_open", env.ID, true, map[string]any{
-		"path":         filePath,
-		"payload_hash": hex.EncodeToString(payloadHash[:]),
+		"path":            filePath,
+		"payload_hash":    hex.EncodeToString(payloadHash[:]),
+		"dependency_refs": dependencyRefs,
+		"recipient_only":  c.CurrentIdentityID() == env.Header.RecipientID,
+	})
+	logEnvelopeAudit(ctx, c, "envelope_access_chain", env.ID, true, map[string]any{
+		"path":           filePath,
+		"actor_id":       c.CurrentIdentityID(),
+		"recipient_id":   env.Header.RecipientID,
+		"recipient_only": c.CurrentIdentityID() == env.Header.RecipientID,
+		"custody_length": len(env.Custody),
+	})
+	logEnvelopeAudit(ctx, c, "envelope_dependency_chain", env.ID, true, map[string]any{
+		"path":            filePath,
+		"dependency_refs": dependencyRefs,
+	})
+	logEnvelopeAudit(ctx, c, "envelope_custody_chain", env.ID, true, map[string]any{
+		"path":           filePath,
+		"custody_length": len(env.Custody),
+	})
+	logEnvelopeAudit(ctx, c, "envelope_event_log", env.ID, true, map[string]any{
+		"path":  filePath,
+		"event": "open_success",
 	})
 
 	success("Envelope Opened!")
@@ -377,6 +407,10 @@ func logEnvelopeAudit(ctx context.Context, c *client.Client, action string, enve
 	if details == nil {
 		details = map[string]any{}
 	}
+	if envelopeID != "" {
+		details["envelope_id"] = envelopeID
+	}
+	details["audit_family"] = "envelope"
 	_ = cliClient.Audit.Log(ctx, audit.AuditEventInput{
 		Type:         "envelope",
 		Action:       action,
@@ -514,9 +548,23 @@ func appendEnvelopeCustody(env *types.Envelope, action string, actor types.ID, l
 	h := sha256.Sum256([]byte(fmt.Sprintf("%x|%s|%s|%d|%s", prev, action, actor, now, location)))
 	env.Custody = append(env.Custody, types.CustodyEntry{
 		Hash:      h[:],
+		PrevHash:  append([]byte(nil), prev...),
 		Action:    action,
+		Category:  "custody",
+		Outcome:   "success",
 		ActorID:   actor,
 		Timestamp: now,
 		Location:  location,
 	})
+}
+
+func senderPublicKeyForEnvelope(ctx context.Context, c *client.Client, env *types.Envelope) []byte {
+	if c == nil || env == nil {
+		return nil
+	}
+	idn, err := c.Identity.GetIdentity(ctx, env.Header.SenderID)
+	if err != nil || idn == nil {
+		return nil
+	}
+	return idn.PublicKey
 }

@@ -3,9 +3,11 @@ package envelope
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/oarkflow/velocity/internal/secretr/core/crypto"
@@ -14,11 +16,12 @@ import (
 )
 
 var (
-	ErrInvalidSignature    = errors.New("envelope: invalid signature")
-	ErrChainBroken         = errors.New("envelope: custody chain broken")
-	ErrAccessDenied        = errors.New("envelope: access denied by business rules")
-	ErrRecipientMismatch   = errors.New("envelope: recipient mismatch")
-	ErrEnvelopeExpired     = errors.New("envelope: envelope expired")
+	ErrInvalidSignature      = errors.New("envelope: invalid signature")
+	ErrChainBroken           = errors.New("envelope: custody chain broken")
+	ErrAccessDenied          = errors.New("envelope: access denied by business rules")
+	ErrRecipientMismatch     = errors.New("envelope: recipient mismatch")
+	ErrEnvelopeExpired       = errors.New("envelope: envelope expired")
+	ErrActorSignatureInvalid = errors.New("envelope: custody actor signature invalid")
 )
 
 // Engine manages secure envelopes
@@ -42,16 +45,16 @@ func (e *Engine) Crypto() *crypto.Engine {
 
 // CreateOptions holds options for creating an envelope
 type CreateOptions struct {
-	SenderID      types.ID
-	SenderPrivKey []byte
-	RecipientID   types.ID
+	SenderID        types.ID
+	SenderPrivKey   []byte
+	RecipientID     types.ID
 	RecipientPubKey []byte
-	Secrets       []types.SecretPayload
-	Files         []types.FilePayload
-	Message       string
-	PolicyID      types.ID
-	Rules         types.BusinessRules
-	ExpiresIn     time.Duration
+	Secrets         []types.SecretPayload
+	Files           []types.FilePayload
+	Message         string
+	PolicyID        types.ID
+	Rules           types.BusinessRules
+	ExpiresIn       time.Duration
 }
 
 // Create creates a new secure envelope
@@ -155,18 +158,20 @@ func (e *Engine) Create(ctx context.Context, opts CreateOptions) (*types.Envelop
 
 // OpenOptions holds options for opening an envelope
 type OpenOptions struct {
-	Envelope        *types.Envelope
-	RecipientID     types.ID
-	RecipientPrivKey []byte
-	Context         Context
+	Envelope              *types.Envelope
+	RecipientID           types.ID
+	RecipientPrivKey      []byte
+	SenderPublicKey       []byte
+	ResolveActorPublicKey func(actorID types.ID) ([]byte, error)
+	Context               Context
 }
 
 type Context struct {
-	IP        string
-	Time      time.Time
-	DeviceID  string
+	IP          string
+	Time        time.Time
+	DeviceID    string
 	MFAVerified bool
-	TrustScore float64
+	TrustScore  float64
 }
 
 // Open validates and opens an envelope
@@ -186,12 +191,24 @@ func (e *Engine) Open(ctx context.Context, opts OpenOptions) (*types.EnvelopePay
 		return nil, err
 	}
 
-	// 3. Verify Chain of Custody
+	// 3. Verify Envelope Signature
+	if len(opts.SenderPublicKey) > 0 {
+		if err := e.verifyEnvelopeSignature(env, opts.SenderPublicKey); err != nil {
+			return nil, err
+		}
+	}
+
+	// 4. Verify Chain of Custody
 	if err := e.VerifyChain(env); err != nil {
 		return nil, err
 	}
+	if opts.ResolveActorPublicKey != nil {
+		if err := e.VerifyChainSignatures(env, opts.ResolveActorPublicKey); err != nil {
+			return nil, err
+		}
+	}
 
-	// 4. Decrypt DEK
+	// 5. Decrypt DEK
 	if len(env.EncryptedKey) < 32 {
 		return nil, errors.New("invalid key data")
 	}
@@ -209,7 +226,7 @@ func (e *Engine) Open(ctx context.Context, opts OpenOptions) (*types.EnvelopePay
 		return nil, fmt.Errorf("failed to decrypt key: %w", err)
 	}
 
-	// 5. Decrypt Payload
+	// 6. Decrypt Payload
 	payloadData, err := e.crypto.Decrypt(dekBytes, env.Payload, nil)
 	// Zeroize dekBytes
 	for i := range dekBytes {
@@ -246,6 +263,7 @@ func (e *Engine) appendCustody(env *types.Envelope, entry types.CustodyEntry, pr
 	} else {
 		prevHash = make([]byte, 32) // Genesis hash
 	}
+	entry.PrevHash = append([]byte(nil), prevHash...)
 
 	dataToHash := fmt.Sprintf("%x%s%s%d%s", prevHash, entry.Action, entry.ActorID, entry.Timestamp, entry.Location)
 	entry.Hash = e.crypto.Hash([]byte(dataToHash))
@@ -270,6 +288,9 @@ func (e *Engine) VerifyChain(env *types.Envelope) error {
 	var prevHash []byte = make([]byte, 32)
 
 	for i, entry := range env.Custody {
+		if len(entry.PrevHash) > 0 && !equal(entry.PrevHash, prevHash) {
+			return fmt.Errorf("chain broken at index %d (prev hash mismatch)", i)
+		}
 		// Verify Hash linkage
 		dataToHash := fmt.Sprintf("%x%s%s%d%s", prevHash, entry.Action, entry.ActorID, entry.Timestamp, entry.Location)
 		computedHash := e.crypto.Hash([]byte(dataToHash))
@@ -282,6 +303,96 @@ func (e *Engine) VerifyChain(env *types.Envelope) error {
 		prevHash = e.crypto.Hash(entry.Signature)
 	}
 	return nil
+}
+
+func (e *Engine) verifyEnvelopeSignature(env *types.Envelope, senderPubKey []byte) error {
+	if env == nil {
+		return ErrInvalidSignature
+	}
+	if len(env.Signature) == 0 {
+		return ErrInvalidSignature
+	}
+	return e.crypto.Verify(senderPubKey, e.signatureData(env), env.Signature)
+}
+
+func (e *Engine) VerifyEnvelopeSignature(env *types.Envelope, senderPubKey []byte) error {
+	return e.verifyEnvelopeSignature(env, senderPubKey)
+}
+
+func (e *Engine) VerifyChainSignatures(env *types.Envelope, resolveActorPublicKey func(actorID types.ID) ([]byte, error)) error {
+	if env == nil {
+		return ErrChainBroken
+	}
+	for i := range env.Custody {
+		entry := env.Custody[i]
+		if len(entry.Signature) == 0 {
+			return fmt.Errorf("%w: index %d missing signature", ErrActorSignatureInvalid, i)
+		}
+		pub, err := resolveActorPublicKey(entry.ActorID)
+		if err != nil {
+			return fmt.Errorf("%w: index %d actor %s key resolve failed: %v", ErrActorSignatureInvalid, i, entry.ActorID, err)
+		}
+		signData, _ := json.Marshal(types.CustodyEntry{
+			Hash:      entry.Hash,
+			PrevHash:  entry.PrevHash,
+			Action:    entry.Action,
+			Category:  entry.Category,
+			Outcome:   entry.Outcome,
+			ActorID:   entry.ActorID,
+			Timestamp: entry.Timestamp,
+			Location:  entry.Location,
+			Related:   entry.Related,
+			Details:   entry.Details,
+		})
+		if err := e.crypto.Verify(pub, signData, entry.Signature); err != nil {
+			return fmt.Errorf("%w: index %d actor %s: %v", ErrActorSignatureInvalid, i, entry.ActorID, err)
+		}
+	}
+	return nil
+}
+
+func BuildDependencyRefs(env *types.Envelope, payload *types.EnvelopePayload) []string {
+	refs := make([]string, 0, 6)
+	if env == nil {
+		return refs
+	}
+	if env.Header.PolicyID != "" {
+		refs = append(refs, "policy:"+string(env.Header.PolicyID))
+	}
+	if payload != nil {
+		for _, s := range payload.Secrets {
+			if s.Name == "" {
+				continue
+			}
+			refs = append(refs, "secret:"+s.Name)
+		}
+		for _, f := range payload.Files {
+			if f.Name == "" {
+				continue
+			}
+			refs = append(refs, "file:"+f.Name)
+		}
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func PayloadDigestBase64(payload *types.EnvelopePayload) string {
+	if payload == nil {
+		return ""
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	h := ehash(b)
+	return base64.StdEncoding.EncodeToString(h)
+}
+
+func ehash(data []byte) []byte {
+	e := crypto.NewEngine("")
+	defer e.Close()
+	return e.Hash(data)
 }
 
 func (e *Engine) validateRules(rules types.BusinessRules, ctx Context) error {
