@@ -12,10 +12,12 @@ import (
 )
 
 type VelocityProvider struct {
-	db     *velocity.DB
-	sqlDB  *sql.DB
-	useSQL bool
-	path   string
+	db                *velocity.DB
+	sqlDB             *sql.DB
+	useSQL            bool
+	encrypted         bool
+	reopenedForSearch bool
+	path              string
 }
 
 func NewVelocityProvider(path string, useSQL bool) *VelocityProvider {
@@ -25,30 +27,65 @@ func NewVelocityProvider(path string, useSQL bool) *VelocityProvider {
 	}
 }
 
+func NewVelocityEncryptedProvider(path string) *VelocityProvider {
+	return &VelocityProvider{
+		path:      path,
+		encrypted: true,
+	}
+}
+
 func (p *VelocityProvider) Name() string {
+	if p.encrypted {
+		return "Velocity (Encrypted)"
+	}
 	if p.useSQL {
 		return "Velocity (SQL)"
 	}
 	return "Velocity (Native)"
 }
 
+func (p *VelocityProvider) searchSchema() map[string]*velocity.SearchSchema {
+	return map[string]*velocity.SearchSchema{
+		"users": {
+			Fields: []velocity.SearchSchemaField{
+				{Name: "id", Searchable: true, HashSearch: true},
+				{Name: "name", Searchable: true},
+				{Name: "email", HashSearch: true},
+				{Name: "age", Searchable: true, HashSearch: true},
+			},
+		},
+	}
+}
+
+func (p *VelocityProvider) config() velocity.Config {
+	if p.encrypted {
+		return velocity.Config{
+			Path:            p.path,
+			PerformanceMode: "performance",
+			MasterKey:       benchmarkEncryptionKey,
+			SearchSchemas:   p.searchSchema(),
+		}
+	}
+	return velocity.Config{
+		Path:              p.path,
+		PerformanceMode:   "performance",
+		SearchSchemas:     p.searchSchema(),
+		DisableEncryption: true,
+		DisableWAL:        true,
+		DisableFsync:      true,
+	}
+}
+
 func (p *VelocityProvider) Setup(ctx context.Context) error {
 	os.RemoveAll(p.path)
+	p.reopenedForSearch = false
 
 	if p.useSQL {
 		// Use the DSN configuration for the SQL driver
 		sqldriver.DSNConfigs[p.path] = velocity.Config{
 			Path:            p.path,
 			PerformanceMode: "performance",
-			SearchSchemas: map[string]*velocity.SearchSchema{
-				"users": {
-					Fields: []velocity.SearchSchemaField{
-						{Name: "id", Searchable: true, HashSearch: true},
-						{Name: "name", Searchable: true},
-						{Name: "age", Searchable: true, HashSearch: true},
-					},
-				},
-			},
+			SearchSchemas:   p.searchSchema(),
 		}
 
 		db, err := sql.Open("velocity", p.path)
@@ -57,13 +94,7 @@ func (p *VelocityProvider) Setup(ctx context.Context) error {
 		}
 		p.sqlDB = db
 	} else {
-		db, err := velocity.NewWithConfig(velocity.Config{
-			Path:              p.path,
-			PerformanceMode:   "performance",
-			DisableEncryption: true,
-			DisableWAL:        true,
-			DisableFsync:      true,
-		})
+		db, err := velocity.NewWithConfig(p.config())
 		if err != nil {
 			return err
 		}
@@ -88,9 +119,12 @@ func (p *VelocityProvider) Insert(ctx context.Context, id int, name string, age 
 		return err
 	}
 
-	key := []byte(fmt.Sprintf("user:%d", id))
-	data := fmt.Sprintf(`{"id":%d,"name":"%s","age":%d}`, id, name, age)
-	return p.db.Put(key, []byte(data))
+	key := []byte(fmt.Sprintf("users:%d", id))
+	data, err := benchmarkUserJSON(id, name, age)
+	if err != nil {
+		return err
+	}
+	return p.db.Put(key, data)
 }
 
 func (p *VelocityProvider) Read(ctx context.Context, id int) (string, int, error) {
@@ -101,7 +135,7 @@ func (p *VelocityProvider) Read(ctx context.Context, id int) (string, int, error
 		return name, age, err
 	}
 
-	key := []byte(fmt.Sprintf("user:%d", id))
+	key := []byte(fmt.Sprintf("users:%d", id))
 	val, err := p.db.Get(key)
 	if err != nil {
 		return "", 0, err
@@ -122,10 +156,13 @@ func (p *VelocityProvider) Update(ctx context.Context, id int, age int) error {
 		return err
 	}
 
-	key := []byte(fmt.Sprintf("user:%d", id))
+	key := []byte(fmt.Sprintf("users:%d", id))
 	// In native we just overwrite
-	data := fmt.Sprintf(`{"id":%d,"name":"user_%d","age":%d}`, id, id, age)
-	return p.db.Put(key, []byte(data))
+	data, err := benchmarkUserJSON(id, fmt.Sprintf("user_%d", id), age)
+	if err != nil {
+		return err
+	}
+	return p.db.Put(key, data)
 }
 
 func (p *VelocityProvider) Delete(ctx context.Context, id int) error {
@@ -134,7 +171,7 @@ func (p *VelocityProvider) Delete(ctx context.Context, id int) error {
 		return err
 	}
 
-	key := []byte(fmt.Sprintf("user:%d", id))
+	key := []byte(fmt.Sprintf("users:%d", id))
 	return p.db.Delete(key)
 }
 
@@ -152,13 +189,52 @@ func (p *VelocityProvider) Search(ctx context.Context, minAge int) (int, error) 
 		return count, nil
 	}
 
-	// Native search uses the Search API with Prefix
-	count, err := p.db.Search(velocity.SearchQuery{
-		Prefix: "user:", // Search by prefix
-		// We'd need more complex logic to filter by age native if we don't have an index
-		// For consistency with SQL we just scan & count for now
+	if p.encrypted {
+		return p.db.SearchCount(velocity.SearchQuery{
+			Prefix: "users",
+			Filters: []velocity.SearchFilter{
+				{Field: "email", Op: "==", Value: benchmarkEmail(encryptedBenchmarkTargetID), HashOnly: true},
+				{Field: "age", Op: ">=", Value: minAge},
+			},
+			Limit: 1,
+		})
+	}
+
+	results, err := p.db.Search(velocity.SearchQuery{
+		Prefix: "users",
+		Filters: []velocity.SearchFilter{
+			{Field: "email", Op: "==", Value: benchmarkEmail(encryptedBenchmarkTargetID), HashOnly: p.encrypted},
+			{Field: "age", Op: ">=", Value: minAge},
+		},
+		Limit: 1,
 	})
-	return len(count), err
+	return len(results), err
+}
+
+func (p *VelocityProvider) PrepareSearchBenchmark(ctx context.Context, minAge int) error {
+	if !p.encrypted {
+		return nil
+	}
+	if !p.reopenedForSearch {
+		if err := p.db.Close(); err != nil {
+			return err
+		}
+		db, err := velocity.NewWithConfig(p.config())
+		if err != nil {
+			return err
+		}
+		p.db = db
+		p.reopenedForSearch = true
+	}
+	_, err := p.db.SearchCount(velocity.SearchQuery{
+		Prefix: "users",
+		Filters: []velocity.SearchFilter{
+			{Field: "email", Op: "==", Value: benchmarkEmail(encryptedBenchmarkTargetID), HashOnly: true},
+			{Field: "age", Op: ">=", Value: minAge},
+		},
+		Limit: 1,
+	})
+	return err
 }
 
 func (p *VelocityProvider) BatchInsert(ctx context.Context, startID int, count int) error {
@@ -190,9 +266,14 @@ func (p *VelocityProvider) BatchInsert(ctx context.Context, startID int, count i
 	for i := 0; i < count; i++ {
 		id := startID + i
 		name := fmt.Sprintf("user_%d", id)
-		key := []byte(fmt.Sprintf("user:%d", id))
-		data := fmt.Sprintf(`{"id":%d,"name":"%s","age":%d}`, id, name, 20+(id%50))
-		batch.Put(key, []byte(data))
+		key := []byte(fmt.Sprintf("users:%d", id))
+		data, err := benchmarkUserJSON(id, name, 20+(id%50))
+		if err != nil {
+			return err
+		}
+		if err := batch.Put(key, data); err != nil {
+			return err
+		}
 	}
 	return batch.Flush()
 }

@@ -24,6 +24,13 @@ type DBProvider interface {
 	BatchInsert(ctx context.Context, startID int, count int) error
 }
 
+// SearchBenchmarkPreparer is an optional hook for providers that need to
+// perform untimed setup before search benchmarking, such as reopening a store
+// or warming query plans/caches.
+type SearchBenchmarkPreparer interface {
+	PrepareSearchBenchmark(ctx context.Context, minAge int) error
+}
+
 // BenchmarkResult stores the results of a single benchmark run
 type BenchmarkResult struct {
 	Name       string

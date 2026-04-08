@@ -31,6 +31,11 @@ func main() {
 		NewPostgresProvider(),
 	}
 
+	encryptedProviders := []DBProvider{
+		NewVelocityEncryptedProvider("./bench_velocity_encrypted"),
+		NewPostgresEncryptedProvider(),
+	}
+
 	activeProviders := []DBProvider{}
 	for _, p := range providers {
 		fmt.Printf("Setting up %s... ", p.Name())
@@ -99,6 +104,40 @@ func main() {
 		allResults = append(allResults, res)
 	}
 
+	encryptedActiveProviders := []DBProvider{}
+	for _, p := range encryptedProviders {
+		fmt.Printf("Setting up %s... ", p.Name())
+		if err := p.Setup(ctx); err != nil {
+			fmt.Printf("❌ Skipped (Connection failed: %v)\n", err)
+			continue
+		}
+		fmt.Printf("✅ Ready\n")
+		if err := p.BatchInsert(ctx, encryptedBenchmarkStartID, encryptedBenchmarkCount); err != nil {
+			fmt.Printf("❌ Skipped (Seed failed: %v)\n", err)
+			_ = p.Cleanup(ctx)
+			continue
+		}
+		encryptedActiveProviders = append(encryptedActiveProviders, p)
+		defer p.Cleanup(ctx)
+	}
+
+	if len(encryptedActiveProviders) > 0 {
+		fmt.Printf("Running Encrypted Search Benchmark...\n")
+		for _, p := range encryptedActiveProviders {
+			if preparer, ok := p.(SearchBenchmarkPreparer); ok {
+				if err := preparer.PrepareSearchBenchmark(ctx, 30); err != nil {
+					fmt.Printf("Skipping %s encrypted search benchmark (prepare failed: %v)\n", p.Name(), err)
+					continue
+				}
+			}
+			res := runBenchmark(p.Name(), "Encrypted Search", 100, func() error {
+				_, err := p.Search(ctx, 30)
+				return err
+			})
+			allResults = append(allResults, res)
+		}
+	}
+
 	printComparisonTable(allResults)
 }
 
@@ -115,5 +154,5 @@ func printComparisonTable(results []BenchmarkResult) {
 	}
 	w.Flush()
 
-	fmt.Printf("\nNote: Velocity (Native) often outperforms SQL layers due to zero overhead and direct LSM-tree access.\n")
+	fmt.Printf("\nNote: Encrypted search providers benchmark application-encrypted payloads with indexed derived values instead of full-row decryption scans.\n")
 }

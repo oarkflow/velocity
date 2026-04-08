@@ -154,8 +154,8 @@ func (bw *BatchWriter) flushUnsafe() error {
 					return err
 				}
 			}
-			terms, hashes := buildIndexProjections(entry.Value, schema)
-			meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes}
+			terms, hashes, values := buildIndexProjections(entry.Value, schema)
+			meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes, Values: values}
 			metaBytes, err := json.Marshal(meta)
 			if err != nil {
 				bw.db.mutex.Unlock()

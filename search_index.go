@@ -76,6 +76,7 @@ type indexMeta struct {
 	Prefix string            `json:"prefix"`
 	Terms  []string          `json:"terms"`
 	Hashes map[string]string `json:"hashes"`
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // PutIndexed stores a value and updates the hybrid index based on schema.
@@ -232,8 +233,8 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 		}
 		batch := make([]indexWorkItem, 0, end-start)
 		for _, p := range pairs[start:end] {
-			terms, hashes := buildIndexProjections(p.value, schema)
-			batch = append(batch, indexWorkItem{key: p.key, value: p.value, terms: terms, hashes: hashes})
+			terms, hashes, values := buildIndexProjections(p.value, schema)
+			batch = append(batch, indexWorkItem{key: p.key, value: p.value, terms: terms, hashes: hashes, values: values})
 		}
 		if err := db.applyIndexBatch(prefix, batch, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL}); err != nil {
 			return err
@@ -248,6 +249,7 @@ type indexWorkItem struct {
 	value  []byte
 	terms  []string
 	hashes map[string]string
+	values map[string]string
 }
 
 func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *RebuildOptions) error {
@@ -276,7 +278,7 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 			}
 		}
 
-		meta := indexMeta{Prefix: prefix, Terms: item.terms, Hashes: item.hashes}
+		meta := indexMeta{Prefix: prefix, Terms: item.terms, Hashes: item.hashes, Values: item.values}
 		metaBytes, err := json.Marshal(meta)
 		if err != nil {
 			return err
@@ -437,12 +439,12 @@ func (db *DB) indexEntryLocked(key, value []byte, prefix string, schema *SearchS
 	}
 
 	// Index the new value
-	terms, hashes := buildIndexProjections(value, schema)
+	terms, hashes, values := buildIndexProjections(value, schema)
 	if err := db.addIndexEntriesLocked(docID, prefix, terms, hashes); err != nil {
 		return err
 	}
 
-	meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes}
+	meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes, Values: values}
 	metaBytes, err := json.Marshal(meta)
 	if err != nil {
 		return err
@@ -503,7 +505,7 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 			return nil, nil
 		}
 		for _, term := range terms {
-			ids, err := db.getPostingListLocked(indexTermKey(q.Prefix, term))
+			ids, err := db.getPostingListLocked(indexTermKey(q.Prefix, hashValue(term)))
 			if err != nil {
 				return nil, err
 			}
@@ -559,6 +561,12 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 		if len(results) >= q.Limit {
 			break
 		}
+		meta, metaFound, metaErr := db.getIndexMetaLocked(id)
+		if metaErr == nil && metaFound {
+			if ok, exact := matchesQueryMeta(meta, q); exact && !ok {
+				continue
+			}
+		}
 		key, err := db.getDocKeyLocked(id)
 		if err != nil || len(key) == 0 {
 			continue
@@ -576,6 +584,110 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 	}
 
 	return results, nil
+}
+
+// SearchCount executes the same query planning as Search but returns only the
+// number of matching documents. It uses index metadata when possible to avoid
+// decrypting primary values during encrypted/index-backed queries.
+func (db *DB) SearchCount(q SearchQuery) (int, error) {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	if q.Limit <= 0 {
+		q.Limit = int(^uint(0) >> 1)
+	}
+
+	indexEnabled := db.searchIndexEnabled
+	var candidates []uint64
+	usedIndex := false
+
+	if indexEnabled && strings.TrimSpace(q.FullText) != "" {
+		terms := tokenize(strings.ToLower(q.FullText))
+		if len(terms) == 0 {
+			return 0, nil
+		}
+		for _, term := range terms {
+			ids, err := db.getPostingListLocked(indexTermKey(q.Prefix, hashValue(term)))
+			if err != nil {
+				return 0, err
+			}
+			if ids == nil {
+				return 0, nil
+			}
+			if candidates == nil {
+				candidates = ids
+			} else {
+				candidates = intersectSorted(candidates, ids)
+			}
+			usedIndex = true
+			if len(candidates) == 0 {
+				return 0, nil
+			}
+		}
+	}
+
+	for _, f := range q.Filters {
+		if (f.Op == "=" || f.Op == "==") && indexEnabled && f.HashOnly {
+			hash := hashValue(normalizeValue(f.Value))
+			ids, err := db.getPostingListLocked(indexHashKey(q.Prefix, f.Field, hash))
+			if err != nil {
+				return 0, err
+			}
+			if ids == nil {
+				continue
+			}
+			if candidates == nil {
+				candidates = ids
+			} else {
+				candidates = intersectSorted(candidates, ids)
+			}
+			usedIndex = true
+			if len(candidates) == 0 {
+				return 0, nil
+			}
+		}
+	}
+
+	if !usedIndex {
+		results, err := db.scanSearchLocked(q)
+		if err != nil {
+			return 0, err
+		}
+		return len(results), nil
+	}
+
+	count := 0
+	for _, id := range candidates {
+		if count >= q.Limit {
+			break
+		}
+		meta, found, err := db.getIndexMetaLocked(id)
+		if err == nil && found {
+			if ok, exact := matchesQueryMeta(meta, q); exact {
+				if ok {
+					count++
+				}
+				continue
+			}
+		}
+
+		key, err := db.getDocKeyLocked(id)
+		if err != nil || len(key) == 0 {
+			continue
+		}
+		if q.Prefix != "" && !prefixMatch(string(key), q.Prefix) {
+			continue
+		}
+		value, err := db.get(key)
+		if err != nil {
+			continue
+		}
+		if matchesQuery(value, q) {
+			count++
+		}
+	}
+
+	return count, nil
 }
 
 func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
@@ -760,22 +872,23 @@ func toFloat(v any) (float64, bool) {
 	}
 }
 
-func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[string]string) {
+func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[string]string, map[string]string) {
 	if schema == nil || len(schema.Fields) == 0 {
 		// Default: full-text on entire value
 		termSet := make(map[string]struct{})
 		for _, t := range tokenize(strings.ToLower(string(value))) {
-			termSet[t] = struct{}{}
+			termSet[hashValue(t)] = struct{}{}
 		}
 		terms := make([]string, 0, len(termSet))
 		for t := range termSet {
 			terms = append(terms, t)
 		}
 		sort.Strings(terms)
-		return terms, map[string]string{}
+		return terms, map[string]string{}, map[string]string{"$value": normalizeValue(value)}
 	}
 
 	hashes := make(map[string]string)
+	values := make(map[string]string)
 	termsSet := make(map[string]struct{})
 
 	var doc map[string]any
@@ -801,9 +914,10 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 			continue
 		}
 		normalized := normalizeValue(v)
+		values[field.Name] = normalized
 		if field.Searchable {
 			for _, t := range tokenize(strings.ToLower(normalized)) {
-				termsSet[t] = struct{}{}
+				termsSet[hashValue(t)] = struct{}{}
 			}
 		}
 		if field.HashSearch {
@@ -816,7 +930,61 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 		terms = append(terms, t)
 	}
 	sort.Strings(terms)
-	return terms, hashes
+	return terms, hashes, values
+}
+
+func (db *DB) getIndexMetaLocked(docID uint64) (indexMeta, bool, error) {
+	raw, err := db.get(indexMetaKey(docID))
+	if err != nil {
+		return indexMeta{}, false, nil
+	}
+	var meta indexMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return indexMeta{}, false, err
+	}
+	return meta, true, nil
+}
+
+func matchesQueryMeta(meta indexMeta, q SearchQuery) (bool, bool) {
+	if strings.TrimSpace(q.FullText) != "" {
+		if len(meta.Terms) == 0 {
+			return false, false
+		}
+		termSet := make(map[string]struct{}, len(meta.Terms))
+		for _, term := range meta.Terms {
+			termSet[term] = struct{}{}
+		}
+		for _, term := range tokenize(strings.ToLower(q.FullText)) {
+			if _, ok := termSet[hashValue(term)]; !ok {
+				return false, true
+			}
+		}
+	}
+
+	for _, f := range q.Filters {
+		if f.Field == "" || f.Field == "$value" {
+			return false, false
+		}
+		if (f.Op == "=" || f.Op == "==") && f.HashOnly {
+			hash, ok := meta.Hashes[f.Field]
+			if !ok {
+				return false, false
+			}
+			if hash != hashValue(normalizeValue(f.Value)) {
+				return false, true
+			}
+			continue
+		}
+		value, ok := meta.Values[f.Field]
+		if !ok {
+			return false, false
+		}
+		if !compareValues(value, f.Value, f.Op) {
+			return false, true
+		}
+	}
+
+	return true, true
 }
 
 func tokenize(s string) []string {
