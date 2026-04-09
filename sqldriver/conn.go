@@ -5,8 +5,9 @@ import (
 	"database/sql/driver"
 	"sync"
 
+	"github.com/oarkflow/sqlparser"
+	"github.com/oarkflow/sqlparser/lexer"
 	"github.com/oarkflow/velocity"
-	"github.com/xwb1989/sqlparser"
 )
 
 // Conn is a connection to a Velocity database using database/sql/driver.
@@ -16,7 +17,12 @@ type Conn struct {
 	tx *velocity.BatchWriter
 
 	stmtMu    sync.RWMutex
-	stmtCache map[string]sqlparser.Statement
+	stmtCache map[string]*parsedStatement
+}
+
+type parsedStatement struct {
+	stmt   sqlparser.Statement
+	parser *sqlparser.Parser
 }
 
 // Prepare returns a prepared statement, bound to this connection.
@@ -26,19 +32,21 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 
 // PrepareContext returns a prepared statement, bound to this connection.
 func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
-	stmt, err := c.getOrParseStatement(query)
+	parsed, err := c.getOrParseStatement(query)
 	if err != nil {
 		return nil, err
 	}
 
 	return &StmtV2{
-		conn:  c,
-		query: query,
-		stmt:  stmt,
+		conn:       c,
+		query:      query,
+		stmt:       parsed.stmt,
+		parser:     parsed.parser,
+		paramOrder: buildParamOrder(query),
 	}, nil
 }
 
-func (c *Conn) getOrParseStatement(query string) (sqlparser.Statement, error) {
+func (c *Conn) getOrParseStatement(query string) (*parsedStatement, error) {
 	c.stmtMu.RLock()
 	if c.stmtCache != nil {
 		if stmt, ok := c.stmtCache[query]; ok {
@@ -48,18 +56,37 @@ func (c *Conn) getOrParseStatement(query string) (sqlparser.Statement, error) {
 	}
 	c.stmtMu.RUnlock()
 
-	stmt, err := sqlparser.Parse(query)
+	parser := sqlparser.NewString(query)
+	stmt, err := parser.Next()
 	if err != nil {
 		return nil, err
 	}
+	parsed := &parsedStatement{stmt: stmt, parser: parser}
 
 	c.stmtMu.Lock()
 	if c.stmtCache == nil {
-		c.stmtCache = make(map[string]sqlparser.Statement)
+		c.stmtCache = make(map[string]*parsedStatement)
 	}
-	c.stmtCache[query] = stmt
+	c.stmtCache[query] = parsed
 	c.stmtMu.Unlock()
-	return stmt, nil
+	return parsed, nil
+}
+
+func buildParamOrder(query string) map[int32]int {
+	tokens := sqlparser.Tokenize([]byte(query), nil)
+	order := make(map[int32]int)
+	next := 1
+	for _, tok := range tokens {
+		if tok.Type != lexer.QUESTION {
+			continue
+		}
+		order[tok.Pos] = next
+		next++
+	}
+	if len(order) == 0 {
+		return nil
+	}
+	return order
 }
 
 // Close invalidates and potentially stops any current

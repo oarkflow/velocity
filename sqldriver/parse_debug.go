@@ -1,18 +1,24 @@
 package sqldriver
 
 import (
-"fmt"
-"github.com/xwb1989/sqlparser"
+	"fmt"
+
+	sqlparser "github.com/oarkflow/sqlparser"
+	"github.com/oarkflow/sqlparser/ast"
 )
 
 func DebugParse() {
-	stmt, _ := sqlparser.Parse("SELECT * FROM users WHERE age = ? AND name = :name")
+	parser := sqlparser.NewString("SELECT * FROM users WHERE age = ? AND name = :name")
+	stmt, err := parser.Next()
+	if err != nil {
+		fmt.Printf("parse error: %v\n", err)
+		return
+	}
 	fmt.Printf("%#v\n", stmt)
-	// let's print the where expression deeply
-sel := stmt.(*sqlparser.Select)
-fmt.Printf("Where: %#v\n", sel.Where.Expr)
-sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
-fmt.Printf("Node: %T -> %#v\n", node, node)
-return true, nil
-}, sel.Where.Expr)
+	sel, ok := stmt.(*ast.SelectStmt)
+	if !ok {
+		fmt.Printf("unexpected statement type: %T\n", stmt)
+		return
+	}
+	fmt.Printf("Where: %#v\n", sel.Where)
 }

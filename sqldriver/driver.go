@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,9 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 		db, err = velocity.NewWithConfig(*config)
 		if err != nil {
 			return nil, fmt.Errorf("velocity driver: failed to open db at %s: %w", path, err)
+		}
+		if err := loadPersistedTableSchemas(db, config.SearchSchemas); err != nil {
+			return nil, fmt.Errorf("velocity driver: failed to load table schemas: %w", err)
 		}
 		engines[path] = db
 	}
@@ -106,4 +110,31 @@ func parseDSN(dsn string) (*velocity.Config, string, error) {
 		// Future expansion for DSN parameters (e.g., query := parts[1])
 	}
 	return &config, path, nil
+}
+
+func loadPersistedTableSchemas(db *velocity.DB, skip map[string]*velocity.SearchSchema) error {
+	rows, err := db.Search(velocity.SearchQuery{
+		Prefix: tableSchemaPrefix,
+		Limit:  maxSearchLimit,
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, row := range rows {
+		tableName := strings.TrimPrefix(string(row.Key), tableSchemaPrefix+":")
+		if tableName == "" {
+			continue
+		}
+		if _, ok := skip[tableName]; ok {
+			continue
+		}
+
+		var meta tableSchemaMeta
+		if err := json.Unmarshal(row.Value, &meta); err != nil {
+			return err
+		}
+		db.SetSearchSchemaForPrefix(tableName, meta.SearchSchema)
+	}
+	return nil
 }

@@ -25,7 +25,6 @@ require (
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-sqlite3 v1.14.33 // indirect
-	github.com/miekg/pkcs11 v1.1.2 // indirect
 	github.com/oarkflow/cas v0.0.5 // indirect
 	github.com/oarkflow/convert v0.0.5 // indirect
 	github.com/oarkflow/date v0.0.4 // indirect
@@ -35,12 +34,12 @@ require (
 	github.com/oarkflow/licensing v0.0.26 // indirect
 	github.com/oarkflow/previewer v0.0.6 // indirect
 	github.com/oarkflow/shamir v0.0.2 // indirect
+	github.com/oarkflow/sqlparser v0.0.0-20260322160025-9e8f05a7da94 // indirect
 	github.com/oarkflow/squealx v0.0.64 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/tinylib/msgp v1.6.3 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.69.0 // indirect
-	github.com/xwb1989/sqlparser v0.0.0-20180606152119-120387863bf2 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect

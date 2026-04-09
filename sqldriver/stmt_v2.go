@@ -4,18 +4,21 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
-	"fmt"
+	"io"
+	"sort"
 
+	"github.com/oarkflow/sqlparser"
 	"github.com/oarkflow/velocity"
-	"github.com/xwb1989/sqlparser"
 )
 
 // StmtV2 is a prepared statement that implements driver.Stmt
 // bridging sqlparser.Statement to Execution engine nodes.
 type StmtV2 struct {
-	conn  *Conn
-	query string
-	stmt  sqlparser.Statement
+	conn       *Conn
+	query      string
+	stmt       sqlparser.Statement
+	parser     *sqlparser.Parser
+	paramOrder map[int32]int
 }
 
 // Close closes the statement.
@@ -47,12 +50,12 @@ func (s *StmtV2) Query(args []driver.Value) (driver.Rows, error) {
 }
 
 func (s *StmtV2) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	executor := &ExecutorV2{conn: s.conn}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder}
 	return executor.Execute(ctx, s.stmt, args)
 }
 
 func (s *StmtV2) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	executor := &ExecutorV2{conn: s.conn}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder}
 	return executor.ExecuteSelect(ctx, s.stmt, args)
 }
 
@@ -72,10 +75,11 @@ func (r *Result) RowsAffected() (int64, error) {
 
 // Rows implements driver.Rows
 type Rows struct {
-	columns []string
-	results []velocity.SearchResult
-	rowMaps []Row
-	cursor  int
+	columns     []string
+	schemaCols  []string
+	results     []velocity.SearchResult
+	rowMaps     []Row
+	cursor      int
 }
 
 func (r *Rows) Columns() []string {
@@ -85,7 +89,12 @@ func (r *Rows) Columns() []string {
 			for k := range r.rowMaps[0] {
 				cols = append(cols, k)
 			}
+			sort.Strings(cols)
 			r.columns = cols
+			return r.columns
+		}
+		if len(r.schemaCols) > 0 {
+			r.columns = append([]string(nil), r.schemaCols...)
 			return r.columns
 		}
 		if len(r.results) > 0 {
@@ -95,26 +104,30 @@ func (r *Rows) Columns() []string {
 				for k := range data {
 					cols = append(cols, k)
 				}
+				sort.Strings(cols)
 				r.columns = cols
 			} else {
 				r.columns = []string{"id", "value"}
 			}
 		} else {
-			r.columns = []string{"id"}
+			r.columns = nil
 		}
 	}
 	return r.columns
 }
 
 func (r *Rows) Close() error {
-	r.cursor = len(r.results)
+	r.cursor = len(r.rowMaps)
+	if len(r.results) > r.cursor {
+		r.cursor = len(r.results)
+	}
 	return nil
 }
 
 func (r *Rows) Next(dest []driver.Value) error {
 	if len(r.rowMaps) > 0 {
 		if r.cursor >= len(r.rowMaps) {
-			return fmt.Errorf("EOF")
+			return io.EOF
 		}
 		row := r.rowMaps[r.cursor]
 		r.cursor++
@@ -130,7 +143,7 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 
 	if r.cursor >= len(r.results) {
-		return fmt.Errorf("EOF")
+		return io.EOF
 	}
 
 	res := r.results[r.cursor]

@@ -9,9 +9,9 @@ require (
 	github.com/oarkflow/licensing v0.0.26
 	github.com/oarkflow/previewer v0.0.6
 	github.com/oarkflow/shamir v0.0.2
+	github.com/oarkflow/sqlparser v0.0.0-20260322160025-9e8f05a7da94
 	github.com/seccomp/libseccomp-golang v0.11.1
 	github.com/urfave/cli/v3 v3.6.1
-	github.com/xwb1989/sqlparser v0.0.0-20180606152119-120387863bf2
 	golang.org/x/crypto v0.48.0
 	golang.org/x/term v0.40.0
 )

@@ -1,17 +1,26 @@
 package sqldriver
 
 import (
-	"fmt"
 	"testing"
 
-	"github.com/xwb1989/sqlparser"
+	sqlparser "github.com/oarkflow/sqlparser"
+	"github.com/oarkflow/sqlparser/ast"
 )
 
 func TestASTExploration(t *testing.T) {
-	stmt, _ := sqlparser.Parse("SELECT * FROM users WHERE age = ? AND name = :name")
-	sel := stmt.(*sqlparser.Select)
-	sqlparser.Walk(func(node sqlparser.SQLNode) (bool, error) {
-		fmt.Printf("Node: %T -> %#v\n", node, node)
-		return true, nil
-	}, sel.Where.Expr)
+	parser := sqlparser.NewString("SELECT * FROM users WHERE age = ? AND name = :name")
+	stmt, err := parser.Next()
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	sel, ok := stmt.(*ast.SelectStmt)
+	if !ok {
+		t.Fatalf("expected *ast.SelectStmt, got %T", stmt)
+	}
+	if sel.Where == nil {
+		t.Fatalf("expected WHERE clause")
+	}
+	if _, ok := sel.Where.(*ast.BinaryExpr); !ok {
+		t.Fatalf("expected binary expression in WHERE, got %T", sel.Where)
+	}
 }
