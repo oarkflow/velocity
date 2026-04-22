@@ -1,6 +1,7 @@
 package velocity
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,14 +9,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
 type envelopeActorContextKey string
+type envelopeAccessContextKey string
 
 const envelopeActorKey envelopeActorContextKey = "velocity:envelope:actor"
+const envelopeAccessKey envelopeAccessContextKey = "velocity:envelope:access"
+
+const (
+	envelopeSecureFileMagic = "VSEC1"
+	envelopeSecureExtension = ".sec"
+)
+
+const (
+	EnvelopeAuditCategoryCustody  = "custody"
+	EnvelopeAuditCategoryAccess   = "access"
+	EnvelopeAuditCategoryActivity = "activity"
+)
+
+const (
+	EnvelopeAuditOutcomeSuccess = "success"
+	EnvelopeAuditOutcomeDenied  = "denied"
+)
 
 // WithEnvelopeActor annotates context so envelope operations can auto-log actor identity.
 func WithEnvelopeActor(ctx context.Context, actor string) context.Context {
@@ -37,9 +61,39 @@ func envelopeActorFromContext(ctx context.Context, fallback string) (string, boo
 	return "", false
 }
 
+// EnvelopeAccessContext carries runtime information needed to enforce envelope access rules.
+type EnvelopeAccessContext struct {
+	APIEndpoint string `json:"api_endpoint,omitempty"`
+	ClientIP    string `json:"client_ip,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	RecipientID string `json:"recipient_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	TrustLevel  string `json:"trust_level,omitempty"`
+	MFAVerified bool   `json:"mfa_verified"`
+}
+
+// WithEnvelopeAccessContext annotates context so envelope operations can enforce access rules.
+func WithEnvelopeAccessContext(ctx context.Context, access EnvelopeAccessContext) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, envelopeAccessKey, access)
+}
+
+func envelopeAccessFromContext(ctx context.Context) EnvelopeAccessContext {
+	if ctx != nil {
+		if v, ok := ctx.Value(envelopeAccessKey).(EnvelopeAccessContext); ok {
+			return v
+		}
+	}
+	return EnvelopeAccessContext{}
+}
+
 var (
-	ErrEnvelopeNotFound = errors.New("envelope not found")
-	ErrTimeLockActive   = errors.New("time-lock is still active")
+	ErrEnvelopeNotFound     = errors.New("envelope not found")
+	ErrTimeLockActive       = errors.New("time-lock is still active")
+	ErrEnvelopeAccessDenied = errors.New("envelope access denied")
 )
 
 // EnvelopeType describes evidence presets for the secure cabinet.
@@ -52,7 +106,7 @@ const (
 	EnvelopeTypeCCTVArchive         EnvelopeType = "cctv_forensic_archive"
 )
 
-// Envelope models a secure evidence wrapper persisted as JSON.
+// Envelope models a secure evidence wrapper persisted as an encrypted secure file.
 type Envelope struct {
 	EnvelopeID           string            `json:"envelope_id"`
 	Label                string            `json:"label"`
@@ -112,6 +166,7 @@ func (p EnvelopePayload) Digest() string {
 type EnvelopePolicies struct {
 	Fingerprint FingerprintPolicy `json:"fingerprint"`
 	TimeLock    TimeLockPolicy    `json:"time_lock"`
+	Access      AccessPolicy      `json:"access"`
 	ColdStorage ColdStoragePolicy `json:"cold_storage"`
 	Tamper      TamperPolicy      `json:"tamper"`
 }
@@ -130,6 +185,26 @@ type TimeLockPolicy struct {
 	MinDelaySeconds int64     `json:"min_delay_seconds"`
 	LegalCondition  string    `json:"legal_condition,omitempty"`
 	EscrowSigners   []string  `json:"escrow_signers,omitempty"`
+}
+
+// AccessPolicy defines runtime access constraints that must be satisfied before envelope access.
+type AccessPolicy struct {
+	RequireAPIEndpoint  bool             `json:"require_api_endpoint,omitempty"`
+	AllowedAPIEndpoints []string         `json:"allowed_api_endpoints,omitempty"`
+	AllowedIPRanges     []string         `json:"allowed_ip_ranges,omitempty"`
+	RequiredTrustLevel  string           `json:"required_trust_level,omitempty"`
+	RequireMFA          bool             `json:"require_mfa,omitempty"`
+	MaxAccessCount      int              `json:"max_access_count,omitempty"`
+	CentralAPI          CentralAPIPolicy `json:"central_api,omitempty"`
+}
+
+// CentralAPIPolicy governs server-side authorization and audit forwarding.
+type CentralAPIPolicy struct {
+	Required             bool   `json:"required,omitempty"`
+	CheckURL             string `json:"check_url,omitempty"`
+	AuditLogURL          string `json:"audit_log_url,omitempty"`
+	RequireAuditDelivery bool   `json:"require_audit_delivery,omitempty"`
+	TimeoutSeconds       int    `json:"timeout_seconds,omitempty"`
 }
 
 // ColdStoragePolicy handles offline sealing schedules.
@@ -187,18 +262,73 @@ type CustodyEvent struct {
 	PrevHash         string            `json:"prev_hash"`
 	EventHash        string            `json:"event_hash"`
 	Attachments      map[string]string `json:"attachments,omitempty"`
+	References       []string          `json:"references,omitempty"`
+	Tags             map[string]string `json:"tags,omitempty"`
 }
 
 // AuditEntry records administrative or access actions.
 type AuditEntry struct {
-	EntryID   string    `json:"entry_id"`
-	Timestamp time.Time `json:"timestamp"`
-	Actor     string    `json:"actor"`
-	Action    string    `json:"action"`
-	Reason    string    `json:"reason,omitempty"`
-	Signature string    `json:"signature,omitempty"`
-	PrevHash  string    `json:"prev_hash"`
-	EntryHash string    `json:"entry_hash"`
+	EntryID        string            `json:"entry_id"`
+	Timestamp      time.Time         `json:"timestamp"`
+	Actor          string            `json:"actor"`
+	Category       string            `json:"category,omitempty"`
+	Action         string            `json:"action"`
+	Outcome        string            `json:"outcome,omitempty"`
+	Reason         string            `json:"reason,omitempty"`
+	Signature      string            `json:"signature,omitempty"`
+	References     []string          `json:"references,omitempty"`
+	RuleReferences []string          `json:"rule_references,omitempty"`
+	Tags           map[string]string `json:"tags,omitempty"`
+	PrevHash       string            `json:"prev_hash"`
+	EntryHash      string            `json:"entry_hash"`
+}
+
+type envelopeAuditRecord struct {
+	Category       string
+	Action         string
+	Actor          string
+	Outcome        string
+	Reason         string
+	Signature      string
+	References     []string
+	RuleReferences []string
+	Tags           map[string]string
+}
+
+type envelopeCentralAccessRequest struct {
+	EnvelopeID    string            `json:"envelope_id"`
+	Label         string            `json:"label,omitempty"`
+	Action        string            `json:"action"`
+	Actor         string            `json:"actor"`
+	RecipientID   string            `json:"recipient_id,omitempty"`
+	RequestID     string            `json:"request_id,omitempty"`
+	SessionID     string            `json:"session_id,omitempty"`
+	CaseReference string            `json:"case_reference,omitempty"`
+	Fingerprint   string            `json:"fingerprint,omitempty"`
+	ClientIP      string            `json:"client_ip,omitempty"`
+	APIEndpoint   string            `json:"api_endpoint,omitempty"`
+	TrustLevel    string            `json:"trust_level,omitempty"`
+	MFAVerified   bool              `json:"mfa_verified"`
+	Tags          map[string]string `json:"tags,omitempty"`
+}
+
+type envelopeCentralAccessResponse struct {
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type envelopeAuditDeliveryRequest struct {
+	EnvelopeID    string            `json:"envelope_id"`
+	Action        string            `json:"action"`
+	Category      string            `json:"category,omitempty"`
+	Outcome       string            `json:"outcome,omitempty"`
+	Actor         string            `json:"actor,omitempty"`
+	RecipientID   string            `json:"recipient_id,omitempty"`
+	RequestID     string            `json:"request_id,omitempty"`
+	SessionID     string            `json:"session_id,omitempty"`
+	CaseReference string            `json:"case_reference,omitempty"`
+	Entry         *AuditEntry       `json:"entry"`
+	Tags          map[string]string `json:"tags,omitempty"`
 }
 
 // TamperSignal captures offline AI verdicts.
@@ -237,7 +367,7 @@ type EnvelopeRequest struct {
 	Tags                 map[string]string `json:"tags"`
 }
 
-// CreateEnvelope seals a payload inside an auditable envelope backed by JSON.
+// CreateEnvelope seals a payload inside an auditable envelope backed by an encrypted secure file.
 func (db *DB) CreateEnvelope(ctx context.Context, req *EnvelopeRequest) (*Envelope, error) {
 	if req == nil {
 		return nil, fmt.Errorf("envelope request is nil")
@@ -288,8 +418,22 @@ func (db *DB) CreateEnvelope(ctx context.Context, req *EnvelopeRequest) (*Envelo
 		EvidenceState:    "secured",
 		Timestamp:        now,
 	}
-	env.appendCustodyEvent(genesis)
-	env.recordAudit("envelope.init", req.CreatedBy, "envelope initialized", req.FingerprintSignature)
+	if err := env.appendCustodyEventWithAudit(ctx, genesis); err != nil {
+		return nil, err
+	}
+	if err := env.recordAudit(ctx, envelopeAuditRecord{
+		Category:  EnvelopeAuditCategoryActivity,
+		Action:    "envelope.init",
+		Actor:     req.CreatedBy,
+		Outcome:   EnvelopeAuditOutcomeSuccess,
+		Reason:    "envelope initialized",
+		Signature: req.FingerprintSignature,
+		References: []string{
+			"custody:event:" + genesis.EventID,
+		},
+	}); err != nil {
+		return nil, err
+	}
 
 	if err := db.saveEnvelope(env); err != nil {
 		return nil, err
@@ -307,9 +451,13 @@ func (db *DB) AppendCustodyEvent(ctx context.Context, envelopeID string, event *
 	if err != nil {
 		return nil, err
 	}
+	if err := db.enforceEnvelopeAccess(ctx, env, "custody.update"); err != nil {
+		return nil, err
+	}
 
-	env.appendCustodyEvent(event)
-	env.recordAudit("custody.update", event.Actor, event.Action, event.ActorFingerprint)
+	if err := env.appendCustodyEventWithAudit(ctx, event); err != nil {
+		return nil, err
+	}
 	if err := db.saveEnvelope(env); err != nil {
 		return nil, err
 	}
@@ -326,6 +474,9 @@ func (db *DB) RecordTamperSignal(ctx context.Context, envelopeID string, signal 
 	if err != nil {
 		return nil, err
 	}
+	if err := db.enforceEnvelopeAccess(ctx, env, "tamper.analysis"); err != nil {
+		return nil, err
+	}
 
 	if signal.ReportID == "" {
 		signal.ReportID = generateEnvelopeAuditID()
@@ -337,7 +488,23 @@ func (db *DB) RecordTamperSignal(ctx context.Context, envelopeID string, signal 
 
 	env.TamperSignals = append(env.TamperSignals, signal)
 	env.Integrity.LastTamperState = fmt.Sprintf("%s:%0.4f", signal.Analyzer, signal.Score)
-	env.recordAudit("tamper.analysis", signal.Analyzer, "offline tamper scan", "")
+	if err := env.recordAudit(ctx, envelopeAuditRecord{
+		Category: EnvelopeAuditCategoryActivity,
+		Action:   "tamper.analysis",
+		Actor:    signal.Analyzer,
+		Outcome:  EnvelopeAuditOutcomeSuccess,
+		Reason:   "offline tamper scan",
+		References: []string{
+			"tamper:report:" + signal.ReportID,
+			"tamper:analyzer:" + signal.Analyzer,
+		},
+		RuleReferences: []string{"rule.tamper.offline_analysis"},
+		Tags: map[string]string{
+			"tamper.offline": fmt.Sprintf("%t", signal.Offline),
+		},
+	}); err != nil {
+		return nil, err
+	}
 
 	if err := db.saveEnvelope(env); err != nil {
 		return nil, err
@@ -349,6 +516,9 @@ func (db *DB) RecordTamperSignal(ctx context.Context, envelopeID string, signal 
 func (db *DB) ApproveTimeLockUnlock(ctx context.Context, envelopeID, approver, reason string) (*Envelope, error) {
 	env, err := db.loadEnvelope(envelopeID)
 	if err != nil {
+		return nil, err
+	}
+	if err := db.enforceEnvelopeAccess(ctx, env, "timelock.unlock"); err != nil {
 		return nil, err
 	}
 
@@ -369,14 +539,33 @@ func (db *DB) ApproveTimeLockUnlock(ctx context.Context, envelopeID, approver, r
 		env.TimeLockStatus.UnlockApprovedBy = approver
 		env.TimeLockStatus.UnlockReason = reason
 		actor, _ := envelopeActorFromContext(ctx, approver)
-		env.recordAudit("timelock.unlock", actor, reason, "")
-		env.appendCustodyEvent(&CustodyEvent{
+		custodyEvent := &CustodyEvent{
 			Actor:         actor,
 			Action:        "timelock.unlock.approved",
 			Location:      "policy-engine",
 			EvidenceState: "unlock_approved",
 			Notes:         reason,
-		})
+			References: []string{
+				"timelock:approver:" + approver,
+			},
+		}
+		if err := env.appendCustodyEventWithAudit(ctx, custodyEvent); err != nil {
+			return nil, err
+		}
+		if err := env.recordAudit(ctx, envelopeAuditRecord{
+			Category: EnvelopeAuditCategoryActivity,
+			Action:   "timelock.unlock",
+			Actor:    actor,
+			Outcome:  EnvelopeAuditOutcomeSuccess,
+			Reason:   reason,
+			References: []string{
+				"custody:event:" + custodyEvent.EventID,
+				"timelock:approver:" + approver,
+			},
+			RuleReferences: []string{"rule.timelock.release"},
+		}); err != nil {
+			return nil, err
+		}
 		if err := db.saveEnvelope(env); err != nil {
 			return nil, err
 		}
@@ -390,48 +579,365 @@ func (db *DB) LoadEnvelope(ctx context.Context, envelopeID string) (*Envelope, e
 	if err != nil {
 		return nil, err
 	}
-	if actor, ok := envelopeActorFromContext(ctx, ""); ok {
-		env.recordAudit("envelope.load", actor, "envelope loaded", "")
-		env.appendCustodyEvent(&CustodyEvent{
-			Actor:         actor,
-			Action:        "envelope.loaded",
-			Location:      "runtime",
-			EvidenceState: "accessed",
-			Notes:         "automatic access log",
-		})
-		if err := db.saveEnvelope(env); err != nil {
-			return nil, err
-		}
+	if err := db.enforceEnvelopeAccess(ctx, env, "envelope.load"); err != nil {
+		return nil, err
+	}
+
+	actor, _ := envelopeActorFromContext(ctx, "unknown")
+	access := envelopeAccessFromContext(ctx)
+	custodyEvent := &CustodyEvent{
+		Actor:            actor,
+		ActorFingerprint: access.Fingerprint,
+		Action:           "envelope.loaded",
+		Location:         defaultEnvelopeLocation(access.APIEndpoint, "runtime"),
+		EvidenceState:    "accessed",
+		Notes:            "automatic access log",
+		References: []string{
+			"access:fingerprint:" + access.Fingerprint,
+			"access:client_ip:" + access.ClientIP,
+			"access:recipient_id:" + access.RecipientID,
+			"access:request_id:" + access.RequestID,
+			"access:session_id:" + access.SessionID,
+		},
+	}
+	if err := env.appendCustodyEventWithAudit(ctx, custodyEvent); err != nil {
+		return nil, err
+	}
+	if err := env.recordAudit(ctx, envelopeAuditRecord{
+		Category:  EnvelopeAuditCategoryAccess,
+		Action:    "envelope.load",
+		Actor:     actor,
+		Outcome:   EnvelopeAuditOutcomeSuccess,
+		Reason:    "envelope loaded",
+		Signature: access.Fingerprint,
+		References: []string{
+			"custody:event:" + custodyEvent.EventID,
+			"access:api_endpoint:" + access.APIEndpoint,
+			"access:client_ip:" + access.ClientIP,
+			"access:fingerprint:" + access.Fingerprint,
+			"access:recipient_id:" + access.RecipientID,
+			"access:request_id:" + access.RequestID,
+			"access:session_id:" + access.SessionID,
+		},
+		RuleReferences: []string{"rule.envelope.read"},
+		Tags: map[string]string{
+			"access.central_verified": fmt.Sprintf("%t", env.Policies.Access.CentralAPI.Required),
+			"access.mfa_verified":     fmt.Sprintf("%t", access.MFAVerified),
+			"access.trust_level":      access.TrustLevel,
+		},
+	}); err != nil {
+		return nil, err
+	}
+	if err := db.saveEnvelope(env); err != nil {
+		return nil, err
 	}
 	return env, nil
 }
 
-// loadEnvelope fetches and unmarshals the JSON envelope.
+func (db *DB) enforceEnvelopeAccess(ctx context.Context, env *Envelope, action string) error {
+	if env == nil {
+		return fmt.Errorf("envelope is nil")
+	}
+
+	access := envelopeAccessFromContext(ctx)
+	actor, _ := envelopeActorFromContext(ctx, "unknown")
+	if reason := env.accessDeniedReason(action, access); reason != "" {
+		if err := db.persistEnvelopeAccessDecision(ctx, env, action, actor, access, reason, []string{"rule.envelope.access_control"}); err != nil {
+			return fmt.Errorf("%w: %s (failed to persist denial log: %v)", ErrEnvelopeAccessDenied, reason, err)
+		}
+		return fmt.Errorf("%w: %s", ErrEnvelopeAccessDenied, reason)
+	}
+
+	if reason, err := env.centralAccessDeniedReason(ctx, action, actor, access); err != nil {
+		return err
+	} else if reason != "" {
+		if err := db.persistEnvelopeAccessDecision(ctx, env, action, actor, access, reason, []string{"rule.envelope.access_control", "rule.envelope.central_api"}); err != nil {
+			return fmt.Errorf("%w: %s (failed to persist central denial log: %v)", ErrEnvelopeAccessDenied, reason, err)
+		}
+		return fmt.Errorf("%w: %s", ErrEnvelopeAccessDenied, reason)
+	}
+	return nil
+}
+
+func (db *DB) persistEnvelopeAccessDecision(ctx context.Context, env *Envelope, action, actor string, access EnvelopeAccessContext, reason string, extraRules []string) error {
+	custodyEvent := &CustodyEvent{
+		Actor:            actor,
+		ActorFingerprint: access.Fingerprint,
+		Action:           action + ".denied",
+		Location:         defaultEnvelopeLocation(access.APIEndpoint, "policy-engine"),
+		EvidenceState:    "access_denied",
+		Notes:            reason,
+		References: []string{
+			"access:api_endpoint:" + access.APIEndpoint,
+			"access:client_ip:" + access.ClientIP,
+			"access:fingerprint:" + access.Fingerprint,
+			"access:recipient_id:" + access.RecipientID,
+			"access:request_id:" + access.RequestID,
+			"access:session_id:" + access.SessionID,
+		},
+	}
+	if err := env.appendCustodyEventWithAudit(ctx, custodyEvent); err != nil {
+		return err
+	}
+	if err := env.recordAudit(ctx, envelopeAuditRecord{
+		Category:  EnvelopeAuditCategoryAccess,
+		Action:    action + ".denied",
+		Actor:     actor,
+		Outcome:   EnvelopeAuditOutcomeDenied,
+		Reason:    reason,
+		Signature: access.Fingerprint,
+		References: []string{
+			"custody:event:" + custodyEvent.EventID,
+			"access:api_endpoint:" + access.APIEndpoint,
+			"access:client_ip:" + access.ClientIP,
+			"access:fingerprint:" + access.Fingerprint,
+			"access:recipient_id:" + access.RecipientID,
+			"access:request_id:" + access.RequestID,
+			"access:session_id:" + access.SessionID,
+		},
+		RuleReferences: extraRules,
+		Tags: map[string]string{
+			"access.central_verified": fmt.Sprintf("%t", env.Policies.Access.CentralAPI.Required),
+			"access.mfa_verified":     fmt.Sprintf("%t", access.MFAVerified),
+			"access.trust_level":      access.TrustLevel,
+		},
+	}); err != nil {
+		return err
+	}
+	return db.saveEnvelope(env)
+}
+
+func (env *Envelope) accessDeniedReason(action string, access EnvelopeAccessContext) string {
+	if action == "envelope.load" {
+		if env.TimeLockStatus.Active {
+			return ErrTimeLockActive.Error()
+		}
+
+		if env.Policies.Fingerprint.Required {
+			if access.Fingerprint == "" {
+				return "fingerprint verification required"
+			}
+			if !containsString(env.Policies.Fingerprint.AuthorizedFingerprints, access.Fingerprint) {
+				return "fingerprint not authorized"
+			}
+		}
+	}
+
+	policy := env.Policies.Access
+	if action == "envelope.load" && policy.MaxAccessCount > 0 && env.accessCount("envelope.load") >= policy.MaxAccessCount {
+		return "maximum envelope access count reached"
+	}
+	if policy.RequireMFA && !access.MFAVerified {
+		return "MFA verification required"
+	}
+	if policy.RequiredTrustLevel != "" && !strings.EqualFold(policy.RequiredTrustLevel, access.TrustLevel) {
+		return fmt.Sprintf("required trust level %q not met", policy.RequiredTrustLevel)
+	}
+	if (policy.RequireAPIEndpoint || len(policy.AllowedAPIEndpoints) > 0) && access.APIEndpoint == "" {
+		return "api endpoint required"
+	}
+	if len(policy.AllowedAPIEndpoints) > 0 && !matchesAllowedAPIEndpoint(access.APIEndpoint, policy.AllowedAPIEndpoints) {
+		return "api endpoint not allowed"
+	}
+	if len(policy.AllowedIPRanges) > 0 && !matchesAllowedIP(access.ClientIP, policy.AllowedIPRanges) {
+		return "client IP not allowed"
+	}
+
+	return ""
+}
+
+func (env *Envelope) centralAccessDeniedReason(ctx context.Context, action, actor string, access EnvelopeAccessContext) (string, error) {
+	policy := env.Policies.Access.CentralAPI
+	if !policy.Required {
+		return "", nil
+	}
+
+	checkURL := strings.TrimSpace(policy.CheckURL)
+	if checkURL == "" {
+		return "central api access check url is required", nil
+	}
+
+	payload := envelopeCentralAccessRequest{
+		EnvelopeID:    env.EnvelopeID,
+		Label:         env.Label,
+		Action:        action,
+		Actor:         actor,
+		RecipientID:   access.RecipientID,
+		RequestID:     access.RequestID,
+		SessionID:     access.SessionID,
+		CaseReference: env.CaseReference,
+		Fingerprint:   access.Fingerprint,
+		ClientIP:      access.ClientIP,
+		APIEndpoint:   access.APIEndpoint,
+		TrustLevel:    access.TrustLevel,
+		MFAVerified:   access.MFAVerified,
+		Tags:          env.auditBaseTags(),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal central api access request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctxOrBackground(ctx), http.MethodPost, checkURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build central api access request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Envelope-ID", env.EnvelopeID)
+	if access.RequestID != "" {
+		req.Header.Set("X-Request-ID", access.RequestID)
+	}
+
+	resp, err := (&http.Client{Timeout: time.Duration(policy.timeoutSeconds()) * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Sprintf("central api access check failed: %v", err), nil
+	}
+	defer resp.Body.Close()
+
+	var decision envelopeCentralAccessResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decision); err != nil && err.Error() != "EOF" {
+		return "", fmt.Errorf("decode central api access response: %w", err)
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		if strings.TrimSpace(decision.Reason) != "" {
+			return fmt.Sprintf("central api denied access: %s", decision.Reason), nil
+		}
+		return fmt.Sprintf("central api denied access with status %d", resp.StatusCode), nil
+	}
+	if !decision.Allowed {
+		if strings.TrimSpace(decision.Reason) != "" {
+			return decision.Reason, nil
+		}
+		return "central api denied access", nil
+	}
+
+	return "", nil
+}
+
+func (env *Envelope) accessCount(action string) int {
+	count := 0
+	for _, entry := range env.AuditLog {
+		if entry != nil && entry.Action == action {
+			count++
+		}
+	}
+	return count
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultEnvelopeLocation(primary, fallback string) string {
+	if primary != "" {
+		return primary
+	}
+	return fallback
+}
+
+func matchesAllowedAPIEndpoint(candidate string, allowed []string) bool {
+	if candidate == "" {
+		return false
+	}
+
+	candidateURL, err := url.Parse(candidate)
+	if err != nil || candidateURL.Scheme == "" || candidateURL.Host == "" {
+		return false
+	}
+	candidatePath := normalizedURLPath(candidateURL.Path)
+
+	for _, rule := range allowed {
+		ruleURL, err := url.Parse(rule)
+		if err != nil || ruleURL.Scheme == "" || ruleURL.Host == "" {
+			continue
+		}
+		if !strings.EqualFold(candidateURL.Scheme, ruleURL.Scheme) || !strings.EqualFold(candidateURL.Host, ruleURL.Host) {
+			continue
+		}
+		if ruleURL.RawQuery != "" && candidateURL.RawQuery != ruleURL.RawQuery {
+			continue
+		}
+		rulePath := normalizedURLPath(ruleURL.Path)
+		if rulePath == "/" || candidatePath == rulePath || strings.HasPrefix(candidatePath+"/", rulePath+"/") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func normalizedURLPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	path = strings.TrimSuffix(path, "/")
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func matchesAllowedIP(candidate string, allowed []string) bool {
+	ip := net.ParseIP(strings.TrimSpace(candidate))
+	if ip == nil {
+		return false
+	}
+
+	for _, rule := range allowed {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			continue
+		}
+		if allowedIP := net.ParseIP(rule); allowedIP != nil && allowedIP.Equal(ip) {
+			return true
+		}
+		if _, ipNet, err := net.ParseCIDR(rule); err == nil && ipNet.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// loadEnvelope fetches and unmarshals an encrypted envelope.
 func (db *DB) loadEnvelope(envelopeID string) (*Envelope, error) {
 	if envelopeID == "" {
 		return nil, fmt.Errorf("envelope id is required")
 	}
 
-	db.envelopeMu.RLock()
-	defer db.envelopeMu.RUnlock()
-
-	path := db.envelopePath(envelopeID)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrEnvelopeNotFound
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		db.envelopeMu.RLock()
+		data, err := os.ReadFile(db.envelopePath(envelopeID))
+		db.envelopeMu.RUnlock()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, ErrEnvelopeNotFound
+			}
+			lastErr = err
+		} else {
+			env, decodeErr := db.unmarshalEnvelopeFile(data, db.envelopeStorageAAD(envelopeID))
+			if decodeErr == nil {
+				return env, nil
+			}
+			lastErr = decodeErr
+			if !isRetryableEnvelopeLoadError(decodeErr) {
+				return nil, decodeErr
+			}
 		}
-		return nil, err
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 	}
-
-	var env Envelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return nil, err
-	}
-	return &env, nil
+	return nil, lastErr
 }
 
-// saveEnvelope writes envelope state to disk atomically as JSON.
+// saveEnvelope writes envelope state to disk atomically as an encrypted secure file.
 func (db *DB) saveEnvelope(env *Envelope) error {
 	if env == nil {
 		return fmt.Errorf("envelope is nil")
@@ -443,11 +949,12 @@ func (db *DB) saveEnvelope(env *Envelope) error {
 
 	env.LastUpdatedAt = time.Now().UTC()
 
-	data, err := json.MarshalIndent(env, "", "  ")
+	data, err := db.marshalEnvelopeFile(env, db.envelopeStorageAAD(env.EnvelopeID))
 	if err != nil {
 		return err
 	}
 
+	finalPath := db.envelopePath(env.EnvelopeID)
 	tmp, err := os.CreateTemp(db.envelopeDir, "env-*.tmp")
 	if err != nil {
 		return err
@@ -472,17 +979,93 @@ func (db *DB) saveEnvelope(env *Envelope) error {
 	db.envelopeMu.Lock()
 	defer db.envelopeMu.Unlock()
 
-	finalPath := db.envelopePath(env.EnvelopeID)
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
+		return err
+	}
+	if err := syncDirectory(filepath.Dir(finalPath)); err != nil {
 		return err
 	}
 	return nil
 }
 
-// envelopePath returns the JSON filename for an envelope id.
+// envelopePath returns the secure filename for an envelope id.
 func (db *DB) envelopePath(envelopeID string) string {
-	return filepath.Join(db.envelopeDir, fmt.Sprintf("%s.json", envelopeID))
+	return filepath.Join(db.envelopeDir, fmt.Sprintf("%s%s", envelopeID, envelopeSecureExtension))
+}
+
+func (db *DB) envelopeStorageAAD(envelopeID string) []byte {
+	return []byte("velocity:envelope:storage:" + envelopeID)
+}
+
+func (db *DB) envelopeExportAAD() []byte {
+	return []byte("velocity:envelope:export:v1")
+}
+
+func (db *DB) marshalEnvelopeFile(env *Envelope, aad []byte) ([]byte, error) {
+	data, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return db.encryptEnvelopeBytes(data, aad)
+}
+
+func (db *DB) unmarshalEnvelopeFile(data, aad []byte) (*Envelope, error) {
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		plaintext, err := db.decryptEnvelopeBytes(data, aad)
+		if err != nil {
+			lastErr = err
+			if !isRetryableEnvelopeLoadError(err) {
+				return nil, err
+			}
+			time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+			continue
+		}
+
+		var env Envelope
+		if err := json.Unmarshal(plaintext, &env); err != nil {
+			return nil, err
+		}
+		return &env, nil
+	}
+	return nil, lastErr
+}
+
+func (db *DB) encryptEnvelopeBytes(plaintext, aad []byte) ([]byte, error) {
+	if db.crypto == nil {
+		return nil, fmt.Errorf("envelope encryption unavailable")
+	}
+
+	ciphertext, err := db.crypto.EncryptStream(plaintext, aad)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]byte, len(envelopeSecureFileMagic)+len(ciphertext))
+	copy(out, envelopeSecureFileMagic)
+	copy(out[len(envelopeSecureFileMagic):], ciphertext)
+	return out, nil
+}
+
+func (db *DB) decryptEnvelopeBytes(data, aad []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty envelope file")
+	}
+
+	if bytes.HasPrefix(trimmed, []byte(envelopeSecureFileMagic)) {
+		if db.crypto == nil {
+			return nil, fmt.Errorf("envelope decryption unavailable")
+		}
+		plaintext, err := db.crypto.DecryptStream(trimmed[len(envelopeSecureFileMagic):], aad)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt envelope: %w", err)
+		}
+		return plaintext, nil
+	}
+
+	return nil, fmt.Errorf("invalid envelope file format")
 }
 
 func (env *Envelope) appendCustodyEvent(event *CustodyEvent) {
@@ -494,6 +1077,8 @@ func (env *Envelope) appendCustodyEvent(event *CustodyEvent) {
 	} else {
 		event.Timestamp = event.Timestamp.UTC()
 	}
+	event.References = compactSortedStrings(event.References)
+	event.Tags = compactStringMap(event.Tags)
 
 	prevHash := ""
 	seq := 0
@@ -510,27 +1095,127 @@ func (env *Envelope) appendCustodyEvent(event *CustodyEvent) {
 	env.Integrity.LastLedgerUpdate = event.Timestamp
 }
 
-func (env *Envelope) recordAudit(action, actor, reason, signature string) {
+func (env *Envelope) appendCustodyEventWithAudit(ctx context.Context, event *CustodyEvent) error {
+	env.appendCustodyEvent(event)
+	return env.recordAudit(ctx, envelopeAuditRecord{
+		Category:  EnvelopeAuditCategoryCustody,
+		Action:    event.Action,
+		Actor:     event.Actor,
+		Outcome:   EnvelopeAuditOutcomeSuccess,
+		Reason:    firstNonEmpty(strings.TrimSpace(event.Notes), event.Action),
+		Signature: event.ActorFingerprint,
+		References: append([]string{
+			"custody:event:" + event.EventID,
+			fmt.Sprintf("custody:sequence:%d", event.Sequence),
+			"custody:state:" + event.EvidenceState,
+			"custody:location:" + event.Location,
+		}, event.References...),
+		RuleReferences: []string{"rule.custody.append_only", "rule.audit.hash_chain"},
+		Tags:           event.Tags,
+	})
+}
+
+func (env *Envelope) recordAudit(ctx context.Context, record envelopeAuditRecord) error {
+	category := strings.TrimSpace(record.Category)
+	if category == "" {
+		category = EnvelopeAuditCategoryActivity
+	}
+	outcome := strings.TrimSpace(record.Outcome)
+	if outcome == "" {
+		outcome = EnvelopeAuditOutcomeSuccess
+	}
 	entry := &AuditEntry{
-		EntryID:   generateEnvelopeAuditID(),
-		Timestamp: time.Now().UTC(),
-		Actor:     actor,
-		Action:    action,
-		Reason:    reason,
-		Signature: signature,
+		EntryID:        generateEnvelopeAuditID(),
+		Timestamp:      time.Now().UTC(),
+		Actor:          record.Actor,
+		Category:       category,
+		Action:         record.Action,
+		Outcome:        outcome,
+		Reason:         record.Reason,
+		Signature:      record.Signature,
+		References:     compactSortedStrings(append(env.auditBaseReferences(), record.References...)),
+		RuleReferences: compactSortedStrings(append(env.auditPolicyReferences(), record.RuleReferences...)),
+		Tags:           mergeStringMaps(env.auditBaseTags(), record.Tags),
 	}
 	if len(env.AuditLog) > 0 {
 		entry.PrevHash = env.AuditLog[len(env.AuditLog)-1].EntryHash
 	}
 	entry.EntryHash = hashAuditEntry(entry)
+	if err := env.deliverAuditEntry(ctx, entry); err != nil {
+		return err
+	}
 	env.AuditLog = append(env.AuditLog, entry)
 	env.Integrity.AuditRoot = entry.EntryHash
+	return nil
+}
+
+func (env *Envelope) deliverAuditEntry(ctx context.Context, entry *AuditEntry) error {
+	if env == nil || entry == nil {
+		return nil
+	}
+
+	policy := env.Policies.Access.CentralAPI
+	auditURL := strings.TrimSpace(policy.AuditLogURL)
+	if auditURL == "" {
+		return nil
+	}
+
+	access := envelopeAccessFromContext(ctx)
+	payload := envelopeAuditDeliveryRequest{
+		EnvelopeID:    env.EnvelopeID,
+		Action:        entry.Action,
+		Category:      entry.Category,
+		Outcome:       entry.Outcome,
+		Actor:         entry.Actor,
+		RecipientID:   access.RecipientID,
+		RequestID:     access.RequestID,
+		SessionID:     access.SessionID,
+		CaseReference: env.CaseReference,
+		Entry:         entry,
+		Tags:          entry.Tags,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		if policy.RequireAuditDelivery {
+			return fmt.Errorf("marshal audit delivery payload: %w", err)
+		}
+		return nil
+	}
+
+	req, err := http.NewRequestWithContext(ctxOrBackground(ctx), http.MethodPost, auditURL, bytes.NewReader(body))
+	if err != nil {
+		if policy.RequireAuditDelivery {
+			return fmt.Errorf("build audit delivery request: %w", err)
+		}
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Envelope-ID", env.EnvelopeID)
+	if access.RequestID != "" {
+		req.Header.Set("X-Request-ID", access.RequestID)
+	}
+
+	resp, err := (&http.Client{Timeout: time.Duration(policy.timeoutSeconds()) * time.Second}).Do(req)
+	if err != nil {
+		if policy.RequireAuditDelivery {
+			return fmt.Errorf("deliver audit entry: %w", err)
+		}
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest && policy.RequireAuditDelivery {
+		return fmt.Errorf("deliver audit entry: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func hashCustodyEvent(event *CustodyEvent) string {
 	h := sha256.New()
 	h.Write([]byte(event.EventID))
+	h.Write([]byte(fmt.Sprintf("%d", event.Sequence)))
+	h.Write([]byte(event.Timestamp.UTC().Format(time.RFC3339Nano)))
 	h.Write([]byte(event.Actor))
+	h.Write([]byte(event.ActorFingerprint))
 	h.Write([]byte(event.Action))
 	h.Write([]byte(event.Location))
 	h.Write([]byte(event.EvidenceState))
@@ -540,6 +1225,14 @@ func hashCustodyEvent(event *CustodyEvent) string {
 		b, _ := json.Marshal(event.Attachments)
 		h.Write(b)
 	}
+	if len(event.References) > 0 {
+		b, _ := json.Marshal(event.References)
+		h.Write(b)
+	}
+	if len(event.Tags) > 0 {
+		b, _ := json.Marshal(event.Tags)
+		h.Write(b)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -547,10 +1240,24 @@ func hashAuditEntry(entry *AuditEntry) string {
 	h := sha256.New()
 	h.Write([]byte(entry.EntryID))
 	h.Write([]byte(entry.Actor))
+	h.Write([]byte(entry.Category))
 	h.Write([]byte(entry.Action))
+	h.Write([]byte(entry.Outcome))
 	h.Write([]byte(entry.Reason))
 	h.Write([]byte(entry.PrevHash))
 	h.Write([]byte(entry.Signature))
+	if len(entry.References) > 0 {
+		b, _ := json.Marshal(entry.References)
+		h.Write(b)
+	}
+	if len(entry.RuleReferences) > 0 {
+		b, _ := json.Marshal(entry.RuleReferences)
+		h.Write(b)
+	}
+	if len(entry.Tags) > 0 {
+		b, _ := json.Marshal(entry.Tags)
+		h.Write(b)
+	}
 	h.Write([]byte(entry.Timestamp.UTC().Format(time.RFC3339Nano)))
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -623,7 +1330,7 @@ func (p TimeLockPolicy) isActive(now time.Time) bool {
 	return true
 }
 
-// ExportEnvelope exports an envelope to a portable JSON file that can be shared with recipients.
+// ExportEnvelope exports an envelope to a portable encrypted secure file that can be shared with recipients.
 // The exported file contains the complete envelope with all custody events, audit logs, and integrity data.
 func (db *DB) ExportEnvelope(ctx context.Context, envelopeID string, exportPath string) error {
 	// Load the envelope
@@ -631,42 +1338,94 @@ func (db *DB) ExportEnvelope(ctx context.Context, envelopeID string, exportPath 
 	if err != nil {
 		return fmt.Errorf("failed to load envelope: %w", err)
 	}
-	if actor, ok := envelopeActorFromContext(ctx, ""); ok {
-		envelope.recordAudit("envelope.export", actor, "export envelope", "")
-		envelope.appendCustodyEvent(&CustodyEvent{
-			Actor:         actor,
-			Action:        "envelope.exported",
-			Location:      "exporter",
-			EvidenceState: "exported",
-			Notes:         exportPath,
-		})
-		if err := db.saveEnvelope(envelope); err != nil {
-			return fmt.Errorf("failed to persist export audit trail: %w", err)
-		}
+	if err := db.enforceEnvelopeAccess(ctx, envelope, "envelope.export"); err != nil {
+		return err
 	}
 
-	// Marshal to JSON with indentation for readability
-	data, err := json.MarshalIndent(envelope, "", "  ")
+	actor, _ := envelopeActorFromContext(ctx, "unknown")
+	access := envelopeAccessFromContext(ctx)
+	custodyEvent := &CustodyEvent{
+		Actor:            actor,
+		ActorFingerprint: access.Fingerprint,
+		Action:           "envelope.exported",
+		Location:         defaultEnvelopeLocation(access.APIEndpoint, "exporter"),
+		EvidenceState:    "exported",
+		Notes:            exportPath,
+		References: []string{
+			"export:path:" + exportPath,
+		},
+	}
+	if err := envelope.appendCustodyEventWithAudit(ctx, custodyEvent); err != nil {
+		return err
+	}
+	if err := envelope.recordAudit(ctx, envelopeAuditRecord{
+		Category:  EnvelopeAuditCategoryAccess,
+		Action:    "envelope.export",
+		Actor:     actor,
+		Outcome:   EnvelopeAuditOutcomeSuccess,
+		Reason:    "export envelope",
+		Signature: access.Fingerprint,
+		References: []string{
+			"custody:event:" + custodyEvent.EventID,
+			"export:path:" + exportPath,
+			"access:api_endpoint:" + access.APIEndpoint,
+		},
+		RuleReferences: []string{"rule.envelope.export"},
+	}); err != nil {
+		return err
+	}
+	if err := db.saveEnvelope(envelope); err != nil {
+		return fmt.Errorf("failed to persist export audit trail: %w", err)
+	}
+
+	data, err := db.marshalEnvelopeFile(envelope, db.envelopeExportAAD())
 	if err != nil {
-		return fmt.Errorf("failed to marshal envelope: %w", err)
+		return fmt.Errorf("failed to serialize envelope: %w", err)
 	}
 
 	// Create directory if needed
-	if dir := filepath.Dir(exportPath); dir != "." {
+	dir := filepath.Dir(exportPath)
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("failed to create export directory: %w", err)
 		}
 	}
 
-	// Write to file with restricted permissions
-	if err := os.WriteFile(exportPath, data, 0600); err != nil {
+	tmp, err := os.CreateTemp(dir, "envelope-export-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create export temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to write envelope file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync envelope file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close envelope file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to set envelope file permissions: %w", err)
+	}
+	if err := os.Rename(tmpPath, exportPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to finalize envelope file: %w", err)
+	}
+	if err := syncDirectory(dir); err != nil {
+		return fmt.Errorf("failed to sync export directory: %w", err)
 	}
 
 	return nil
 }
 
-// ImportEnvelope imports an envelope from a JSON file into the database.
+// ImportEnvelope imports an envelope from an encrypted secure file into the database.
 // This allows recipients to load envelopes that were exported and shared with them.
 // The envelope is validated and stored in the local envelope directory.
 func (db *DB) ImportEnvelope(ctx context.Context, importPath string) (*Envelope, error) {
@@ -676,10 +1435,9 @@ func (db *DB) ImportEnvelope(ctx context.Context, importPath string) (*Envelope,
 		return nil, fmt.Errorf("failed to read envelope file: %w", err)
 	}
 
-	// Unmarshal the envelope
-	var envelope Envelope
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal envelope: %w", err)
+	envelope, err := db.unmarshalEnvelopeFile(data, db.envelopeExportAAD())
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode envelope: %w", err)
 	}
 
 	// Validate envelope ID
@@ -688,39 +1446,268 @@ func (db *DB) ImportEnvelope(ctx context.Context, importPath string) (*Envelope,
 	}
 
 	// Check if envelope already exists
-	envelopePath := filepath.Join(db.envelopeDir, envelope.EnvelopeID+".json")
+	envelopePath := db.envelopePath(envelope.EnvelopeID)
 	if _, err := os.Stat(envelopePath); err == nil {
 		// Envelope already exists, load and return it
 		return db.LoadEnvelope(ctx, envelope.EnvelopeID)
 	}
 
-	if actor, ok := envelopeActorFromContext(ctx, ""); ok {
-		envelope.recordAudit("envelope.import", actor, "import envelope", "")
-		envelope.appendCustodyEvent(&CustodyEvent{
-			Actor:         actor,
-			Action:        "envelope.imported",
-			Location:      "importer",
-			EvidenceState: "imported",
-			Notes:         importPath,
-		})
+	actor, _ := envelopeActorFromContext(ctx, "unknown")
+	access := envelopeAccessFromContext(ctx)
+	custodyEvent := &CustodyEvent{
+		Actor:            actor,
+		ActorFingerprint: access.Fingerprint,
+		Action:           "envelope.imported",
+		Location:         defaultEnvelopeLocation(access.APIEndpoint, "importer"),
+		EvidenceState:    "imported",
+		Notes:            importPath,
+		References: []string{
+			"import:path:" + importPath,
+		},
+	}
+	if err := envelope.appendCustodyEventWithAudit(ctx, custodyEvent); err != nil {
+		return nil, err
+	}
+	if err := envelope.recordAudit(ctx, envelopeAuditRecord{
+		Category:  EnvelopeAuditCategoryActivity,
+		Action:    "envelope.import",
+		Actor:     actor,
+		Outcome:   EnvelopeAuditOutcomeSuccess,
+		Reason:    "import envelope",
+		Signature: access.Fingerprint,
+		References: []string{
+			"custody:event:" + custodyEvent.EventID,
+			"import:path:" + importPath,
+			"access:api_endpoint:" + access.APIEndpoint,
+		},
+		RuleReferences: []string{"rule.envelope.import"},
+	}); err != nil {
+		return nil, err
 	}
 
-	// Save to local envelope directory
-	db.envelopeMu.Lock()
-	defer db.envelopeMu.Unlock()
-
-	if err := os.MkdirAll(db.envelopeDir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create envelope directory: %w", err)
-	}
-
-	envelopeJSON, err := json.MarshalIndent(envelope, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal envelope: %w", err)
-	}
-
-	if err := os.WriteFile(envelopePath, envelopeJSON, 0600); err != nil {
+	if err := db.saveEnvelope(envelope); err != nil {
 		return nil, fmt.Errorf("failed to save envelope: %w", err)
 	}
 
-	return &envelope, nil
+	return envelope, nil
+}
+
+func (env *Envelope) auditBaseReferences() []string {
+	if env == nil {
+		return nil
+	}
+
+	refs := []string{
+		"envelope:id:" + env.EnvelopeID,
+		"envelope:type:" + string(env.Type),
+		"payload:kind:" + env.Payload.Kind,
+	}
+	if env.CaseReference != "" {
+		refs = append(refs, "case:"+env.CaseReference)
+	}
+	if env.Payload.ObjectPath != "" {
+		refs = append(refs, "payload:object:"+env.Payload.ObjectPath)
+	}
+	if env.Payload.ObjectVersion != "" {
+		refs = append(refs, "payload:object_version:"+env.Payload.ObjectVersion)
+	}
+	if env.Payload.Key != "" {
+		refs = append(refs, "payload:key:"+env.Payload.Key)
+	}
+	if env.Payload.SecretReference != "" {
+		refs = append(refs, "payload:secret:"+env.Payload.SecretReference)
+	}
+	for key, value := range env.Payload.Metadata {
+		switch {
+		case strings.HasPrefix(key, "dependency_"):
+			refs = append(refs, "dependency:"+key+":"+value)
+		case strings.Contains(key, "policy") || strings.Contains(key, "file") || strings.Contains(key, "secret"):
+			refs = append(refs, "payload:metadata:"+key+":"+value)
+		default:
+			refs = append(refs, "payload:metadata_key:"+key)
+		}
+	}
+
+	return compactSortedStrings(refs)
+}
+
+func (env *Envelope) auditPolicyReferences() []string {
+	if env == nil {
+		return nil
+	}
+
+	var refs []string
+	if env.Policies.Fingerprint.Required {
+		refs = append(refs, "policy.fingerprint.required")
+	}
+	if len(env.Policies.Fingerprint.AuthorizedFingerprints) > 0 {
+		refs = append(refs, "policy.fingerprint.authorized")
+	}
+	if env.Policies.TimeLock.Mode != "" {
+		refs = append(refs, "policy.timelock.mode")
+	}
+	if !env.Policies.TimeLock.UnlockNotBefore.IsZero() {
+		refs = append(refs, "policy.timelock.unlock_not_before")
+	}
+	if env.Policies.TimeLock.MinDelaySeconds > 0 {
+		refs = append(refs, "policy.timelock.min_delay")
+	}
+	if env.Policies.Access.RequireAPIEndpoint {
+		refs = append(refs, "policy.access.require_api_endpoint")
+	}
+	if len(env.Policies.Access.AllowedAPIEndpoints) > 0 {
+		refs = append(refs, "policy.access.allowed_api_endpoints")
+	}
+	if len(env.Policies.Access.AllowedIPRanges) > 0 {
+		refs = append(refs, "policy.access.allowed_ip_ranges")
+	}
+	if env.Policies.Access.RequiredTrustLevel != "" {
+		refs = append(refs, "policy.access.required_trust_level")
+	}
+	if env.Policies.Access.RequireMFA {
+		refs = append(refs, "policy.access.require_mfa")
+	}
+	if env.Policies.Access.MaxAccessCount > 0 {
+		refs = append(refs, "policy.access.max_access_count")
+	}
+	if env.Policies.Access.CentralAPI.Required {
+		refs = append(refs, "policy.access.central_api_required")
+	}
+	if env.Policies.Access.CentralAPI.CheckURL != "" {
+		refs = append(refs, "policy.access.central_api_check_url")
+	}
+	if env.Policies.Access.CentralAPI.AuditLogURL != "" {
+		refs = append(refs, "policy.access.central_api_audit_log_url")
+	}
+	if env.Policies.Access.CentralAPI.RequireAuditDelivery {
+		refs = append(refs, "policy.access.central_api_require_audit_delivery")
+	}
+	if env.Policies.ColdStorage.Enabled {
+		refs = append(refs, "policy.cold_storage.enabled")
+	}
+	if env.Policies.Tamper.Analyzer != "" || env.Policies.Tamper.Offline {
+		refs = append(refs, "policy.tamper.analysis")
+	}
+
+	return compactSortedStrings(refs)
+}
+
+func (env *Envelope) auditBaseTags() map[string]string {
+	if env == nil {
+		return nil
+	}
+
+	return mergeStringMaps(
+		env.Tags,
+		map[string]string{
+			"system.envelope_id":          env.EnvelopeID,
+			"system.envelope_type":        string(env.Type),
+			"system.status":               env.Status,
+			"system.case_reference":       env.CaseReference,
+			"system.evidence_class":       env.EvidenceClass,
+			"system.central_api_required": fmt.Sprintf("%t", env.Policies.Access.CentralAPI.Required),
+		},
+	)
+}
+
+func compactSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func compactStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func mergeStringMaps(maps ...map[string]string) map[string]string {
+	merged := make(map[string]string)
+	for _, current := range maps {
+		for key, value := range compactStringMap(current) {
+			merged[key] = value
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (p CentralAPIPolicy) timeoutSeconds() int {
+	if p.TimeoutSeconds <= 0 {
+		return 5
+	}
+	return p.TimeoutSeconds
+}
+
+func ctxOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func isRetryableEnvelopeLoadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "message authentication failed") || strings.Contains(msg, "failed to decrypt envelope")
+}
+
+func syncDirectory(path string) error {
+	if path == "" || path == "." {
+		return nil
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }

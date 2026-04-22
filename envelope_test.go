@@ -5,25 +5,131 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+func envelopeTestConfig(path string) Config {
+	return Config{
+		Path:      path,
+		MasterKey: []byte("0123456789abcdef0123456789abcdef"),
+	}
+}
+
+func newEnvelopeTestDB(t *testing.T, path string) *DB {
+	t.Helper()
+
+	db, err := NewWithConfig(envelopeTestConfig(path))
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	return db
+}
+
+func decodeExportedEnvelopeForTest(t *testing.T, db *DB, path string) map[string]interface{} {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Failed to read export file: %v", err)
+	}
+
+	var (
+		plaintext  []byte
+		decryptErr error
+	)
+	for attempt := 0; attempt < 20; attempt++ {
+		plaintext, decryptErr = db.decryptEnvelopeBytes(data, db.envelopeExportAAD())
+		if decryptErr == nil {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	if decryptErr != nil {
+		t.Fatalf("Failed to decrypt export file: %v", decryptErr)
+	}
+
+	var envelopeData map[string]interface{}
+	if err := json.Unmarshal(plaintext, &envelopeData); err != nil {
+		t.Fatalf("Failed to parse envelope: %v", err)
+	}
+	return envelopeData
+}
+
+func writeExportedEnvelopeForTest(t *testing.T, db *DB, path string, envelopeData map[string]interface{}) {
+	t.Helper()
+
+	plaintext, err := json.MarshalIndent(envelopeData, "", "  ")
+	if err != nil {
+		t.Fatalf("Failed to marshal envelope: %v", err)
+	}
+
+	encrypted, err := db.encryptEnvelopeBytes(plaintext, db.envelopeExportAAD())
+	if err != nil {
+		t.Fatalf("Failed to encrypt envelope: %v", err)
+	}
+
+	if err := os.WriteFile(path, encrypted, 0600); err != nil {
+		t.Fatalf("Failed to write envelope file: %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("Failed to reopen envelope file for sync: %v", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		t.Fatalf("Failed to sync envelope file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Failed to close synced envelope file: %v", err)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		t.Fatalf("Failed to sync export directory: %v", err)
+	}
+	if _, err := db.decryptEnvelopeBytes(encrypted, db.envelopeExportAAD()); err != nil {
+		t.Fatalf("Failed to verify rewritten envelope file encryption: %v", err)
+	}
+}
+
+func findAuditEntry(auditLog []*AuditEntry, action string) *AuditEntry {
+	for _, entry := range auditLog {
+		if entry != nil && entry.Action == action {
+			return entry
+		}
+	}
+	return nil
+}
+
+func findAuditEntryByCategory(auditLog []*AuditEntry, action, category string) *AuditEntry {
+	for _, entry := range auditLog {
+		if entry != nil && entry.Action == action && entry.Category == category {
+			return entry
+		}
+	}
+	return nil
+}
+
+func containsStringValue(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
 
 func TestEnvelopeFileStorage(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Initialize database
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "test_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "test_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -75,7 +181,7 @@ func TestEnvelopeFileStorage(t *testing.T) {
 	}
 
 	// Export envelope
-	exportPath := filepath.Join(tmpDir, "export", envelope.EnvelopeID+".envelope")
+	exportPath := filepath.Join(tmpDir, "export", envelope.EnvelopeID+".sec")
 	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("Failed to export envelope: %v", err)
 	}
@@ -86,15 +192,7 @@ func TestEnvelopeFileStorage(t *testing.T) {
 	}
 
 	// Import into new database
-	db2, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "test_db2"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create second database: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "test_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, exportPath)
@@ -120,8 +218,8 @@ func TestEnvelopeFileStorage(t *testing.T) {
 		t.Errorf("Payload hash changed after import")
 	}
 
-	if imported.Integrity.LedgerRoot != envelope.Integrity.LedgerRoot {
-		t.Errorf("Ledger root changed after import")
+	if imported.Integrity.LedgerRoot != imported.CustodyLedger[len(imported.CustodyLedger)-1].EventHash {
+		t.Errorf("Ledger root does not match latest custody event after import")
 	}
 
 	t.Logf("✅ File storage integrity verified: %d bytes preserved", len(fileContent))
@@ -129,15 +227,9 @@ func TestEnvelopeFileStorage(t *testing.T) {
 
 func TestEnvelopeAutoLogsOnOperations(t *testing.T) {
 	tmpDir := t.TempDir()
-	db1, err := NewWithConfig(Config{Path: filepath.Join(tmpDir, "sender")})
-	if err != nil {
-		t.Fatalf("sender db: %v", err)
-	}
+	db1 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "sender"))
 	defer db1.Close()
-	db2, err := NewWithConfig(Config{Path: filepath.Join(tmpDir, "recipient")})
-	if err != nil {
-		t.Fatalf("recipient db: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "recipient"))
 	defer db2.Close()
 
 	ctxSender := WithEnvelopeActor(context.Background(), "sender-auto")
@@ -154,7 +246,7 @@ func TestEnvelopeAutoLogsOnOperations(t *testing.T) {
 		t.Fatalf("create envelope: %v", err)
 	}
 
-	exportPath := filepath.Join(tmpDir, "env.json")
+	exportPath := filepath.Join(tmpDir, "env.sec")
 	if err := db1.ExportEnvelope(ctxSender, env.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("export envelope: %v", err)
 	}
@@ -190,18 +282,376 @@ func TestEnvelopeAutoLogsOnOperations(t *testing.T) {
 	}
 }
 
-func TestEnvelopeKeyValueStorage(t *testing.T) {
+func TestEnvelopeAuditCategoriesTagsReferencesAndRules(t *testing.T) {
 	tmpDir := t.TempDir()
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "audit_categories_db"))
+	defer db.Close()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "kv_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
+	env, err := db.CreateEnvelope(context.Background(), &EnvelopeRequest{
+		Label:         "Audit Coverage Envelope",
+		Type:          EnvelopeTypeCustodyProof,
+		CreatedBy:     "officer-audit",
+		CaseReference: "CASE-AUDIT-2026",
+		Payload: EnvelopePayload{
+			Kind:            "secret",
+			SecretReference: "ENV_SECRET",
+			Metadata: map[string]string{
+				"dependency_policy": "policy-envelope-access",
+				"dependency_file":   "incident.txt",
+			},
+		},
+		Policies: EnvelopePolicies{
+			Fingerprint: FingerprintPolicy{
+				Required:               true,
+				AuthorizedFingerprints: []string{"fp:detective-audit"},
+			},
+			Access: AccessPolicy{
+				AllowedIPRanges:    []string{"10.0.0.0/24"},
+				RequiredTrustLevel: "high",
+				RequireMFA:         true,
+			},
+		},
+		Tags: map[string]string{
+			"env":      "prod",
+			"evidence": "sealed",
 		},
 	})
 	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
+		t.Fatalf("create envelope: %v", err)
 	}
+
+	createCustodyAudit := findAuditEntry(env.AuditLog, "envelope.created")
+	if createCustodyAudit == nil {
+		t.Fatalf("expected custody audit entry for envelope creation")
+	}
+	if createCustodyAudit.Category != EnvelopeAuditCategoryCustody {
+		t.Fatalf("expected custody category, got %q", createCustodyAudit.Category)
+	}
+	if createCustodyAudit.Outcome != EnvelopeAuditOutcomeSuccess {
+		t.Fatalf("expected success outcome, got %q", createCustodyAudit.Outcome)
+	}
+	if createCustodyAudit.Tags["env"] != "prod" || createCustodyAudit.Tags["system.envelope_id"] != env.EnvelopeID {
+		t.Fatalf("expected merged audit tags, got %#v", createCustodyAudit.Tags)
+	}
+	for _, ref := range []string{
+		"envelope:id:" + env.EnvelopeID,
+		"case:" + env.CaseReference,
+		"payload:secret:" + env.Payload.SecretReference,
+		"dependency:dependency_policy:policy-envelope-access",
+		"dependency:dependency_file:incident.txt",
+	} {
+		if !containsStringValue(createCustodyAudit.References, ref) {
+			t.Fatalf("expected creation custody audit to include reference %q; got %#v", ref, createCustodyAudit.References)
+		}
+	}
+	for _, rule := range []string{
+		"rule.custody.append_only",
+		"policy.fingerprint.required",
+		"policy.access.require_mfa",
+	} {
+		if !containsStringValue(createCustodyAudit.RuleReferences, rule) {
+			t.Fatalf("expected creation custody audit to include rule %q; got %#v", rule, createCustodyAudit.RuleReferences)
+		}
+	}
+
+	initAudit := findAuditEntry(env.AuditLog, "envelope.init")
+	if initAudit == nil {
+		t.Fatalf("expected activity audit entry for envelope initialization")
+	}
+	if initAudit.Category != EnvelopeAuditCategoryActivity {
+		t.Fatalf("expected activity category, got %q", initAudit.Category)
+	}
+
+	denyCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			ClientIP:    "192.168.10.44",
+			TrustLevel:  "low",
+			MFAVerified: false,
+		}),
+		"detective-audit",
+	)
+	if _, err := db.LoadEnvelope(denyCtx, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected denied access, got %v", err)
+	}
+
+	stored, err := db.loadEnvelope(env.EnvelopeID)
+	if err != nil {
+		t.Fatalf("reload envelope after denial: %v", err)
+	}
+	deniedAudit := findAuditEntryByCategory(stored.AuditLog, "envelope.load.denied", EnvelopeAuditCategoryAccess)
+	if deniedAudit == nil {
+		t.Fatalf("expected denied access audit entry")
+	}
+	if deniedAudit.Category != EnvelopeAuditCategoryAccess || deniedAudit.Outcome != EnvelopeAuditOutcomeDenied {
+		t.Fatalf("expected denied access audit classification, got category=%q outcome=%q", deniedAudit.Category, deniedAudit.Outcome)
+	}
+	for _, rule := range []string{
+		"rule.envelope.access_control",
+		"policy.access.allowed_ip_ranges",
+		"policy.access.required_trust_level",
+		"policy.access.require_mfa",
+	} {
+		if !containsStringValue(deniedAudit.RuleReferences, rule) {
+			t.Fatalf("expected denied access audit to include rule %q; got %#v", rule, deniedAudit.RuleReferences)
+		}
+	}
+
+	allowCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			ClientIP:    "10.0.0.42",
+			Fingerprint: "fp:detective-audit",
+			TrustLevel:  "high",
+			MFAVerified: true,
+			APIEndpoint: "https://api.example.com/envelopes/audit",
+		}),
+		"detective-audit",
+	)
+	loaded, err := db.LoadEnvelope(allowCtx, env.EnvelopeID)
+	if err != nil {
+		t.Fatalf("expected compliant access to succeed: %v", err)
+	}
+
+	loadAudit := findAuditEntry(loaded.AuditLog, "envelope.load")
+	if loadAudit == nil {
+		t.Fatalf("expected access audit entry for successful load")
+	}
+	if loadAudit.Category != EnvelopeAuditCategoryAccess || loadAudit.Outcome != EnvelopeAuditOutcomeSuccess {
+		t.Fatalf("expected successful access audit classification, got category=%q outcome=%q", loadAudit.Category, loadAudit.Outcome)
+	}
+	if loadAudit.Tags["access.mfa_verified"] != "true" || loadAudit.Tags["access.trust_level"] != "high" {
+		t.Fatalf("expected access tags on successful load, got %#v", loadAudit.Tags)
+	}
+	for _, ref := range []string{
+		"envelope:id:" + env.EnvelopeID,
+		"access:api_endpoint:https://api.example.com/envelopes/audit",
+		"access:client_ip:10.0.0.42",
+		"access:fingerprint:fp:detective-audit",
+	} {
+		if !containsStringValue(loadAudit.References, ref) {
+			t.Fatalf("expected successful load audit to include reference %q; got %#v", ref, loadAudit.References)
+		}
+	}
+	for _, rule := range []string{
+		"rule.envelope.read",
+		"policy.fingerprint.required",
+		"policy.access.require_mfa",
+	} {
+		if !containsStringValue(loadAudit.RuleReferences, rule) {
+			t.Fatalf("expected successful load audit to include rule %q; got %#v", rule, loadAudit.RuleReferences)
+		}
+	}
+
+	categorySeen := map[string]bool{}
+	for _, entry := range loaded.AuditLog {
+		if entry != nil {
+			categorySeen[entry.Category] = true
+		}
+	}
+	for _, category := range []string{
+		EnvelopeAuditCategoryCustody,
+		EnvelopeAuditCategoryAccess,
+		EnvelopeAuditCategoryActivity,
+	} {
+		if !categorySeen[category] {
+			t.Fatalf("expected audit log category %q to be present", category)
+		}
+	}
+}
+
+func TestEnvelopeCentralAPIEnforcesRecipientsAndPostsAuditLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "central_api_db"))
+	defer db.Close()
+
+	var (
+		mu           sync.Mutex
+		accessChecks []envelopeCentralAccessRequest
+		auditPosts   []envelopeAuditDeliveryRequest
+	)
+
+	accessServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req envelopeCentralAccessRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode central access request: %v", err)
+		}
+		mu.Lock()
+		accessChecks = append(accessChecks, req)
+		mu.Unlock()
+
+		allowed := req.RecipientID != "recipient-b"
+		_ = json.NewEncoder(w).Encode(envelopeCentralAccessResponse{
+			Allowed: allowed,
+			Reason:  map[bool]string{true: "", false: "recipient-b blocked by central api"}[allowed],
+		})
+	}))
+	defer accessServer.Close()
+
+	auditServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req envelopeAuditDeliveryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode audit delivery request: %v", err)
+		}
+		mu.Lock()
+		auditPosts = append(auditPosts, req)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer auditServer.Close()
+
+	env, err := db.CreateEnvelope(context.Background(), &EnvelopeRequest{
+		Label:     "Central API Controlled Envelope",
+		Type:      EnvelopeTypeCourtEvidence,
+		CreatedBy: "sender-central",
+		Payload: EnvelopePayload{
+			Kind:       "file",
+			InlineData: []byte("centrally protected evidence"),
+		},
+		Policies: EnvelopePolicies{
+			Fingerprint: FingerprintPolicy{
+				Required:               true,
+				AuthorizedFingerprints: []string{"fp:recipient-a", "fp:recipient-b"},
+			},
+			Access: AccessPolicy{
+				CentralAPI: CentralAPIPolicy{
+					Required:             true,
+					CheckURL:             accessServer.URL,
+					AuditLogURL:          auditServer.URL,
+					RequireAuditDelivery: true,
+				},
+			},
+		},
+		Tags: map[string]string{
+			"team": "investigations",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create envelope with central api policy: %v", err)
+	}
+
+	recipientACtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			Fingerprint: "fp:recipient-a",
+			RecipientID: "recipient-a",
+			RequestID:   "req-allow-a",
+			SessionID:   "sess-allow-a",
+			ClientIP:    "10.0.0.10",
+		}),
+		"recipient-a",
+	)
+	if _, err := db.LoadEnvelope(recipientACtx, env.EnvelopeID); err != nil {
+		t.Fatalf("expected recipient-a to be allowed: %v", err)
+	}
+
+	recipientBCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			Fingerprint: "fp:recipient-b",
+			RecipientID: "recipient-b",
+			RequestID:   "req-deny-b",
+			SessionID:   "sess-deny-b",
+			ClientIP:    "10.0.0.11",
+		}),
+		"recipient-b",
+	)
+	if _, err := db.LoadEnvelope(recipientBCtx, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected recipient-b to be denied by central api, got %v", err)
+	}
+
+	intruderCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			Fingerprint: "fp:intruder",
+			RecipientID: "intruder",
+			RequestID:   "req-deny-local",
+			SessionID:   "sess-deny-local",
+			ClientIP:    "10.0.0.12",
+		}),
+		"intruder",
+	)
+	if _, err := db.LoadEnvelope(intruderCtx, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected intruder to be denied locally, got %v", err)
+	}
+
+	stored, err := db.loadEnvelope(env.EnvelopeID)
+	if err != nil {
+		t.Fatalf("reload envelope after central api checks: %v", err)
+	}
+
+	successAudit := findAuditEntryByCategory(stored.AuditLog, "envelope.load", EnvelopeAuditCategoryAccess)
+	if successAudit == nil {
+		t.Fatalf("expected successful access audit entry")
+	}
+	if successAudit.Tags["access.central_verified"] != "true" {
+		t.Fatalf("expected successful access audit to note central verification, got %#v", successAudit.Tags)
+	}
+	if !containsStringValue(successAudit.RuleReferences, "policy.access.central_api_required") {
+		t.Fatalf("expected successful access audit to include central api rule, got %#v", successAudit.RuleReferences)
+	}
+	if !containsStringValue(successAudit.References, "access:recipient_id:recipient-a") {
+		t.Fatalf("expected successful access audit to include recipient-a reference, got %#v", successAudit.References)
+	}
+
+	var centralDeniedAudit, localDeniedAudit *AuditEntry
+	for _, entry := range stored.AuditLog {
+		if entry == nil || entry.Action != "envelope.load.denied" || entry.Category != EnvelopeAuditCategoryAccess {
+			continue
+		}
+		if containsStringValue(entry.References, "access:recipient_id:recipient-b") {
+			centralDeniedAudit = entry
+		}
+		if containsStringValue(entry.References, "access:recipient_id:intruder") {
+			localDeniedAudit = entry
+		}
+	}
+	if centralDeniedAudit == nil {
+		t.Fatalf("expected central-api denied audit entry")
+	}
+	if !containsStringValue(centralDeniedAudit.RuleReferences, "rule.envelope.central_api") {
+		t.Fatalf("expected central denial to include central api rule, got %#v", centralDeniedAudit.RuleReferences)
+	}
+	if localDeniedAudit == nil {
+		t.Fatalf("expected local denied audit entry")
+	}
+	if containsStringValue(localDeniedAudit.RuleReferences, "rule.envelope.central_api") {
+		t.Fatalf("expected local denial to happen before central api call, got %#v", localDeniedAudit.RuleReferences)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(accessChecks) != 2 {
+		t.Fatalf("expected 2 central access checks (allowed + centrally denied), got %d", len(accessChecks))
+	}
+	for _, req := range accessChecks {
+		if req.RecipientID == "intruder" {
+			t.Fatalf("intruder should have been denied locally before central api check")
+		}
+	}
+
+	var sawRecipientALog, sawRecipientBDeny bool
+	for _, post := range auditPosts {
+		if post.Entry == nil {
+			continue
+		}
+		if post.Entry.Action == "envelope.load" && post.RecipientID == "recipient-a" {
+			sawRecipientALog = true
+		}
+		if post.Entry.Action == "envelope.load.denied" && post.RecipientID == "recipient-b" {
+			sawRecipientBDeny = true
+		}
+	}
+	if !sawRecipientALog {
+		t.Fatalf("expected recipient-a access audit to be posted to central audit server")
+	}
+	if !sawRecipientBDeny {
+		t.Fatalf("expected recipient-b denial audit to be posted to central audit server")
+	}
+}
+
+func TestEnvelopeKeyValueStorage(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "kv_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -263,20 +713,12 @@ func TestEnvelopeKeyValueStorage(t *testing.T) {
 	}
 
 	// Export and import cycle
-	exportPath := filepath.Join(tmpDir, "kv_export", envelope.EnvelopeID+".envelope")
+	exportPath := filepath.Join(tmpDir, "kv_export", envelope.EnvelopeID+".sec")
 	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("Failed to export key-value envelope: %v", err)
 	}
 
-	db2, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "kv_db2"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create second database: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "kv_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, exportPath)
@@ -322,15 +764,7 @@ func TestEnvelopeKeyValueStorage(t *testing.T) {
 func TestEnvelopeMultiplePayloadTypes(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "multi_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "multi_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -404,28 +838,20 @@ func TestEnvelopeMultiplePayloadTypes(t *testing.T) {
 	// Export all envelopes
 	exportDir := filepath.Join(tmpDir, "exports")
 	for i, envID := range envelopeIDs {
-		exportPath := filepath.Join(exportDir, envID+".envelope")
+		exportPath := filepath.Join(exportDir, envID+".sec")
 		if err := db.ExportEnvelope(ctx, envID, exportPath); err != nil {
 			t.Errorf("Failed to export envelope %d: %v", i, err)
 		}
 	}
 
 	// Import into fresh database
-	db2, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "multi_db2"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create import database: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "multi_db2"))
 	defer db2.Close()
 
 	// Verify each imported envelope
 	for i, tc := range testCases {
 		t.Run("Import_"+tc.name, func(t *testing.T) {
-			exportPath := filepath.Join(exportDir, envelopeIDs[i]+".envelope")
+			exportPath := filepath.Join(exportDir, envelopeIDs[i]+".sec")
 
 			imported, err := db2.ImportEnvelope(ctx, exportPath)
 			if err != nil {
@@ -459,15 +885,7 @@ func TestEnvelopeMultiplePayloadTypes(t *testing.T) {
 func TestEnvelopeCustodyChainIntegrity(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "custody_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "custody_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -528,21 +946,13 @@ func TestEnvelopeCustodyChainIntegrity(t *testing.T) {
 	}
 
 	// Export envelope
-	exportPath := filepath.Join(tmpDir, "custody_export.envelope")
+	exportPath := filepath.Join(tmpDir, "custody_export.sec")
 	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("Failed to export: %v", err)
 	}
 
 	// Import into new database
-	db2, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "custody_db2"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create import database: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "custody_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, exportPath)
@@ -550,14 +960,15 @@ func TestEnvelopeCustodyChainIntegrity(t *testing.T) {
 		t.Fatalf("Failed to import: %v", err)
 	}
 
-	// Verify custody chain preserved
-	if len(imported.CustodyLedger) != originalCustodyCount {
+	// Export/import append their own custody events, so the original chain should be preserved as a prefix.
+	expectedCustodyCount := originalCustodyCount + 2
+	if len(imported.CustodyLedger) != expectedCustodyCount {
 		t.Errorf("Custody event count mismatch: got %d, want %d",
-			len(imported.CustodyLedger), originalCustodyCount)
+			len(imported.CustodyLedger), expectedCustodyCount)
 	}
 
-	// Verify each event preserved correctly
-	for i, event := range imported.CustodyLedger {
+	// Verify original events preserved correctly
+	for i, event := range imported.CustodyLedger[:originalCustodyCount] {
 		if event.EventHash != originalHashes[i] {
 			t.Errorf("Custody event %d hash changed: got %s, want %s",
 				i, event.EventHash, originalHashes[i])
@@ -568,11 +979,20 @@ func TestEnvelopeCustodyChainIntegrity(t *testing.T) {
 				t.Errorf("Custody chain broken at event %d", i)
 			}
 		}
+
+		if imported.CustodyLedger[originalCustodyCount].Action != "envelope.exported" {
+			t.Errorf("Expected export custody event at position %d, got %s",
+				originalCustodyCount, imported.CustodyLedger[originalCustodyCount].Action)
+		}
+		if imported.CustodyLedger[originalCustodyCount+1].Action != "envelope.imported" {
+			t.Errorf("Expected import custody event at position %d, got %s",
+				originalCustodyCount+1, imported.CustodyLedger[originalCustodyCount+1].Action)
+		}
 	}
 
-	// Verify ledger root integrity
-	if imported.Integrity.LedgerRoot != envelope.Integrity.LedgerRoot {
-		t.Errorf("Ledger root hash changed after import")
+	// Verify ledger root tracks the latest imported event after export/import appends.
+	if imported.Integrity.LedgerRoot != imported.CustodyLedger[len(imported.CustodyLedger)-1].EventHash {
+		t.Errorf("Ledger root does not match latest custody event after import")
 	}
 
 	t.Logf("✅ Custody chain integrity verified: %d events preserved", originalCustodyCount)
@@ -581,15 +1001,7 @@ func TestEnvelopeCustodyChainIntegrity(t *testing.T) {
 func TestEnvelopeCorruptionDetection(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "corruption_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "corruption_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -618,43 +1030,24 @@ func TestEnvelopeCorruptionDetection(t *testing.T) {
 	}
 
 	// Export envelope
-	exportPath := filepath.Join(tmpDir, "corruption_test.envelope")
+	exportPath := filepath.Join(tmpDir, "corruption_test.sec")
 	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("Failed to export: %v", err)
 	}
 
 	// Read and corrupt the exported file
-	data, err := os.ReadFile(exportPath)
-	if err != nil {
-		t.Fatalf("Failed to read export file: %v", err)
-	}
-
-	var envelopeData map[string]interface{}
-	if err := json.Unmarshal(data, &envelopeData); err != nil {
-		t.Fatalf("Failed to parse envelope: %v", err)
-	}
+	envelopeData := decodeExportedEnvelopeForTest(t, db, exportPath)
 
 	// Corrupt the payload
 	payload := envelopeData["payload"].(map[string]interface{})
 	corruptedData := []byte("CORRUPTED DATA - TAMPERED WITH")
 	payload["inline_data"] = corruptedData
 
-	corruptedJSON, _ := json.MarshalIndent(envelopeData, "", "  ")
-	corruptedPath := filepath.Join(tmpDir, "corrupted.envelope")
-	if err := os.WriteFile(corruptedPath, corruptedJSON, 0600); err != nil {
-		t.Fatalf("Failed to write corrupted file: %v", err)
-	}
+	corruptedPath := filepath.Join(tmpDir, "corrupted.sec")
+	writeExportedEnvelopeForTest(t, db, corruptedPath, envelopeData)
 
 	// Import corrupted envelope
-	db2, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "corruption_db2"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create import database: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "corruption_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, corruptedPath)
@@ -683,15 +1076,7 @@ func TestEnvelopeCorruptionDetection(t *testing.T) {
 func TestEnvelopeLargePayload(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "large_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "large_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -724,20 +1109,12 @@ func TestEnvelopeLargePayload(t *testing.T) {
 	}
 
 	// Export and import
-	exportPath := filepath.Join(tmpDir, "large.envelope")
+	exportPath := filepath.Join(tmpDir, "large.sec")
 	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("Failed to export large envelope: %v", err)
 	}
 
-	db2, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "large_db2"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create import database: %v", err)
-	}
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "large_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, exportPath)
@@ -771,15 +1148,7 @@ func TestEnvelopeLargePayload(t *testing.T) {
 func TestEnvelopeConcurrentAccess(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "concurrent_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "concurrent_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -861,15 +1230,7 @@ func TestEnvelopeConcurrentAccess(t *testing.T) {
 func TestEnvelopeUnauthorizedFingerprint(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "auth_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "auth_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -953,15 +1314,7 @@ func TestEnvelopeUnauthorizedFingerprint(t *testing.T) {
 func TestEnvelopeTimeLockViolation(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "timelock_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "timelock_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1024,15 +1377,7 @@ func TestEnvelopeTimeLockViolation(t *testing.T) {
 func TestEnvelopeTamperedPayload(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "tamper_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "tamper_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1063,30 +1408,24 @@ func TestEnvelopeTamperedPayload(t *testing.T) {
 	storedPayloadHash := envelope.Integrity.PayloadHash
 
 	// Export envelope
-	exportPath := filepath.Join(tmpDir, "tamper_test.envelope")
+	exportPath := filepath.Join(tmpDir, "tamper_test.sec")
 	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
 		t.Fatalf("Failed to export: %v", err)
 	}
 
 	// Test 1: Modify payload in exported file
-	data, _ := os.ReadFile(exportPath)
-	var envelopeData map[string]interface{}
-	json.Unmarshal(data, &envelopeData)
+	envelopeData := decodeExportedEnvelopeForTest(t, db, exportPath)
 
 	payload := envelopeData["payload"].(map[string]interface{})
 	tamperedData := []byte("TAMPERED EVIDENCE - MODIFIED BY ATTACKER")
 	payload["inline_data"] = tamperedData
 
 	// Keep the old hash (attacker tries to hide tampering)
-	tamperedJSON, _ := json.MarshalIndent(envelopeData, "", "  ")
-	tamperedPath := filepath.Join(tmpDir, "tampered.envelope")
-	os.WriteFile(tamperedPath, tamperedJSON, 0600)
+	tamperedPath := filepath.Join(tmpDir, "tampered.sec")
+	writeExportedEnvelopeForTest(t, db, tamperedPath, envelopeData)
 
 	// Import tampered envelope
-	db2, _ := NewWithConfig(Config{
-		Path:            filepath.Join(tmpDir, "tamper_db2"),
-		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
-	})
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "tamper_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, tamperedPath)
@@ -1115,15 +1454,7 @@ func TestEnvelopeTamperedPayload(t *testing.T) {
 func TestEnvelopeBrokenCustodyChain(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "chain_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "chain_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1151,16 +1482,19 @@ func TestEnvelopeBrokenCustodyChain(t *testing.T) {
 			Actor:  "officer-" + string(rune('B'+i)),
 			Action: "envelope.accessed",
 		}
-		envelope, _ = db.AppendCustodyEvent(ctx, envelope.EnvelopeID, event)
+		envelope, err = db.AppendCustodyEvent(ctx, envelope.EnvelopeID, event)
+		if err != nil {
+			t.Fatalf("Failed to append custody event %d: %v", i, err)
+		}
 	}
 
 	// Export and tamper with custody chain
-	exportPath := filepath.Join(tmpDir, "chain_test.envelope")
-	db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath)
+	exportPath := filepath.Join(tmpDir, "chain_test.sec")
+	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
+		t.Fatalf("Failed to export chain test envelope: %v", err)
+	}
 
-	data, _ := os.ReadFile(exportPath)
-	var envelopeData map[string]interface{}
-	json.Unmarshal(data, &envelopeData)
+	envelopeData := decodeExportedEnvelopeForTest(t, db, exportPath)
 
 	// Tamper: Delete a custody event (breaking the chain)
 	custodyLedger := envelopeData["custody_ledger"].([]interface{})
@@ -1172,15 +1506,11 @@ func TestEnvelopeBrokenCustodyChain(t *testing.T) {
 		)
 	}
 
-	tamperedJSON, _ := json.MarshalIndent(envelopeData, "", "  ")
-	tamperedPath := filepath.Join(tmpDir, "broken_chain.envelope")
-	os.WriteFile(tamperedPath, tamperedJSON, 0600)
+	tamperedPath := filepath.Join(tmpDir, "broken_chain.sec")
+	writeExportedEnvelopeForTest(t, db, tamperedPath, envelopeData)
 
 	// Import tampered envelope
-	db2, _ := NewWithConfig(Config{
-		Path:            filepath.Join(tmpDir, "chain_db2"),
-		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
-	})
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "chain_db2"))
 	defer db2.Close()
 
 	imported, err := db2.ImportEnvelope(ctx, tamperedPath)
@@ -1211,15 +1541,7 @@ func TestEnvelopeBrokenCustodyChain(t *testing.T) {
 func TestEnvelopeInvalidStructure(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "invalid_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "invalid_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1284,25 +1606,19 @@ func TestEnvelopeInvalidStructure(t *testing.T) {
 			envelope, _ := db.CreateEnvelope(ctx, request)
 
 			// Export
-			exportPath := filepath.Join(tmpDir, "test_"+tc.name+".envelope")
+			exportPath := filepath.Join(tmpDir, "test_"+tc.name+".sec")
 			db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath)
 
 			// Modify
-			data, _ := os.ReadFile(exportPath)
-			var envelopeData map[string]interface{}
-			json.Unmarshal(data, &envelopeData)
+			envelopeData := decodeExportedEnvelopeForTest(t, db, exportPath)
 
 			tc.modifier(envelopeData)
 
-			modifiedJSON, _ := json.MarshalIndent(envelopeData, "", "  ")
-			modifiedPath := filepath.Join(tmpDir, "modified_"+tc.name+".envelope")
-			os.WriteFile(modifiedPath, modifiedJSON, 0600)
+			modifiedPath := filepath.Join(tmpDir, "modified_"+tc.name+".sec")
+			writeExportedEnvelopeForTest(t, db, modifiedPath, envelopeData)
 
 			// Try to import
-			db2, _ := NewWithConfig(Config{
-				Path:            filepath.Join(tmpDir, "invalid_db2_"+tc.name),
-				MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
-			})
+			db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "invalid_db2_"+tc.name))
 			defer db2.Close()
 
 			_, err := db2.ImportEnvelope(ctx, modifiedPath)
@@ -1314,15 +1630,7 @@ func TestEnvelopeInvalidStructure(t *testing.T) {
 func TestEnvelopeTamperSignalThreshold(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "tamper_signal_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "tamper_signal_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1401,15 +1709,7 @@ func TestEnvelopeTamperSignalThreshold(t *testing.T) {
 func TestEnvelopeSequenceViolation(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "sequence_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "sequence_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1454,12 +1754,10 @@ func TestEnvelopeSequenceViolation(t *testing.T) {
 	}
 
 	// Export and tamper with sequence numbers
-	exportPath := filepath.Join(tmpDir, "sequence_test.envelope")
+	exportPath := filepath.Join(tmpDir, "sequence_test.sec")
 	db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath)
 
-	data, _ := os.ReadFile(exportPath)
-	var envelopeData map[string]interface{}
-	json.Unmarshal(data, &envelopeData)
+	envelopeData := decodeExportedEnvelopeForTest(t, db, exportPath)
 
 	// Tamper: Swap sequence numbers
 	custodyLedger := envelopeData["custody_ledger"].([]interface{})
@@ -1471,15 +1769,11 @@ func TestEnvelopeSequenceViolation(t *testing.T) {
 		event1["sequence"], event2["sequence"] = event2["sequence"], event1["sequence"]
 	}
 
-	tamperedJSON, _ := json.MarshalIndent(envelopeData, "", "  ")
-	tamperedPath := filepath.Join(tmpDir, "tampered_sequence.envelope")
-	os.WriteFile(tamperedPath, tamperedJSON, 0600)
+	tamperedPath := filepath.Join(tmpDir, "tampered_sequence.sec")
+	writeExportedEnvelopeForTest(t, db, tamperedPath, envelopeData)
 
 	// Import and check for sequence violations
-	db2, _ := NewWithConfig(Config{
-		Path:            filepath.Join(tmpDir, "sequence_db2"),
-		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
-	})
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "sequence_db2"))
 	defer db2.Close()
 
 	imported, _ := db2.ImportEnvelope(ctx, tamperedPath)
@@ -1502,15 +1796,7 @@ func TestEnvelopeSequenceViolation(t *testing.T) {
 func TestEnvelopeReplayAttack(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	db, err := NewWithConfig(Config{
-		Path: filepath.Join(tmpDir, "replay_db"),
-		MasterKeyConfig: MasterKeyConfig{
-			Source: SystemFile,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Failed to create database: %v", err)
-	}
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "replay_db"))
 	defer db.Close()
 
 	ctx := context.Background()
@@ -1526,7 +1812,10 @@ func TestEnvelopeReplayAttack(t *testing.T) {
 		},
 	}
 
-	envelope, _ := db.CreateEnvelope(ctx, request)
+	envelope, err := db.CreateEnvelope(ctx, request)
+	if err != nil {
+		t.Fatalf("Failed to create envelope: %v", err)
+	}
 
 	// Add legitimate event
 	legitimateEvent := &CustodyEvent{
@@ -1534,16 +1823,19 @@ func TestEnvelopeReplayAttack(t *testing.T) {
 		Action: "envelope.accessed",
 		Notes:  "Legitimate access",
 	}
-	envelope, _ = db.AppendCustodyEvent(ctx, envelope.EnvelopeID, legitimateEvent)
+	envelope, err = db.AppendCustodyEvent(ctx, envelope.EnvelopeID, legitimateEvent)
+	if err != nil {
+		t.Fatalf("Failed to append legitimate custody event: %v", err)
+	}
 
 	// Export
-	exportPath := filepath.Join(tmpDir, "original.envelope")
-	db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath)
+	exportPath := filepath.Join(tmpDir, "original.sec")
+	if err := db.ExportEnvelope(ctx, envelope.EnvelopeID, exportPath); err != nil {
+		t.Fatalf("Failed to export replay envelope: %v", err)
+	}
 
 	// Simulate replay attack: Capture and replay old custody event
-	data, _ := os.ReadFile(exportPath)
-	var envelopeData map[string]interface{}
-	json.Unmarshal(data, &envelopeData)
+	envelopeData := decodeExportedEnvelopeForTest(t, db, exportPath)
 
 	custodyLedger := envelopeData["custody_ledger"].([]interface{})
 	if len(custodyLedger) >= 2 {
@@ -1557,15 +1849,11 @@ func TestEnvelopeReplayAttack(t *testing.T) {
 		envelopeData["custody_ledger"] = custodyLedger
 	}
 
-	replayJSON, _ := json.MarshalIndent(envelopeData, "", "  ")
-	replayPath := filepath.Join(tmpDir, "replay.envelope")
-	os.WriteFile(replayPath, replayJSON, 0600)
+	replayPath := filepath.Join(tmpDir, "replay.sec")
+	writeExportedEnvelopeForTest(t, db, replayPath, envelopeData)
 
 	// Import replayed envelope
-	db2, _ := NewWithConfig(Config{
-		Path:            filepath.Join(tmpDir, "replay_db2"),
-		MasterKeyConfig: MasterKeyConfig{Source: SystemFile},
-	})
+	db2 := newEnvelopeTestDB(t, filepath.Join(tmpDir, "replay_db2"))
 	defer db2.Close()
 
 	imported, _ := db2.ImportEnvelope(ctx, replayPath)
@@ -1595,6 +1883,204 @@ func TestEnvelopeReplayAttack(t *testing.T) {
 		t.Logf("✅ Replay attack successfully detected")
 	} else {
 		t.Logf("⚠️  Replay detection may need event ID uniqueness check")
+	}
+}
+
+func TestEnvelopeLoadEnforcesEndpointRuleAndPersistsLogs(t *testing.T) {
+	tmpDir := t.TempDir()
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "endpoint_db"))
+	defer db.Close()
+
+	request := &EnvelopeRequest{
+		Label:     "Endpoint Restricted Envelope",
+		Type:      EnvelopeTypeCourtEvidence,
+		CreatedBy: "officer-api",
+		Payload: EnvelopePayload{
+			Kind:       "file",
+			InlineData: []byte("endpoint-gated evidence"),
+		},
+		Policies: EnvelopePolicies{
+			Access: AccessPolicy{
+				RequireAPIEndpoint:  true,
+				AllowedAPIEndpoints: []string{"https://api.example.com/v1/envelopes"},
+			},
+		},
+	}
+
+	env, err := db.CreateEnvelope(context.Background(), request)
+	if err != nil {
+		t.Fatalf("create envelope: %v", err)
+	}
+
+	denyCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			APIEndpoint: "https://malicious.example.net/steal",
+		}),
+		"detective-denied",
+	)
+	if _, err := db.LoadEnvelope(denyCtx, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected access denial, got: %v", err)
+	}
+
+	stored, err := db.loadEnvelope(env.EnvelopeID)
+	if err != nil {
+		t.Fatalf("reload envelope after denied access: %v", err)
+	}
+	lastAudit := stored.AuditLog[len(stored.AuditLog)-1]
+	if lastAudit.Action != "envelope.load.denied" {
+		t.Fatalf("expected denied audit log, got %s", lastAudit.Action)
+	}
+
+	allowCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			APIEndpoint: "https://api.example.com/v1/envelopes/123",
+		}),
+		"detective-allowed",
+	)
+	if _, err := db.LoadEnvelope(allowCtx, env.EnvelopeID); err != nil {
+		t.Fatalf("expected endpoint-authorized load to succeed: %v", err)
+	}
+
+	stored, err = db.loadEnvelope(env.EnvelopeID)
+	if err != nil {
+		t.Fatalf("reload envelope after successful access: %v", err)
+	}
+	lastAudit = stored.AuditLog[len(stored.AuditLog)-1]
+	if lastAudit.Action != "envelope.load" {
+		t.Fatalf("expected successful load audit log, got %s", lastAudit.Action)
+	}
+}
+
+func TestEnvelopeLoadEnforcesFingerprintRule(t *testing.T) {
+	tmpDir := t.TempDir()
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "fingerprint_rule_db"))
+	defer db.Close()
+
+	env, err := db.CreateEnvelope(context.Background(), &EnvelopeRequest{
+		Label:     "Fingerprint Protected Envelope",
+		Type:      EnvelopeTypeCourtEvidence,
+		CreatedBy: "officer-fp",
+		Payload: EnvelopePayload{
+			Kind:       "file",
+			InlineData: []byte("fingerprint-protected evidence"),
+		},
+		Policies: EnvelopePolicies{
+			Fingerprint: FingerprintPolicy{
+				Required:               true,
+				AuthorizedFingerprints: []string{"fp:detective-jane"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create envelope: %v", err)
+	}
+
+	missingFP := WithEnvelopeActor(context.Background(), "detective-jane")
+	if _, err := db.LoadEnvelope(missingFP, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected missing fingerprint denial, got: %v", err)
+	}
+
+	allowedCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			Fingerprint: "fp:detective-jane",
+		}),
+		"detective-jane",
+	)
+	if _, err := db.LoadEnvelope(allowedCtx, env.EnvelopeID); err != nil {
+		t.Fatalf("expected authorized fingerprint load to succeed: %v", err)
+	}
+}
+
+func TestEnvelopeLoadEnforcesTimeLock(t *testing.T) {
+	tmpDir := t.TempDir()
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "timelock_rule_db"))
+	defer db.Close()
+
+	env, err := db.CreateEnvelope(context.Background(), &EnvelopeRequest{
+		Label:     "Time Locked Envelope",
+		Type:      EnvelopeTypeCourtEvidence,
+		CreatedBy: "officer-time",
+		Payload: EnvelopePayload{
+			Kind:       "file",
+			InlineData: []byte("time-locked evidence"),
+		},
+		Policies: EnvelopePolicies{
+			TimeLock: TimeLockPolicy{
+				Mode:            "legal_delay",
+				UnlockNotBefore: time.Now().Add(2 * time.Hour),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create envelope: %v", err)
+	}
+
+	_, err = db.LoadEnvelope(WithEnvelopeActor(context.Background(), "detective-time"), env.EnvelopeID)
+	if !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected time-lock denial, got: %v", err)
+	}
+}
+
+func TestEnvelopeLoadEnforcesMFAIPTrustAndAccessCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	db := newEnvelopeTestDB(t, filepath.Join(tmpDir, "access_rules_db"))
+	defer db.Close()
+
+	env, err := db.CreateEnvelope(context.Background(), &EnvelopeRequest{
+		Label:     "Full Access Rules Envelope",
+		Type:      EnvelopeTypeCourtEvidence,
+		CreatedBy: "officer-rules",
+		Payload: EnvelopePayload{
+			Kind:       "file",
+			InlineData: []byte("strictly controlled evidence"),
+		},
+		Policies: EnvelopePolicies{
+			Access: AccessPolicy{
+				AllowedIPRanges:    []string{"10.0.0.0/24"},
+				RequiredTrustLevel: "high",
+				RequireMFA:         true,
+				MaxAccessCount:     1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create envelope: %v", err)
+	}
+
+	badCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			ClientIP:    "192.168.1.77",
+			TrustLevel:  "low",
+			MFAVerified: false,
+		}),
+		"detective-rules",
+	)
+	if _, err := db.LoadEnvelope(badCtx, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected denied access for invalid network/session context, got: %v", err)
+	}
+
+	goodCtx := WithEnvelopeActor(
+		WithEnvelopeAccessContext(context.Background(), EnvelopeAccessContext{
+			ClientIP:    "10.0.0.8",
+			TrustLevel:  "high",
+			MFAVerified: true,
+		}),
+		"detective-rules",
+	)
+	if _, err := db.LoadEnvelope(goodCtx, env.EnvelopeID); err != nil {
+		t.Fatalf("expected compliant access to succeed: %v", err)
+	}
+	if _, err := db.LoadEnvelope(goodCtx, env.EnvelopeID); !errors.Is(err, ErrEnvelopeAccessDenied) {
+		t.Fatalf("expected max access count denial, got: %v", err)
+	}
+
+	stored, err := db.loadEnvelope(env.EnvelopeID)
+	if err != nil {
+		t.Fatalf("reload envelope after max access denial: %v", err)
+	}
+	lastAudit := stored.AuditLog[len(stored.AuditLog)-1]
+	if lastAudit.Action != "envelope.load.denied" {
+		t.Fatalf("expected denied audit after access-count exhaustion, got %s", lastAudit.Action)
 	}
 }
 
