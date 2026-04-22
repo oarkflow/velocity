@@ -1,0 +1,1525 @@
+# Velocity Platform — HTTP Tests
+# Use with VS Code REST Client extension or IntelliJ HTTP Client
+# Variables: set {{host}} and {{token}} before running
+
+@host = http://localhost:3000
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.YOUR_TOKEN_HERE
+
+### ============================================================
+### 1. Organization Setup
+### ============================================================
+
+### Create company
+POST {{host}}/api/doclib/orgs
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Federal Investigation Bureau",
+  "description": "Law enforcement and intelligence agency"
+}
+
+### List companies
+GET {{host}}/api/doclib/orgs
+Authorization: Bearer {{token}}
+
+### Create department
+POST {{host}}/api/doclib/orgs/{{companyID}}/depts
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Financial Crimes Division",
+  "code": "FCD",
+  "head_user_id": "user_director01"
+}
+
+### List departments
+GET {{host}}/api/doclib/orgs/{{companyID}}/depts
+Authorization: Bearer {{token}}
+
+### Create unit
+POST {{host}}/api/doclib/depts/{{deptID}}/units
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "company_id": "{{companyID}}",
+  "name": "Money Laundering Investigation Unit",
+  "code": "MLIU",
+  "manager_user_id": "user_manager01"
+}
+
+### Add member to unit
+POST {{host}}/api/doclib/units/{{unitID}}/members
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_id": "user_agent007",
+  "role": "senior_investigator"
+}
+
+### List unit members
+GET {{host}}/api/doclib/units/{{unitID}}/members
+Authorization: Bearer {{token}}
+
+### Get user memberships
+GET {{host}}/api/doclib/users/user_agent007/memberships
+Authorization: Bearer {{token}}
+
+### List all users
+GET {{host}}/api/doclib/users
+Authorization: Bearer {{token}}
+
+### Remove member
+DELETE {{host}}/api/doclib/units/{{unitID}}/members/user_agent007
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 2. Clearance & Policy
+### ============================================================
+
+### Set user clearance
+PUT {{host}}/api/doclib/clearance/user_agent007
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "clearance_level": "secret",
+  "granted_by": "user_director",
+  "valid_from": "2026-01-01T00:00:00Z",
+  "valid_to": "2027-01-01T00:00:00Z",
+  "case_assignments": ["case_001"],
+  "allowed_overlays": ["source_protected", "financial_confidential"]
+}
+
+### Get user clearance
+GET {{host}}/api/doclib/clearance/user_agent007
+Authorization: Bearer {{token}}
+
+### Create access policy
+POST {{host}}/api/doclib/policies
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Secret Document Access",
+  "classification_level": "secret",
+  "required_clearance": "secret",
+  "required_overlays": ["need_to_know"],
+  "require_case_membership": true
+}
+
+### Evaluate access
+POST {{host}}/api/doclib/access/evaluate
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_id": "user_agent007",
+  "resource_classification": "secret",
+  "resource_case_id": "case_001",
+  "overlays": ["source_protected"],
+  "resource_type": "document",
+  "resource_id": "doc_001"
+}
+
+### ============================================================
+### 3. Documents
+### ============================================================
+
+### Create document (JSON)
+POST {{host}}/api/doclib/documents
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Suspicious Activity Report - Case #4521",
+  "description": "SAR for unusual wire transfers Jan-Mar 2026",
+  "doc_type": "financial_report",
+  "classification_level": "confidential",
+  "owner_unit_id": "{{unitID}}",
+  "owner_dept_id": "{{deptID}}",
+  "owner_company_id": "{{companyID}}",
+  "tags": ["aml", "wire_transfer", "suspicious"]
+}
+
+### Query documents
+GET {{host}}/api/doclib/documents?classification=confidential&tags=aml&limit=20
+Authorization: Bearer {{token}}
+
+### Full-text search
+GET {{host}}/api/doclib/documents?q=wire+transfer+suspicious&limit=50
+Authorization: Bearer {{token}}
+
+### Get document
+GET {{host}}/api/doclib/documents/{{docID}}
+Authorization: Bearer {{token}}
+
+### Get document content
+GET {{host}}/api/doclib/documents/{{docID}}/content
+Authorization: Bearer {{token}}
+
+### Update document
+PUT {{host}}/api/doclib/documents/{{docID}}
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "SAR - Case #4521 (Updated)",
+  "classification_level": "secret"
+}
+
+### Get related documents
+GET {{host}}/api/doclib/documents/{{docID}}/related?limit=10
+Authorization: Bearer {{token}}
+
+### Add comment
+POST {{host}}/api/doclib/documents/{{docID}}/comments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "content": "Cross-referenced with Case #3892 — same shell company."
+}
+
+### List comments
+GET {{host}}/api/doclib/documents/{{docID}}/comments
+Authorization: Bearer {{token}}
+
+### Delete document
+DELETE {{host}}/api/doclib/documents/{{docID}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 4. Document Lifecycle
+### ============================================================
+
+### Transition status
+PUT {{host}}/api/doclib/documents/{{docID}}/status
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "status": "under_review",
+  "comment": "Escalated for senior analyst review"
+}
+
+### Get history
+GET {{host}}/api/doclib/documents/{{docID}}/history
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 5. Document Sharing
+### ============================================================
+
+### Create share (inter-department)
+POST {{host}}/api/doclib/documents/{{docID}}/shares
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "grant_to_type": "department",
+  "grant_to_id": "dept_legal",
+  "permissions": ["read", "annotate"],
+  "reason": "Legal review required",
+  "expires_at": "2026-06-01T00:00:00Z"
+}
+
+### List shares
+GET {{host}}/api/doclib/documents/{{docID}}/shares
+Authorization: Bearer {{token}}
+
+### Approve share
+POST {{host}}/api/doclib/shares/{{shareID}}/approve
+Authorization: Bearer {{token}}
+
+### Reject share
+POST {{host}}/api/doclib/shares/{{shareID}}/reject
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Insufficient clearance level"
+}
+
+### Revoke share
+DELETE {{host}}/api/doclib/shares/{{shareID}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 6. Audit & Access Chain
+### ============================================================
+
+### Get access chain
+GET {{host}}/api/doclib/documents/{{docID}}/access-chain
+Authorization: Bearer {{token}}
+
+### Get access chain summary
+GET {{host}}/api/doclib/documents/{{docID}}/access-chain/summary
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 7. Dispatch (Envelopes)
+### ============================================================
+
+### Send dispatch
+POST {{host}}/api/doclib/documents/{{docID}}/dispatch
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "recipients": [
+    {
+      "name": "FinCEN Regulatory Office",
+      "type": "government_agency",
+      "address": "fincen-intake@treasury.gov"
+    }
+  ],
+  "purpose": "Mandatory SAR filing",
+  "case_ref": "case_001",
+  "legal_note": "BSA/AML regulatory filing"
+}
+
+### List dispatches
+GET {{host}}/api/doclib/documents/{{docID}}/dispatches
+Authorization: Bearer {{token}}
+
+### Get dispatch
+GET {{host}}/api/doclib/dispatches/{{dispatchID}}
+Authorization: Bearer {{token}}
+
+### Acknowledge dispatch
+POST {{host}}/api/doclib/dispatches/{{dispatchID}}/acknowledge
+Authorization: Bearer {{token}}
+
+### Recall dispatch
+POST {{host}}/api/doclib/dispatches/{{dispatchID}}/recall
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "note": "Correction needed in transaction amounts"
+}
+
+### Get envelope
+GET {{host}}/api/doclib/dispatches/{{dispatchID}}/envelope
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 8. Cases / Investigations
+### ============================================================
+
+### Create case
+POST {{host}}/api/doclib/cases
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Operation Shadow Wire",
+  "description": "Money laundering through shell companies in Panama",
+  "case_type": "money_laundering",
+  "priority": "critical",
+  "department": "dept_fiu",
+  "assigned_to": ["user_lead_inv", "user_analyst01"]
+}
+
+### Query cases
+GET {{host}}/api/doclib/cases?status=investigation&type=money_laundering&priority=critical&limit=50
+Authorization: Bearer {{token}}
+
+### Get case
+GET {{host}}/api/doclib/cases/{{caseID}}
+Authorization: Bearer {{token}}
+
+### Update case status
+PUT {{host}}/api/doclib/cases/{{caseID}}/status
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "status": "analysis"
+}
+
+### Link document to case
+POST {{host}}/api/doclib/cases/{{caseID}}/documents
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "doc_id": "{{docID}}"
+}
+
+### Link entity to case
+POST {{host}}/api/doclib/cases/{{caseID}}/entities
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "entity_id": "{{entityID}}"
+}
+
+### Link cases
+POST {{host}}/api/doclib/cases/{{caseID}}/cases
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "linked_case_id": "case_3892"
+}
+
+### Add task
+POST {{host}}/api/doclib/cases/{{caseID}}/tasks
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Trace beneficial ownership of ShellCorp LLC",
+  "assigned_to": "user_analyst01",
+  "priority": "high",
+  "due_date": "2026-04-01T00:00:00Z"
+}
+
+### List tasks
+GET {{host}}/api/doclib/cases/{{caseID}}/tasks
+Authorization: Bearer {{token}}
+
+### Add note
+POST {{host}}/api/doclib/cases/{{caseID}}/notes
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "content": "Additional wire transfers totaling $2.3M discovered through Cyprus."
+}
+
+### List notes
+GET {{host}}/api/doclib/cases/{{caseID}}/notes
+Authorization: Bearer {{token}}
+
+### Get timeline
+GET {{host}}/api/doclib/cases/{{caseID}}/timeline
+Authorization: Bearer {{token}}
+
+### Find shared entities
+GET {{host}}/api/doclib/cases/{{caseID}}/shared-entities?other_case_id=case_3892
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 9. Evidence & Chain of Custody
+### ============================================================
+
+### Collect evidence
+POST {{host}}/api/doclib/evidence
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "case_id": "{{caseID}}",
+  "type": "digital",
+  "subtype": "bank_statement",
+  "title": "HSBC Account Statements Q1 2026",
+  "description": "Obtained via subpoena #SUB-2026-089",
+  "source": "HSBC Legal",
+  "classification": "confidential"
+}
+
+### Get evidence
+GET {{host}}/api/doclib/evidence/{{evidenceID}}
+Authorization: Bearer {{token}}
+
+### Transfer custody
+POST {{host}}/api/doclib/evidence/{{evidenceID}}/transfer
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "to_user": "user_forensic_analyst",
+  "reason": "Forensic analysis of transaction patterns",
+  "approval": "supervisor_ref_123"
+}
+
+### Get custody chain
+GET {{host}}/api/doclib/evidence/{{evidenceID}}/custody
+Authorization: Bearer {{token}}
+
+### Verify integrity
+GET {{host}}/api/doclib/evidence/{{evidenceID}}/verify
+Authorization: Bearer {{token}}
+
+### List case evidence
+GET {{host}}/api/doclib/cases/{{caseID}}/evidence
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 10. Entities
+### ============================================================
+
+### Create person
+POST {{host}}/api/doclib/entities/persons
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "John Doe",
+  "aliases": ["J. Doe"],
+  "nationality": "US",
+  "risk_level": "high",
+  "tags": ["suspect", "pep"]
+}
+
+### Create organization
+POST {{host}}/api/doclib/entities/organizations
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "ShellCorp LLC",
+  "type": "llc",
+  "jurisdiction": "US-Delaware",
+  "risk_level": "critical",
+  "tags": ["shell_company"]
+}
+
+### Create account
+POST {{host}}/api/doclib/entities/accounts
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "account_number": "****4521",
+  "bank": "HSBC",
+  "type": "corporate_checking",
+  "currency": "USD"
+}
+
+### Create transaction
+POST {{host}}/api/doclib/entities/transactions
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "type": "wire_transfer",
+  "amount": 450000.00,
+  "currency": "USD",
+  "from_account": "ent_acct_4521",
+  "to_account": "ent_acct_7890",
+  "date": "2026-02-15T14:30:00Z",
+  "suspicious": true
+}
+
+### Create event
+POST {{host}}/api/doclib/entities/events
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "type": "suspicious_activity",
+  "title": "Multiple rapid wire transfers",
+  "occurred_at": "2026-02-15T14:30:00Z",
+  "severity": "critical"
+}
+
+### Create location
+POST {{host}}/api/doclib/entities/locations
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "ShellCorp Office",
+  "address": "1209 Orange St, Wilmington, DE",
+  "country": "US"
+}
+
+### Create device
+POST {{host}}/api/doclib/entities/devices
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "type": "computer",
+  "identifier": "MAC-AA:BB:CC:DD:EE:FF",
+  "ip_address": "203.0.113.42"
+}
+
+### Create asset
+POST {{host}}/api/doclib/entities/assets
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Luxury Yacht 'Sea Shadow'",
+  "type": "vessel",
+  "value": 2500000.00,
+  "currency": "USD"
+}
+
+### Link entities
+POST {{host}}/api/doclib/entities/link
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "source_id": "{{entityID1}}",
+  "target_id": "{{entityID2}}",
+  "relation_type": "beneficial_owner",
+  "bidirectional": false,
+  "metadata": {
+    "ownership_percentage": "75"
+  }
+}
+
+### Get entity with relations
+GET {{host}}/api/doclib/entities/{{entityID}}?relations=true
+Authorization: Bearer {{token}}
+
+### Query entities by type
+GET {{host}}/api/doclib/entities?type=person&limit=50
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 11. Graph Intelligence
+### ============================================================
+
+### Find path
+GET {{host}}/api/doclib/graph/path?from={{entityID1}}&to={{entityID2}}&max_depth=5
+Authorization: Bearer {{token}}
+
+### Get neighborhood
+GET {{host}}/api/doclib/graph/neighborhood/{{entityID}}?depth=3
+Authorization: Bearer {{token}}
+
+### Shortest path
+GET {{host}}/api/doclib/graph/shortest-path?from={{entityID1}}&to={{entityID2}}&max_depth=6
+Authorization: Bearer {{token}}
+
+### Entity timeline
+GET {{host}}/api/doclib/graph/timeline/{{entityID}}?from=2025-01-01T00:00:00Z&to=2026-12-31T23:59:59Z
+Authorization: Bearer {{token}}
+
+### Influence scores
+GET {{host}}/api/doclib/graph/influence/{{entityID}}?entity_type=person&limit=20
+Authorization: Bearer {{token}}
+
+### Detect clusters
+GET {{host}}/api/doclib/graph/clusters?entity_type=person&min_connections=3
+Authorization: Bearer {{token}}
+
+### Co-occurrences
+GET {{host}}/api/doclib/graph/co-occurrences?entity_id={{entityID}}
+Authorization: Bearer {{token}}
+
+### Recurring patterns
+GET {{host}}/api/doclib/graph/patterns?case_ids={{caseID1}},{{caseID2}}
+Authorization: Bearer {{token}}
+
+### Entity network
+GET {{host}}/api/doclib/graph/network/{{entityID}}?depth=2
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 12. Visualization
+### ============================================================
+
+### Entity graph viz
+GET {{host}}/api/doclib/viz/entity-graph/{{entityID}}?depth=3
+Authorization: Bearer {{token}}
+
+### Transaction flow viz
+GET {{host}}/api/doclib/viz/transaction-flow/{{entityID}}?depth=3
+Authorization: Bearer {{token}}
+
+### Case map viz
+GET {{host}}/api/doclib/viz/case-map/{{caseID}}
+Authorization: Bearer {{token}}
+
+### Document clusters
+GET {{host}}/api/doclib/viz/doc-clusters
+Authorization: Bearer {{token}}
+
+### Investigation board
+GET {{host}}/api/doclib/viz/investigation-board/{{caseID}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 13. Discovery / Search
+### ============================================================
+
+### Full search
+POST {{host}}/api/doclib/discovery/search
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "text": "wire transfer shell company",
+  "classification_levels": ["confidential", "secret"],
+  "doc_types": ["financial_report"],
+  "date_from": "2025-01-01T00:00:00Z",
+  "date_to": "2026-12-31T23:59:59Z",
+  "limit": 25
+}
+
+### Save query
+POST {{host}}/api/doclib/discovery/queries
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Shell Company Docs",
+  "description": "All docs mentioning shell companies",
+  "query": {
+    "text": "shell company beneficial owner",
+    "classification_levels": ["confidential", "secret"]
+  },
+  "case_id": "{{caseID}}",
+  "is_shared": true
+}
+
+### List saved queries
+GET {{host}}/api/doclib/discovery/queries?case_id={{caseID}}
+Authorization: Bearer {{token}}
+
+### Execute saved query
+POST {{host}}/api/doclib/discovery/queries/{{queryID}}/execute
+Authorization: Bearer {{token}}
+
+### Near-duplicates
+GET {{host}}/api/doclib/discovery/near-duplicates/{{docID}}?threshold=0.7
+Authorization: Bearer {{token}}
+
+### Co-occurring entities
+GET {{host}}/api/doclib/discovery/co-occurrences?min_count=2
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 14. Analytics
+### ============================================================
+
+### Case stats
+GET {{host}}/api/doclib/analytics/cases
+Authorization: Bearer {{token}}
+
+### Entity risk
+GET {{host}}/api/doclib/analytics/entity-risk/{{entityID}}
+Authorization: Bearer {{token}}
+
+### Investigation backlog
+GET {{host}}/api/doclib/analytics/backlog
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 15. Workflows
+### ============================================================
+
+### Create template
+POST {{host}}/api/doclib/workflows/templates
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Document Classification Change",
+  "steps": [
+    {"name": "Supervisor Review", "approvers": ["role:supervisor"], "required_approvals": 1},
+    {"name": "Security Officer", "approvers": ["role:security_officer"], "required_approvals": 1}
+  ]
+}
+
+### List templates
+GET {{host}}/api/doclib/workflows/templates
+Authorization: Bearer {{token}}
+
+### Start workflow
+POST {{host}}/api/doclib/workflows
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "template_id": "{{templateID}}",
+  "resource_type": "document",
+  "resource_id": "{{docID}}",
+  "data": {"justification": "Contains intel sources"}
+}
+
+### Get workflow instance
+GET {{host}}/api/doclib/workflows/{{instanceID}}
+Authorization: Bearer {{token}}
+
+### Approve step
+POST {{host}}/api/doclib/workflows/{{instanceID}}/approve
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "comment": "Approved"
+}
+
+### Reject step
+POST {{host}}/api/doclib/workflows/{{instanceID}}/reject
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Insufficient justification"
+}
+
+### ============================================================
+### 16. ABAC Rules
+### ============================================================
+
+### Create rule (off-hours deny)
+POST {{host}}/api/doclib/abac/rules
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Deny off-hours access",
+  "effect": "deny",
+  "priority": 100,
+  "conditions": [
+    {"attribute": "environment.hour", "operator": "gte", "value": "22"},
+    {"attribute": "subject.role", "operator": "neq", "value": "admin"}
+  ]
+}
+
+### List ABAC rules
+GET {{host}}/api/doclib/abac/rules
+Authorization: Bearer {{token}}
+
+### Evaluate ABAC
+POST {{host}}/api/doclib/abac/evaluate
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "subject": {"user_id": "user_agent007", "role": "investigator", "clearance": "secret"},
+  "resource": {"doc_id": "doc_001", "classification": "confidential"},
+  "action": "read",
+  "environment": {"ip_address": "10.0.1.45", "hour": "14"}
+}
+
+### Delete ABAC rule
+DELETE {{host}}/api/doclib/abac/rules/{{ruleID}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 17. Compartments (Need-to-Know)
+### ============================================================
+
+### Create compartment
+POST {{host}}/api/doclib/compartments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Operation Shadow Wire — Alpha",
+  "description": "Core investigation team only",
+  "classification": "top_secret"
+}
+
+### List compartments
+GET {{host}}/api/doclib/compartments
+Authorization: Bearer {{token}}
+
+### Add member
+POST {{host}}/api/doclib/compartments/{{compartmentID}}/members
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_id": "user_lead_inv"
+}
+
+### Add resource
+POST {{host}}/api/doclib/compartments/{{compartmentID}}/resources
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "resource_id": "doc_ts_intel_brief"
+}
+
+### Get user compartments
+GET {{host}}/api/doclib/compartments/user/user_lead_inv
+Authorization: Bearer {{token}}
+
+### Remove member
+DELETE {{host}}/api/doclib/compartments/{{compartmentID}}/members/user_former
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 18. ReBAC
+### ============================================================
+
+### Check relationship
+POST {{host}}/api/doclib/rebac/check
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "subject_id": "ent_user_agent007",
+  "object_id": "ent_doc_sar4521",
+  "relation": "can_read"
+}
+
+### Check entity permission
+POST {{host}}/api/doclib/rebac/entity-permission
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_entity_id": "ent_user_agent007",
+  "resource_entity_id": "ent_shellcorp",
+  "action": "investigate"
+}
+
+### ============================================================
+### 19. Unified Access Evaluation
+### ============================================================
+
+### Evaluate all access models
+POST {{host}}/api/doclib/access/unified-evaluate
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "subject": {"user_id": "user_agent007", "role": "investigator", "department": "dept_fiu", "clearance": "secret"},
+  "resource": {"doc_id": "doc_ts_intel_brief", "classification": "top_secret", "case_id": "case_001"},
+  "action": "read",
+  "environment": {"ip_address": "10.0.1.45", "hour": "14"}
+}
+
+### ============================================================
+### 20. Shamir Secret Sharing
+### ============================================================
+
+### Protect document
+POST {{host}}/api/doclib/shamir/protect
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "doc_id": "doc_critical_001",
+  "level": "critical",
+  "holder_ids": ["user_director", "user_deputy", "user_secoff1", "user_secoff2", "user_secoff3"]
+}
+
+### Get config
+GET {{host}}/api/doclib/shamir/doc_critical_001/config
+Authorization: Bearer {{token}}
+
+### Collect share
+POST {{host}}/api/doclib/shamir/doc_critical_001/collect
+Authorization: Bearer {{token}}
+
+### Request access
+POST {{host}}/api/doclib/shamir/request-access
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "doc_id": "doc_critical_001",
+  "reason": "Required for annual review"
+}
+
+### Submit share
+POST {{host}}/api/doclib/shamir/requests/{{requestID}}/submit-share
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "share": "base64_share_data"
+}
+
+### Reconstruct
+POST {{host}}/api/doclib/shamir/requests/{{requestID}}/reconstruct
+Authorization: Bearer {{token}}
+
+### Revoke protection
+POST {{host}}/api/doclib/shamir/doc_critical_001/revoke
+Authorization: Bearer {{token}}
+
+### Audit log
+GET {{host}}/api/doclib/shamir/doc_critical_001/audit
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 21. Indexing
+### ============================================================
+
+### Rebuild indexes
+POST {{host}}/api/doclib/index/rebuild
+Authorization: Bearer {{token}}
+
+### Lookup by classification
+GET {{host}}/api/doclib/index/lookup?category=doc&field=classification&value=secret
+Authorization: Bearer {{token}}
+
+### Lookup by department
+GET {{host}}/api/doclib/index/lookup?category=doc&field=dept&value=dept_fiu
+Authorization: Bearer {{token}}
+
+### Lookup by tag
+GET {{host}}/api/doclib/index/lookup?category=doc&field=tag&value=aml
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 22. Enhanced Audit
+### ============================================================
+
+### Create anomaly rule (bulk download)
+POST {{host}}/api/doclib/audit/anomaly-rules
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Bulk download detection",
+  "rule_type": "bulk_download",
+  "threshold": 50,
+  "window_minutes": 60,
+  "severity": "critical"
+}
+
+### Create anomaly rule (off-hours)
+POST {{host}}/api/doclib/audit/anomaly-rules
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Off-hours access",
+  "rule_type": "off_hours",
+  "threshold": 5,
+  "window_minutes": 480,
+  "severity": "high"
+}
+
+### List anomaly rules
+GET {{host}}/api/doclib/audit/anomaly-rules
+Authorization: Bearer {{token}}
+
+### Detect anomalies
+POST {{host}}/api/doclib/audit/detect-anomalies
+Authorization: Bearer {{token}}
+
+### List anomalies (unresolved)
+GET {{host}}/api/doclib/audit/anomalies?unresolved=true
+Authorization: Bearer {{token}}
+
+### Resolve anomaly
+POST {{host}}/api/doclib/audit/anomalies/{{anomalyID}}/resolve
+Authorization: Bearer {{token}}
+
+### Compliance dashboard
+GET {{host}}/api/doclib/audit/compliance-dashboard
+Authorization: Bearer {{token}}
+
+### Forensic search
+POST {{host}}/api/doclib/audit/forensic-search
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "actor": "user_intern",
+  "action": "download",
+  "doc_id": "",
+  "from": "2026-03-15T00:00:00Z",
+  "to": "2026-03-17T00:00:00Z"
+}
+
+### ============================================================
+### 23. Advanced Workflow
+### ============================================================
+
+### Create template
+POST {{host}}/api/doclib/adv-workflows/templates
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Evidence Transfer",
+  "category": "evidence_transfer",
+  "stages": [
+    {"name": "Supervisor", "type": "approval", "required_approvals": 1, "approvers": ["role:supervisor"], "sla_hours": 24},
+    {"name": "Legal", "type": "review", "required_approvals": 1, "approvers": ["role:legal"], "sla_hours": 48},
+    {"name": "Director", "type": "approval", "required_approvals": 2, "approvers": ["user:director", "user:deputy"], "sla_hours": 72}
+  ],
+  "escalation_rules": {"auto_escalate_after_hours": 96, "escalate_to": "user_director"}
+}
+
+### List templates
+GET {{host}}/api/doclib/adv-workflows/templates
+Authorization: Bearer {{token}}
+
+### Start workflow
+POST {{host}}/api/doclib/adv-workflows
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "template_id": "{{advTemplateID}}",
+  "resource_id": "{{evidenceID}}",
+  "resource_type": "evidence",
+  "metadata": {"from_agency": "FBI", "to_agency": "SEC"}
+}
+
+### Get instance
+GET {{host}}/api/doclib/adv-workflows/{{advInstanceID}}
+Authorization: Bearer {{token}}
+
+### Approve stage
+POST {{host}}/api/doclib/adv-workflows/{{advInstanceID}}/approve
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "comment": "Approved per MOU #2026-045"
+}
+
+### Reject stage
+POST {{host}}/api/doclib/adv-workflows/{{advInstanceID}}/reject
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Missing acknowledgment from receiving agency"
+}
+
+### List instances
+GET {{host}}/api/doclib/adv-workflows
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 24. Data Governance
+### ============================================================
+
+### Create retention schedule
+POST {{host}}/api/doclib/governance/retention-schedules
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Financial Records - 7 Year",
+  "classification_filter": "confidential",
+  "doc_type_filter": "financial_report",
+  "retention_days": 2555,
+  "action": "archive",
+  "regulation": "BSA/AML"
+}
+
+### List retention schedules
+GET {{host}}/api/doclib/governance/retention-schedules
+Authorization: Bearer {{token}}
+
+### Evaluate retention
+POST {{host}}/api/doclib/governance/evaluate-retention
+Authorization: Bearer {{token}}
+
+### Create regional restriction
+POST {{host}}/api/doclib/governance/regional-restrictions
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "EU Data Residency",
+  "jurisdiction": "EU",
+  "allowed_regions": ["eu-west-1", "eu-central-1"],
+  "denied_regions": ["us-east-1"],
+  "doc_type_filter": "personal_data"
+}
+
+### List regional restrictions
+GET {{host}}/api/doclib/governance/regional-restrictions
+Authorization: Bearer {{token}}
+
+### Create classification rule
+POST {{host}}/api/doclib/governance/classification-rules
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Auto-classify financial docs",
+  "conditions": {"tags_contain": ["financial"], "current_classification_below": "confidential"},
+  "enforce_classification": "confidential"
+}
+
+### List classification rules
+GET {{host}}/api/doclib/governance/classification-rules
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 25. Data Ingestion
+### ============================================================
+
+### Create pipeline
+POST {{host}}/api/doclib/ingestion/pipelines
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "SWIFT Message Ingestion",
+  "source_type": "financial",
+  "source_config": {"endpoint": "sftp://swift.bank.com/mt103", "format": "swift_mt103"},
+  "transforms": [
+    {"operation": "set_classification", "config": {"level": "confidential"}},
+    {"operation": "add_tag", "config": {"tag": "swift_mt103"}}
+  ],
+  "schedule": "0 */4 * * *",
+  "enabled": true
+}
+
+### List pipelines
+GET {{host}}/api/doclib/ingestion/pipelines
+Authorization: Bearer {{token}}
+
+### Get pipeline
+GET {{host}}/api/doclib/ingestion/pipelines/{{pipelineID}}
+Authorization: Bearer {{token}}
+
+### Run pipeline
+POST {{host}}/api/doclib/ingestion/pipelines/{{pipelineID}}/run
+Authorization: Bearer {{token}}
+
+### List runs
+GET {{host}}/api/doclib/ingestion/runs?pipeline_id={{pipelineID}}
+Authorization: Bearer {{token}}
+
+### Ingest record
+POST {{host}}/api/doclib/ingestion/ingest
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "pipeline_id": "{{pipelineID}}",
+  "title": "SWIFT MT103 - WT-2026-03-16-001",
+  "content": "Sender: HSBCGB2L\nReceiver: BOFAUS3N\nAmount: USD 450,000.00",
+  "doc_type": "transaction_record",
+  "classification": "confidential",
+  "tags": ["swift_mt103", "wire_transfer"],
+  "metadata": {"sender_bic": "HSBCGB2L", "amount": "450000"}
+}
+
+### Delete pipeline
+DELETE {{host}}/api/doclib/ingestion/pipelines/{{pipelineID}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 26. Document Governance (Signatures, Legal Hold, Retention)
+### ============================================================
+
+### Sign document
+POST {{host}}/api/doclib/documents/{{docID}}/sign
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "purpose": "approval",
+  "certificate_ref": "cert_2026"
+}
+
+### List signatures
+GET {{host}}/api/doclib/documents/{{docID}}/signatures
+Authorization: Bearer {{token}}
+
+### Verify signature
+GET {{host}}/api/doclib/signatures/{{sigID}}/verify
+Authorization: Bearer {{token}}
+
+### Revoke signature
+POST {{host}}/api/doclib/signatures/{{sigID}}/revoke
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Certificate compromised"
+}
+
+### Place legal hold
+POST {{host}}/api/doclib/documents/{{docID}}/legal-hold
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Litigation hold — SEC v. ShellCorp",
+  "case_ref": "case_001",
+  "custodian": "user_legal"
+}
+
+### Release legal hold
+DELETE {{host}}/api/doclib/legal-holds/{{holdID}}
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Litigation resolved"
+}
+
+### List legal holds
+GET {{host}}/api/doclib/documents/{{docID}}/legal-holds
+Authorization: Bearer {{token}}
+
+### Create retention policy
+POST {{host}}/api/doclib/retention-policies
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "SAR 5 Year Retention",
+  "classification": "confidential",
+  "doc_types": ["financial_report"],
+  "retention_days": 1825,
+  "action_on_expiry": "archive"
+}
+
+### List retention policies
+GET {{host}}/api/doclib/retention-policies
+Authorization: Bearer {{token}}
+
+### Apply retention
+POST {{host}}/api/doclib/documents/{{docID}}/retention
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "policy_id": "{{retentionPolicyID}}"
+}
+
+### Schedule destruction
+POST {{host}}/api/doclib/documents/{{docID}}/destruction
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "policy_id": "{{retentionPolicyID}}",
+  "scheduled_at": "2026-06-01T00:00:00Z"
+}
+
+### Approve destruction
+POST {{host}}/api/doclib/destructions/{{destructionID}}/approve
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 27. Policy Documents
+### ============================================================
+
+### Create policy doc
+POST {{host}}/api/doclib/policy-docs
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "title": "Acceptable Use Policy for Classified Systems",
+  "content": "All personnel must...",
+  "category": "security",
+  "classification": "internal"
+}
+
+### List policy docs
+GET {{host}}/api/doclib/policy-docs?stage=draft
+Authorization: Bearer {{token}}
+
+### Submit for review
+POST {{host}}/api/doclib/policy-docs/{{policyDocID}}/submit-review
+Authorization: Bearer {{token}}
+
+### Review
+POST {{host}}/api/doclib/policy-docs/{{policyDocID}}/review
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "action": "approve",
+  "comment": "Aligns with NIST 800-53"
+}
+
+### Approve
+POST {{host}}/api/doclib/policy-docs/{{policyDocID}}/approve
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "action": "approve",
+  "comment": "Final approval"
+}
+
+### Publish
+POST {{host}}/api/doclib/policy-docs/{{policyDocID}}/publish
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "target_audience": ["dept_all"],
+  "effective_date": "2026-04-01T00:00:00Z"
+}
+
+### Amend
+POST {{host}}/api/doclib/policy-docs/{{policyDocID}}/amend
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "reason": "Updated mobile device provisions"
+}
+
+### ============================================================
+### 28. Org Access Sync
+### ============================================================
+
+### Add member with sync
+POST {{host}}/api/doclib/org-sync/add-member
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_id": "user_new_analyst",
+  "unit_id": "{{unitID}}",
+  "role": "analyst"
+}
+
+### Remove member with sync
+POST {{host}}/api/doclib/org-sync/remove-member
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_id": "user_former_analyst",
+  "unit_id": "{{unitID}}"
+}
+
+### ============================================================
+### 29. Context-Aware Document Access
+### ============================================================
+
+### Evaluate document access
+POST {{host}}/api/doclib/access/evaluate-document
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "user_id": "user_agent007",
+  "doc_id": "{{docID}}",
+  "action": "read",
+  "ip_address": "10.0.1.45",
+  "device_id": "dev_workstation_007"
+}
+
+### ============================================================
+### 30. Events & Dashboard
+### ============================================================
+
+### Query events
+GET {{host}}/api/doclib/events?type=document.created&from=2026-03-01T00:00:00Z&limit=100
+Authorization: Bearer {{token}}
+
+### Dashboard stats
+GET {{host}}/api/doclib/dashboard/stats
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 31. Alerts & Notifications
+### ============================================================
+
+### Create alert rule
+POST {{host}}/api/doclib/alerts/rules
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "High-value transaction alert",
+  "category": "transaction",
+  "event_types": ["entity.created"],
+  "severity": "critical",
+  "notify_users": ["user_compliance"]
+}
+
+### List alert rules
+GET {{host}}/api/doclib/alerts/rules
+Authorization: Bearer {{token}}
+
+### Create SLA config
+POST {{host}}/api/doclib/alerts/sla
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "Critical Case SLA",
+  "case_priority": "critical",
+  "response_time_hours": 4,
+  "resolution_time_hours": 72
+}
+
+### Trigger alert
+POST {{host}}/api/doclib/alerts/trigger
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "category": "security",
+  "severity": "critical",
+  "title": "Unauthorized access attempt",
+  "description": "User attempted Top Secret access without clearance",
+  "resource_id": "doc_ts_001"
+}
+
+### List alerts
+GET {{host}}/api/doclib/alerts?status=open&severity=critical
+Authorization: Bearer {{token}}
+
+### Acknowledge alert
+POST {{host}}/api/doclib/alerts/{{alertID}}/acknowledge
+Authorization: Bearer {{token}}
+
+### Resolve alert
+POST {{host}}/api/doclib/alerts/{{alertID}}/resolve
+Authorization: Bearer {{token}}
+
+### Get notifications
+GET {{host}}/api/doclib/notifications?unread=true
+Authorization: Bearer {{token}}
+
+### Mark read
+POST {{host}}/api/doclib/notifications/{{notifID}}/read
+Authorization: Bearer {{token}}
+
+### ============================================================
+### 32. Webhooks & Connectors
+### ============================================================
+
+### Register webhook
+POST {{host}}/api/doclib/webhooks
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "url": "https://siem.bank.com/api/events",
+  "event_types": ["document.created", "alert.triggered"],
+  "secret": "hmac_secret_123"
+}
+
+### List webhooks
+GET {{host}}/api/doclib/webhooks
+Authorization: Bearer {{token}}
+
+### Delete webhook
+DELETE {{host}}/api/doclib/webhooks/{{webhookID}}
+Authorization: Bearer {{token}}
+
+### Create connector
+POST {{host}}/api/doclib/connectors
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "SWIFT Connector",
+  "type": "financial",
+  "endpoint": "sftp://swift.bank.com",
+  "auth_type": "certificate",
+  "schedule": "0 */4 * * *"
+}
+
+### List connectors
+GET {{host}}/api/doclib/connectors
+Authorization: Bearer {{token}}
+
+### Delete connector
+DELETE {{host}}/api/doclib/connectors/{{connectorID}}
+Authorization: Bearer {{token}}
