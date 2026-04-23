@@ -132,7 +132,7 @@ type Envelope struct {
 
 // EnvelopePayload specifies what is being sealed.
 type EnvelopePayload struct {
-	Kind            string            `json:"kind"` // file | kv | secret
+	Kind            string            `json:"kind"` // file | kv | secret | bundle
 	ObjectPath      string            `json:"object_path,omitempty"`
 	ObjectVersion   string            `json:"object_version,omitempty"`
 	InlineData      []byte            `json:"inline_data,omitempty"`
@@ -141,6 +141,29 @@ type EnvelopePayload struct {
 	SecretReference string            `json:"secret_reference,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	EncodingHint    string            `json:"encoding_hint,omitempty"`
+	Resources      []EnvelopeResource `json:"resources,omitempty"`
+}
+
+// EnvelopeResource represents an individual resource within an envelope bundle.
+type EnvelopeResource struct {
+	ID          string            `json:"id"`
+	Type       string            `json:"type"` // file | secret | kv
+	Name       string            `json:"name"`
+	Path       string            `json:"path,omitempty"`          // Object storage path for files
+	Version    string            `json:"version,omitempty"`    // Object version for files
+	SecretRef  string            `json:"secret_ref,omitempty"`  // Secret reference (e.g., "secret:category:name")
+	Key        string            `json:"key,omitempty"`        // Key for KV type
+	Value     json.RawMessage   `json:"value,omitempty"`     // Value for KV type
+	Content   []byte            `json:"content,omitempty"`   // Inline content for files
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	Encoding  string            `json:"encoding,omitempty"`  // base64, gzip, etc.
+}
+
+// EnvelopePayloadBundle groups multiple resources into a single envelope.
+type EnvelopePayloadBundle struct {
+	Resources     []EnvelopeResource `json:"resources"`
+	BundleHash    string             `json:"bundle_hash"`
+	ResourceCount int                `json:"resource_count"`
 }
 
 // Digest derives a deterministic payload hash for integrity tracking.
@@ -152,6 +175,7 @@ func (p EnvelopePayload) Digest() string {
 	h.Write(p.InlineData)
 	h.Write([]byte(p.Key))
 	h.Write([]byte(p.SecretReference))
+	h.Write([]byte(p.EncodingHint))
 	if len(p.Value) > 0 {
 		h.Write(p.Value)
 	}
@@ -159,7 +183,130 @@ func (p EnvelopePayload) Digest() string {
 		meta, _ := json.Marshal(p.Metadata)
 		h.Write(meta)
 	}
+	for _, r := range p.Resources {
+		h.Write([]byte(r.ID))
+		h.Write([]byte(r.Type))
+		h.Write([]byte(r.Name))
+		h.Write([]byte(r.Path))
+		h.Write([]byte(r.Version))
+		h.Write([]byte(r.SecretRef))
+		h.Write([]byte(r.Key))
+		h.Write([]byte(r.Encoding))
+		if len(r.Value) > 0 {
+			h.Write(r.Value)
+		}
+		if len(r.Content) > 0 {
+			h.Write(r.Content)
+		}
+		if len(r.Metadata) > 0 {
+			meta, _ := json.Marshal(r.Metadata)
+			h.Write(meta)
+		}
+	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ComputeBundleHash computes a SHA256 hash of all resources in the bundle.
+func (b EnvelopePayloadBundle) ComputeBundleHash() string {
+	h := sha256.New()
+	for _, r := range b.Resources {
+		h.Write([]byte(r.ID))
+		h.Write([]byte(r.Type))
+		h.Write([]byte(r.Name))
+		h.Write([]byte(r.Path))
+		h.Write([]byte(r.SecretRef))
+		h.Write([]byte(r.Key))
+		if len(r.Value) > 0 {
+			h.Write(r.Value)
+		}
+		if len(r.Content) > 0 {
+			h.Write(r.Content)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+const (
+	ResourceTypeFile   = "file"
+	ResourceTypeSecret = "secret"
+	ResourceTypeKV     = "kv"
+)
+
+// ResolveResource resolves a single resource based on its type.
+// For files, it fetches content from object storage.
+// For secrets, it fetches from the secret store.
+// For KV, it returns the value as-is.
+func (db *DB) ResolveResource(resource EnvelopeResource) ([]byte, error) {
+	switch resource.Type {
+	case ResourceTypeFile:
+		if resource.Path == "" {
+			return nil, fmt.Errorf("resource %s: missing path for file type", resource.Name)
+		}
+		data, _, err := db.GetObject(resource.Path, "system")
+		if err != nil {
+			return nil, fmt.Errorf("resource %s: failed to get object: %w", resource.Name, err)
+		}
+		return data, nil
+
+	case ResourceTypeSecret:
+		if resource.SecretRef == "" {
+			return nil, fmt.Errorf("resource %s: missing secret_ref for secret type", resource.Name)
+		}
+		data, err := db.Get([]byte(resource.SecretRef))
+		if err != nil {
+			return nil, fmt.Errorf("resource %s: failed to get secret: %w", resource.Name, err)
+		}
+		return data, nil
+
+	case ResourceTypeKV:
+		return resource.Value, nil
+
+	default:
+		return nil, fmt.Errorf("unknown resource type: %s", resource.Type)
+	}
+}
+
+// ResolveResources resolves all resources in the envelope payload.
+// Returns a map of resource ID to resolved content.
+func (db *DB) ResolveResources(payload EnvelopePayload) (map[string][]byte, error) {
+	result := make(map[string][]byte)
+
+	for _, resource := range payload.Resources {
+		data, err := db.ResolveResource(resource)
+		if err != nil {
+			return nil, err
+		}
+		result[resource.ID] = data
+	}
+
+	return result, nil
+}
+
+// ToEnvelopePayload converts a bundle to an EnvelopePayload with resolved content.
+// The inline resource content is embedded for portability.
+// This only works for resources that have inline content available.
+func (b EnvelopePayloadBundle) ToEnvelopePayload() EnvelopePayload {
+	resources := make([]EnvelopeResource, len(b.Resources))
+	copy(resources, b.Resources)
+
+	return EnvelopePayload{
+		Kind:       "bundle",
+		Resources:  resources,
+		Metadata: map[string]string{
+			"bundle_hash":    b.BundleHash,
+			"resource_count": fmt.Sprintf("%d", b.ResourceCount),
+		},
+	}
+}
+
+// AddResource adds a resource to the bundle and updates the hash.
+func (b *EnvelopePayloadBundle) AddResource(resource EnvelopeResource) {
+	if resource.ID == "" {
+		resource.ID = fmt.Sprintf("res-%d", len(b.Resources)+1)
+	}
+	b.Resources = append(b.Resources, resource)
+	b.ResourceCount = len(b.Resources)
+	b.BundleHash = b.ComputeBundleHash()
 }
 
 // EnvelopePolicies bundles access, storage, and tamper controls.
@@ -439,6 +586,18 @@ func (db *DB) CreateEnvelope(ctx context.Context, req *EnvelopeRequest) (*Envelo
 		return nil, err
 	}
 	return env, nil
+}
+
+// UpdateEnvelope saves changes to an existing envelope.
+func (db *DB) UpdateEnvelope(ctx context.Context, env *Envelope) error {
+	if env == nil {
+		return fmt.Errorf("envelope is nil")
+	}
+	env.LastUpdatedAt = time.Now().UTC()
+	if err := db.saveEnvelope(env); err != nil {
+		return fmt.Errorf("failed to save envelope: %w", err)
+	}
+	return nil
 }
 
 // AppendCustodyEvent extends the chain-of-custody ledger and emits audit trails.
