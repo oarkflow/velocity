@@ -19,8 +19,9 @@ var (
 )
 
 type engineState struct {
-	db   *velocity.DB
-	refs int
+	db       *velocity.DB
+	refs     int
+	rowLocks *rowLockManager
 }
 
 // DSNConfigs allows injecting pre-configured velocity.Config setups for a given DSN.
@@ -63,12 +64,12 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("velocity driver: failed to load table schemas: %w", err)
 		}
-		state = &engineState{db: db}
+		state = &engineState{db: db, rowLocks: newRowLockManager()}
 		engines[path] = state
 	}
 	state.refs++
 
-	return &Conn{db: state.db, path: path}, nil
+	return &Conn{db: state.db, path: path, rowLocks: state.rowLocks}, nil
 }
 
 // OpenConnector must optionally be implemented by a Driver in order to

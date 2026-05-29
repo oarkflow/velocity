@@ -19,8 +19,11 @@ import (
 type Conn struct {
 	db               *velocity.DB
 	path             string
+	rowLocks         *rowLockManager
 	tx               *velocity.BatchWriter
 	txConstraintKeys map[string]struct{}
+	txRowUnlocks     []func()
+	txLockedRows     map[string]struct{}
 
 	stmtMu    sync.RWMutex
 	stmtCache map[string]*parsedStatement
@@ -120,6 +123,12 @@ func buildParamOrder(query string) map[int32]int {
 // connection as no longer in use.
 func (c *Conn) Close() error {
 	var err error
+	if c.tx != nil {
+		c.tx.Cancel()
+		c.tx = nil
+		c.txConstraintKeys = nil
+		c.releaseTxRowLocks()
+	}
 	if c.db != nil && c.path != "" {
 		enginesMu.Lock()
 		state := engines[c.path]
@@ -136,6 +145,7 @@ func (c *Conn) Close() error {
 	}
 	c.db = nil
 	c.path = ""
+	c.rowLocks = nil
 	c.stmtMu.Lock()
 	c.stmtCache = nil
 	c.stmtMu.Unlock()
@@ -156,6 +166,7 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	// Keep ordinary SQL transactions in one storage batch for common bulk loads.
 	c.tx = c.db.NewBatchWriter(65536)
 	c.txConstraintKeys = make(map[string]struct{})
+	c.txLockedRows = make(map[string]struct{})
 	return &Tx{conn: c}, nil
 }
 
@@ -168,6 +179,7 @@ func (tx *Tx) Commit() error {
 	err := tx.conn.tx.Flush()
 	tx.conn.tx = nil
 	tx.conn.txConstraintKeys = nil
+	tx.conn.releaseTxRowLocks()
 	return err
 }
 
@@ -175,7 +187,48 @@ func (tx *Tx) Rollback() error {
 	tx.conn.tx.Cancel()
 	tx.conn.tx = nil
 	tx.conn.txConstraintKeys = nil
+	tx.conn.releaseTxRowLocks()
 	return nil
+}
+
+func (c *Conn) lockRows(ctx context.Context, keys []string) (func(), error) {
+	if c.rowLocks == nil || len(keys) == 0 {
+		return func() {}, nil
+	}
+	if c.tx != nil {
+		if c.txLockedRows == nil {
+			c.txLockedRows = make(map[string]struct{})
+		}
+		newKeys := make([]string, 0, len(keys))
+		for _, key := range keys {
+			if key == "" {
+				continue
+			}
+			if _, exists := c.txLockedRows[key]; exists {
+				continue
+			}
+			c.txLockedRows[key] = struct{}{}
+			newKeys = append(newKeys, key)
+		}
+		unlock, err := c.rowLocks.acquire(ctx, newKeys)
+		if err != nil {
+			for _, key := range newKeys {
+				delete(c.txLockedRows, key)
+			}
+			return nil, err
+		}
+		c.txRowUnlocks = append(c.txRowUnlocks, unlock)
+		return func() {}, nil
+	}
+	return c.rowLocks.acquire(ctx, keys)
+}
+
+func (c *Conn) releaseTxRowLocks() {
+	for i := len(c.txRowUnlocks) - 1; i >= 0; i-- {
+		c.txRowUnlocks[i]()
+	}
+	c.txRowUnlocks = nil
+	c.txLockedRows = nil
 }
 
 // Put writes data contextually within a transaction if one is active.
@@ -290,6 +343,17 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 	}
 	if err := bw.Flush(); err != nil {
 		return inserted, err
+	}
+	if deferIndex {
+		err := c.db.RebuildIndex(table, nil, &velocity.RebuildOptions{
+			BatchSize:           batchSize,
+			NoWAL:               true,
+			SkipHighCardinality: true,
+			InMemoryOnly:        true,
+		})
+		if err != nil && !strings.Contains(err.Error(), "search schema not found") {
+			return inserted, err
+		}
 	}
 	return inserted, nil
 }

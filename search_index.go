@@ -78,6 +78,7 @@ type RebuildOptions struct {
 	BatchSize           int
 	NoWAL               bool // skip WAL writes for index entries during rebuild
 	SkipHighCardinality bool // avoid rebuilding identifier-like secondary postings
+	InMemoryOnly        bool // rebuild query indexes in memory without persisting rebuildable postings
 }
 
 type indexMeta struct {
@@ -174,9 +175,10 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 	if opts != nil && opts.SkipHighCardinality {
 		skipHighCardinality = true
 	}
+	inMemoryOnly := opts != nil && opts.InMemoryOnly
 
 	// Clear existing postings for this prefix
-	if err := db.clearIndexForPrefix(prefix, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL, SkipHighCardinality: skipHighCardinality}); err != nil {
+	if err := db.clearIndexForPrefix(prefix, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL, SkipHighCardinality: skipHighCardinality, InMemoryOnly: inMemoryOnly}); err != nil {
 		return err
 	}
 
@@ -296,7 +298,7 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 				valuePostings: valuePostingsForSchema(values, schema),
 			})
 		}
-		if err := db.applyIndexBatch(prefix, batch, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL, SkipHighCardinality: skipHighCardinality}); err != nil {
+		if err := db.applyIndexBatch(prefix, batch, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL, SkipHighCardinality: skipHighCardinality, InMemoryOnly: inMemoryOnly}); err != nil {
 			return err
 		}
 	}
@@ -326,6 +328,7 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 	additions := make(map[string][]uint64)
 	noWAL := opts != nil && opts.NoWAL
 	skipHighCardinality := opts != nil && opts.SkipHighCardinality
+	inMemoryOnly := opts != nil && opts.InMemoryOnly
 	nextDocID, nextDocIDLoaded := uint64(0), false
 
 	db.mutex.Lock()
@@ -347,8 +350,12 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 				}
 				docID = nextDocID
 				nextDocID++
-				if err := db.bindDocIDLockedNoWAL(item.key, docID); err != nil {
-					return err
+				if inMemoryOnly {
+					db.rememberDocIDLocked(item.key, docID)
+				} else {
+					if err := db.bindDocIDLockedNoWAL(item.key, docID); err != nil {
+						return err
+					}
 				}
 			} else {
 				docID, err = db.allocateDocIDLocked(item.key)
@@ -359,16 +366,26 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 		}
 
 		meta := indexMeta{Prefix: prefix, Terms: item.terms, Hashes: item.hashes, Values: item.values}
-		metaBytes, err := json.Marshal(meta)
-		if err != nil {
-			return err
+		var metaBytes []byte
+		if !inMemoryOnly {
+			var err error
+			metaBytes, err = json.Marshal(meta)
+			if err != nil {
+				return err
+			}
 		}
-		if err := db.storeIndexMetaLocked(docID, meta, metaBytes); err != nil {
-			return err
+		if inMemoryOnly {
+			db.rememberIndexMetaLocked(docID, meta)
+		} else {
+			if err := db.storeIndexMetaLocked(docID, meta, metaBytes); err != nil {
+				return err
+			}
 		}
 		for _, term := range item.terms {
-			k := string(indexTermKey(prefix, term))
-			additions[k] = append(additions[k], docID)
+			if !inMemoryOnly {
+				k := string(indexTermKey(prefix, term))
+				additions[k] = append(additions[k], docID)
+			}
 		}
 		for field, hash := range item.hashes {
 			if skipHighCardinality && isHighCardinalityIdentifierField(field) {
@@ -376,7 +393,7 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 			} else {
 				db.rememberHashIndexPostingLocked(prefix, field, hash, docID)
 			}
-			if !db.disableIndexPersistence && !(skipHighCardinality && isHighCardinalityIdentifierField(field)) {
+			if !inMemoryOnly && !db.disableIndexPersistence && !(skipHighCardinality && isHighCardinalityIdentifierField(field)) {
 				k := string(indexHashKey(prefix, field, hash))
 				additions[k] = append(additions[k], docID)
 			}
@@ -388,14 +405,14 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 				} else {
 					db.rememberValueIndexPostingLocked(prefix, field, value, docID)
 				}
-				if !db.disableIndexPersistence && !(skipHighCardinality && isHighCardinalityIdentifierField(field)) {
+				if !inMemoryOnly && !db.disableIndexPersistence && !(skipHighCardinality && isHighCardinalityIdentifierField(field)) {
 					k := string(indexValueKey(prefix, field, value))
 					additions[k] = append(additions[k], docID)
 				}
 			}
 		}
 	}
-	if nextDocIDLoaded {
+	if nextDocIDLoaded && !inMemoryOnly {
 		if err := db.storeNextDocIDLockedNoWAL(nextDocID); err != nil {
 			return err
 		}
@@ -1926,6 +1943,13 @@ func (db *DB) storeIndexMetaLocked(docID uint64, meta indexMeta, metaBytes []byt
 	return db.putIndexLocked(indexMetaKey(docID), metaBytes)
 }
 
+func (db *DB) rememberIndexMetaLocked(docID uint64, meta indexMeta) {
+	if db.indexMetaByID == nil {
+		db.indexMetaByID = make(map[uint64]indexMeta)
+	}
+	db.indexMetaByID[docID] = meta
+}
+
 // deleteIndexNoWALLocked tombstones index keys without WAL.
 func (db *DB) deleteIndexNoWALLocked(key []byte) error {
 	e := &Entry{
@@ -2024,7 +2048,7 @@ func (db *DB) bindDocIDLocked(key []byte, docID uint64) error {
 	return db.putIndexLocked(indexDocKey(docID), key)
 }
 
-func (db *DB) bindDocIDLockedNoWAL(key []byte, docID uint64) error {
+func (db *DB) rememberDocIDLocked(key []byte, docID uint64) {
 	if db.docIDByKey == nil {
 		db.docIDByKey = make(map[string]uint64)
 	}
@@ -2033,6 +2057,10 @@ func (db *DB) bindDocIDLockedNoWAL(key []byte, docID uint64) error {
 	}
 	db.docIDByKey[string(key)] = docID
 	db.docKeyByID[docID] = append([]byte(nil), key...)
+}
+
+func (db *DB) bindDocIDLockedNoWAL(key []byte, docID uint64) error {
+	db.rememberDocIDLocked(key, docID)
 	if db.disableIndexPersistence {
 		return nil
 	}

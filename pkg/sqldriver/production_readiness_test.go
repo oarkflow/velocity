@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/oarkflow/velocity"
@@ -393,6 +394,61 @@ func TestSQLDriver_ProductionRepeatedCloseReopenAndTransactions(t *testing.T) {
 	}
 	if balance != 15 {
 		t.Fatalf("committed balance = %d, want 15", balance)
+	}
+}
+
+func TestSQLDriver_ProductionConcurrentRowUpdatesSerialize(t *testing.T) {
+	db, _ := openProductionTestDB(t, "row_locks")
+	db.SetMaxOpenConns(8)
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE accounts (id BIGINT PRIMARY KEY, balance BIGINT)`); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO accounts (id, balance) VALUES (1, 0)`); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	const workers = 10
+	const updatesPerWorker = 10
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < updatesPerWorker; i++ {
+				tx, err := db.Begin()
+				if err != nil {
+					errs <- err
+					return
+				}
+				if _, err := tx.Exec(`UPDATE accounts SET balance = balance + 1 WHERE id = 1`); err != nil {
+					_ = tx.Rollback()
+					errs <- err
+					return
+				}
+				if err := tx.Commit(); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent update failed: %v", err)
+		}
+	}
+
+	var balance int
+	if err := db.QueryRow(`SELECT balance FROM accounts WHERE id = 1`).Scan(&balance); err != nil {
+		t.Fatalf("read balance failed: %v", err)
+	}
+	if balance != workers*updatesPerWorker {
+		t.Fatalf("balance = %d, want %d", balance, workers*updatesPerWorker)
 	}
 }
 

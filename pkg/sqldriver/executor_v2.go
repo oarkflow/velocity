@@ -99,7 +99,7 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	if err != nil {
 		return nil, err
 	}
-	if res, ok, err := e.tryFastBulkInsert(tableName, columns, n, args); ok || err != nil {
+	if res, ok, err := e.tryFastBulkInsert(ctx, tableName, columns, n, args); ok || err != nil {
 		return res, err
 	}
 
@@ -108,6 +108,28 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	var lastInsertID int64
 	var puts []putOperation
 	batchConstraintKeys := make(map[string]struct{})
+	statementLockedRows := make(map[string]struct{})
+	var statementUnlocks []func()
+	defer func() {
+		for i := len(statementUnlocks) - 1; i >= 0; i-- {
+			statementUnlocks[i]()
+		}
+	}()
+	lockInsertKey := func(key string) error {
+		if key == "" {
+			return nil
+		}
+		if _, exists := statementLockedRows[key]; exists {
+			return nil
+		}
+		statementLockedRows[key] = struct{}{}
+		unlock, err := e.conn.lockRows(ctx, []string{key})
+		if err != nil {
+			return err
+		}
+		statementUnlocks = append(statementUnlocks, unlock)
+		return nil
+	}
 	needsExistingRow := n.Ignore || n.OnConflictDoNothing || len(n.OnDupKey) > 0 || len(n.OnConflictUpdate) > 0
 	var encodedColumns [][]byte
 	if !needsExistingRow && n.Select == nil && len(columns) > 0 {
@@ -123,6 +145,9 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 			if id, ok := asFloat(keyValue); ok {
 				lastInsertID = int64(id)
 			}
+		}
+		if err := lockInsertKey(key); err != nil {
+			return err
 		}
 
 		if err := e.checkInsertConstraints(tableName, meta, data, key, batchConstraintKeys); err != nil {
@@ -204,6 +229,9 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 						lastInsertID = int64(id)
 					}
 				}
+				if err := lockInsertKey(key); err != nil {
+					return nil, err
+				}
 				if err := e.checkInsertConstraints(tableName, meta, data, key, batchConstraintKeys); err != nil {
 					return nil, err
 				}
@@ -236,7 +264,7 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	return &Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
 }
 
-func (e *ExecutorV2) tryFastBulkInsert(tableName string, columns []string, n *ast.InsertStmt, args []driver.NamedValue) (driver.Result, bool, error) {
+func (e *ExecutorV2) tryFastBulkInsert(ctx context.Context, tableName string, columns []string, n *ast.InsertStmt, args []driver.NamedValue) (driver.Result, bool, error) {
 	if n.Select != nil || n.Ignore || n.OnConflictDoNothing || len(n.OnDupKey) > 0 || len(n.OnConflictUpdate) > 0 {
 		return nil, false, nil
 	}
@@ -265,6 +293,28 @@ func (e *ExecutorV2) tryFastBulkInsert(tableName string, columns []string, n *as
 		inserted := int64(0)
 		var lastInsertID int64
 		batchConstraintKeys := make(map[string]struct{})
+		statementLockedRows := make(map[string]struct{})
+		var statementUnlocks []func()
+		defer func() {
+			for i := len(statementUnlocks) - 1; i >= 0; i-- {
+				statementUnlocks[i]()
+			}
+		}()
+		lockInsertKey := func(key string) error {
+			if key == "" {
+				return nil
+			}
+			if _, exists := statementLockedRows[key]; exists {
+				return nil
+			}
+			statementLockedRows[key] = struct{}{}
+			unlock, err := e.conn.lockRows(ctx, []string{key})
+			if err != nil {
+				return err
+			}
+			statementUnlocks = append(statementUnlocks, unlock)
+			return nil
+		}
 		for _, rowExprs := range n.Values {
 			if len(rowExprs) != len(columns) {
 				return nil, fmt.Errorf("velocity driver: insert column/value count mismatch")
@@ -300,6 +350,9 @@ func (e *ExecutorV2) tryFastBulkInsert(tableName string, columns []string, n *as
 				}
 			} else {
 				key = strconv.AppendInt(append(append(key, tableName...), ':'), time.Now().UnixNano()+inserted, 10)
+			}
+			if err := lockInsertKey(string(key)); err != nil {
+				return nil, err
 			}
 			if err := e.conn.checkRawInsertConstraintsWithSeen(tableName, columns, values, key, batchConstraintKeys); err != nil {
 				return nil, err
@@ -436,6 +489,12 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 	if err != nil {
 		return nil, err
 	}
+	rowKeys := mutationRowKeys(rows)
+	unlock, err := e.conn.lockRows(ctx, rowKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	tableName, hasSingleTable := updateTargetTableName(n)
 	var meta tableSchemaMeta
@@ -463,6 +522,9 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 		var doc map[string]interface{}
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			doc = make(map[string]interface{})
+		}
+		for name, value := range doc {
+			row[name] = value
 		}
 		original := copyStringAnyMap(doc)
 		for _, asg := range n.Set {
@@ -587,6 +649,12 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 	if err != nil {
 		return nil, err
 	}
+	rowKeys := mutationRowKeys(rows)
+	unlock, err := e.conn.lockRows(ctx, rowKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	keys := make([][]byte, 0, len(rows))
 	for _, row := range rows {
@@ -600,6 +668,17 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 		return nil, err
 	}
 	return &Result{rowsAffected: int64(len(keys))}, nil
+}
+
+func mutationRowKeys(rows []Row) []string {
+	keys := make([]string, 0, len(rows))
+	for _, row := range rows {
+		key, ok := row["_key"].(string)
+		if ok && key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableStmt, args []driver.NamedValue) (driver.Result, error) {
