@@ -54,23 +54,17 @@ func (mt *MemTable) Put(key, value []byte) {
 	entry.checksum = crc32.Update(crc32.ChecksumIEEE(key), crc32.IEEETable, value)
 
 	keyStr := string(key)
+	old, loaded := mt.entries.Swap(keyStr, entry)
 	oldSize := int64(0)
-	if old, ok := mt.entries.Load(keyStr); ok {
+	if loaded {
 		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
 	}
-
-	mt.entries.Store(keyStr, entry)
 	atomic.AddInt64(&mt.size, int64(len(entry.Key)+len(entry.Value))-oldSize)
 }
 
 // PutEntry inserts a preconfigured Entry into the memtable. This is used when
 // we already have an Entry (for example when replaying WAL or writing with TTL)
 func (mt *MemTable) PutEntry(entry *Entry) {
-	oldSize := int64(0)
-	if old, ok := mt.entries.Load(string(entry.Key)); ok {
-		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
-	}
-
 	// Copy key/value into a pooled entry to avoid retaining caller buffers
 	e := entryPool.Get().(*Entry)
 	e.Key = append(e.Key[:0], entry.Key...)
@@ -80,8 +74,62 @@ func (mt *MemTable) PutEntry(entry *Entry) {
 	e.Deleted = entry.Deleted
 	e.checksum = entry.checksum
 
-	mt.entries.Store(string(e.Key), e)
+	old, loaded := mt.entries.Swap(string(e.Key), e)
+	oldSize := int64(0)
+	if loaded {
+		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+	}
 	atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
+}
+
+// PutEntryOwned inserts an entry whose key/value buffers are already detached
+// from caller-owned memory.
+func (mt *MemTable) PutEntryOwned(entry *Entry) {
+	e := entryPool.Get().(*Entry)
+	e.Key = entry.Key
+	e.Value = entry.Value
+	e.Timestamp = entry.Timestamp
+	e.ExpiresAt = entry.ExpiresAt
+	e.Deleted = entry.Deleted
+	e.checksum = entry.checksum
+
+	old, loaded := mt.entries.Swap(string(e.Key), e)
+	oldSize := int64(0)
+	if loaded {
+		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+	}
+	atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
+}
+
+func (mt *MemTable) PutEntriesOwned(entries []Entry) {
+	if len(entries) == 0 {
+		return
+	}
+	delta := int64(0)
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Deleted {
+			mt.Delete(entry.Key)
+			continue
+		}
+		e := entryPool.Get().(*Entry)
+		e.Key = entry.Key
+		e.Value = entry.Value
+		e.Timestamp = entry.Timestamp
+		e.ExpiresAt = entry.ExpiresAt
+		e.Deleted = false
+		e.checksum = entry.checksum
+
+		old, loaded := mt.entries.Swap(string(e.Key), e)
+		oldSize := int64(0)
+		if loaded {
+			oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+		}
+		delta += int64(len(e.Key)+len(e.Value)) - oldSize
+	}
+	if delta != 0 {
+		atomic.AddInt64(&mt.size, delta)
+	}
 }
 
 func (mt *MemTable) Get(key []byte) *Entry {

@@ -19,6 +19,7 @@ type StmtV2 struct {
 	stmt       sqlparser.Statement
 	parser     *sqlparser.Parser
 	paramOrder map[int32]int
+	fastInsert *simpleInsertPlan
 }
 
 // Close closes the statement.
@@ -28,6 +29,12 @@ func (s *StmtV2) Close() error {
 
 // NumInput returns the number of bind parameters.
 func (s *StmtV2) NumInput() int {
+	if s.fastInsert != nil {
+		return len(s.fastInsert.paramOrdinals)
+	}
+	if s.paramOrder != nil {
+		return len(s.paramOrder)
+	}
 	return -1 // Return -1 to allow the sql package to figure it out by passing all args
 }
 
@@ -50,6 +57,9 @@ func (s *StmtV2) Query(args []driver.Value) (driver.Rows, error) {
 }
 
 func (s *StmtV2) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	if s.fastInsert != nil {
+		return s.fastInsert.Exec(s.conn, args)
+	}
 	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder}
 	return executor.Execute(ctx, s.stmt, args)
 }
@@ -75,11 +85,11 @@ func (r *Result) RowsAffected() (int64, error) {
 
 // Rows implements driver.Rows
 type Rows struct {
-	columns     []string
-	schemaCols  []string
-	results     []velocity.SearchResult
-	rowMaps     []Row
-	cursor      int
+	columns    []string
+	schemaCols []string
+	results    []velocity.SearchResult
+	rowMaps    []Row
+	cursor     int
 }
 
 func (r *Rows) Columns() []string {

@@ -37,6 +37,7 @@ type KGIngestPipeline struct {
 	hnsw      *HNSWIndex
 	em        *EntityManager
 	config    IngestConfig
+	statsMu   sync.Mutex
 }
 
 // NewKGIngestPipeline creates a new ingest pipeline.
@@ -60,7 +61,7 @@ func NewKGIngestPipeline(db *DB, opts ...IngestOption) *KGIngestPipeline {
 // IngestOption configures the ingest pipeline.
 type IngestOption func(*KGIngestPipeline)
 
-func WithExtractor(e KGExtractor) IngestOption    { return func(p *KGIngestPipeline) { p.extractor = e } }
+func WithExtractor(e KGExtractor) IngestOption     { return func(p *KGIngestPipeline) { p.extractor = e } }
 func WithChunker(c KGChunker) IngestOption         { return func(p *KGIngestPipeline) { p.chunker = c } }
 func WithNER(n KGNEREngine) IngestOption           { return func(p *KGIngestPipeline) { p.ner = n } }
 func WithEmbedder(e KGEmbedder) IngestOption       { return func(p *KGIngestPipeline) { p.embedder = e } }
@@ -252,9 +253,9 @@ func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, enti
 		if !exists {
 			// Create entity node
 			entReq := &EntityRequest{
-				Type:    ent.Type,
-				Name:    ent.Canonical,
-				Tags:    map[string]string{"kg_type": ent.Type},
+				Type: ent.Type,
+				Name: ent.Canonical,
+				Tags: map[string]string{"kg_type": ent.Type},
 				Metadata: map[string]string{
 					"surface":    ent.Surface,
 					"confidence": fmt.Sprintf("%.2f", ent.Confidence),
@@ -284,6 +285,9 @@ func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, enti
 }
 
 func (p *KGIngestPipeline) updateStats(chunks, entities int) {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+
 	statsData, _ := p.db.Get([]byte(kgStatsKey))
 	var stats KGCorpusStats
 	if len(statsData) > 0 {

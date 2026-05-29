@@ -228,15 +228,20 @@ func (w *WAL) WriteBatch(entries []*Entry) error {
 
 func (w *WAL) syncLoop() {
 	for {
+		w.mutex.Lock()
+		ticker := w.ticker
+		stopChan := w.stopChan
+		w.mutex.Unlock()
+
 		select {
-		case <-w.ticker.C:
+		case <-ticker.C:
 			// sync without holding lock for the entire rotation check
 			w.mutex.Lock()
 			w.syncUnsafe()
 			w.mutex.Unlock()
 			// Check rotation policy (may perform rotation under lock)
 			_ = w.CheckRotation()
-		case <-w.stopChan:
+		case <-stopChan:
 			return
 		}
 	}
@@ -333,11 +338,9 @@ func (w *WAL) Close() error {
 	// Close stopChan and ticker while holding lock
 	if w.stopChan != nil {
 		close(w.stopChan)
-		w.stopChan = nil
 	}
 	if w.ticker != nil {
 		w.ticker.Stop()
-		w.ticker = nil
 	}
 	w.mutex.Unlock()
 
@@ -359,7 +362,6 @@ func (w *WAL) Close() error {
 	// Close flush channel and wait for background flusher to finish
 	if w.flushChan != nil {
 		close(w.flushChan)
-		w.flushChan = nil
 	}
 	w.flushWg.Wait()
 

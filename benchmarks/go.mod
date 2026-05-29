@@ -9,6 +9,7 @@ require (
 	github.com/glycerine/yogadb v0.11.1
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/lib/pq v1.11.2
+	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/oarkflow/velocity v0.0.19
 	go.etcd.io/bbolt v1.4.3
 )
@@ -49,6 +50,7 @@ require (
 	github.com/oarkflow/licensing v0.0.26 // indirect
 	github.com/oarkflow/previewer v0.0.6 // indirect
 	github.com/oarkflow/shamir v0.0.2 // indirect
+	github.com/oarkflow/sqlparser v0.0.0-20260322160025-9e8f05a7da94 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.16.0 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
@@ -56,7 +58,6 @@ require (
 	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/tidwall/btree v1.8.1 // indirect
-	github.com/xwb1989/sqlparser v0.0.0-20180606152119-120387863bf2 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/sys v0.41.0 // indirect

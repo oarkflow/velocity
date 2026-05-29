@@ -10,7 +10,7 @@ TMP_HOME ?= $(ROOT_DIR)/.tmp_make_home
 TMP_GOCACHE ?= $(ROOT_DIR)/.tmp_make_gocache
 TMP_SANDBOX_HOME ?= $(ROOT_DIR)/.tmp_make_sandbox_home
 
-.PHONY: help build build-secretr build-velocity test test-cli test-cli-commands test-go test-all sandbox-smoke clean
+.PHONY: help build build-secretr build-velocity test test-cli test-cli-commands test-go test-production test-destructive test-soak test-all sandbox-smoke clean
 
 help:
 	@echo "Targets:"
@@ -21,6 +21,9 @@ help:
 	@echo "  make test-cli       - Run comprehensive CLI tests"
 	@echo "  make test-cli-commands - Validate CLI command/help surface"
 	@echo "  make test-go        - Run Go tests for Secretr packages"
+	@echo "  make test-production - Run Velocity production readiness tests"
+	@echo "  make test-destructive - Run destructive crash/corruption tests"
+	@echo "  make test-soak      - Run longer destructive crash/corruption soak tests"
 	@echo "  make test-all       - Run CLI and Go tests"
 	@echo "  make sandbox-smoke  - Run sandbox exec smoke checks"
 	@echo "  make clean          - Remove temporary test/build artifacts"
@@ -70,6 +73,17 @@ test-go:
 	@mkdir -p "$(TMP_HOME)" "$(TMP_GOCACHE)"
 	HOME="$(TMP_HOME)" GOCACHE="$(TMP_GOCACHE)" go test ./internal/secretr/...
 	HOME="$(TMP_HOME)" GOCACHE="$(TMP_GOCACHE)" go test ./cmd/secretr ./cmd/velocity
+
+test-production:
+	go test ./...
+	go test -race -run 'TestProductionKV|TestWAL|TestBatchWriter|TestWriter|TestEnvelope' -count=1
+	go test -race ./pkg/sqldriver -run 'TestSQLDriver_Production' -count=1
+
+test-destructive:
+	go test -tags destructive -run 'TestDestructive|TestProduction' ./...
+
+test-soak:
+	VELOCITY_DESTRUCTIVE_SOAK_ITERS=800 go test -tags destructive -run 'TestDestructive|TestProduction' ./...
 
 test-all: test-cli-commands test-cli test-go
 

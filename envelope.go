@@ -132,31 +132,31 @@ type Envelope struct {
 
 // EnvelopePayload specifies what is being sealed.
 type EnvelopePayload struct {
-	Kind            string            `json:"kind"` // file | kv | secret | bundle
-	ObjectPath      string            `json:"object_path,omitempty"`
-	ObjectVersion   string            `json:"object_version,omitempty"`
-	InlineData      []byte            `json:"inline_data,omitempty"`
-	Key             string            `json:"key,omitempty"`
-	Value           json.RawMessage   `json:"value,omitempty"`
-	SecretReference string            `json:"secret_reference,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
-	EncodingHint    string            `json:"encoding_hint,omitempty"`
-	Resources      []EnvelopeResource `json:"resources,omitempty"`
+	Kind            string             `json:"kind"` // file | kv | secret | bundle
+	ObjectPath      string             `json:"object_path,omitempty"`
+	ObjectVersion   string             `json:"object_version,omitempty"`
+	InlineData      []byte             `json:"inline_data,omitempty"`
+	Key             string             `json:"key,omitempty"`
+	Value           json.RawMessage    `json:"value,omitempty"`
+	SecretReference string             `json:"secret_reference,omitempty"`
+	Metadata        map[string]string  `json:"metadata,omitempty"`
+	EncodingHint    string             `json:"encoding_hint,omitempty"`
+	Resources       []EnvelopeResource `json:"resources,omitempty"`
 }
 
 // EnvelopeResource represents an individual resource within an envelope bundle.
 type EnvelopeResource struct {
-	ID          string            `json:"id"`
-	Type       string            `json:"type"` // file | secret | kv
-	Name       string            `json:"name"`
-	Path       string            `json:"path,omitempty"`          // Object storage path for files
-	Version    string            `json:"version,omitempty"`    // Object version for files
-	SecretRef  string            `json:"secret_ref,omitempty"`  // Secret reference (e.g., "secret:category:name")
-	Key        string            `json:"key,omitempty"`        // Key for KV type
-	Value     json.RawMessage   `json:"value,omitempty"`     // Value for KV type
-	Content   []byte            `json:"content,omitempty"`   // Inline content for files
+	ID        string            `json:"id"`
+	Type      string            `json:"type"` // file | secret | kv
+	Name      string            `json:"name"`
+	Path      string            `json:"path,omitempty"`       // Object storage path for files
+	Version   string            `json:"version,omitempty"`    // Object version for files
+	SecretRef string            `json:"secret_ref,omitempty"` // Secret reference (e.g., "secret:category:name")
+	Key       string            `json:"key,omitempty"`        // Key for KV type
+	Value     json.RawMessage   `json:"value,omitempty"`      // Value for KV type
+	Content   []byte            `json:"content,omitempty"`    // Inline content for files
 	Metadata  map[string]string `json:"metadata,omitempty"`
-	Encoding  string            `json:"encoding,omitempty"`  // base64, gzip, etc.
+	Encoding  string            `json:"encoding,omitempty"` // base64, gzip, etc.
 }
 
 // EnvelopePayloadBundle groups multiple resources into a single envelope.
@@ -290,8 +290,8 @@ func (b EnvelopePayloadBundle) ToEnvelopePayload() EnvelopePayload {
 	copy(resources, b.Resources)
 
 	return EnvelopePayload{
-		Kind:       "bundle",
-		Resources:  resources,
+		Kind:      "bundle",
+		Resources: resources,
 		Metadata: map[string]string{
 			"bundle_hash":    b.BundleHash,
 			"resource_count": fmt.Sprintf("%d", b.ResourceCount),
@@ -606,7 +606,10 @@ func (db *DB) AppendCustodyEvent(ctx context.Context, envelopeID string, event *
 		return nil, fmt.Errorf("custody event is nil")
 	}
 
-	env, err := db.loadEnvelope(envelopeID)
+	db.envelopeMu.Lock()
+	defer db.envelopeMu.Unlock()
+
+	env, err := db.loadEnvelopeLocked(envelopeID)
 	if err != nil {
 		return nil, err
 	}
@@ -617,7 +620,7 @@ func (db *DB) AppendCustodyEvent(ctx context.Context, envelopeID string, event *
 	if err := env.appendCustodyEventWithAudit(ctx, event); err != nil {
 		return nil, err
 	}
-	if err := db.saveEnvelope(env); err != nil {
+	if err := db.saveEnvelopeLocked(env); err != nil {
 		return nil, err
 	}
 	return env, nil
@@ -1096,8 +1099,28 @@ func (db *DB) loadEnvelope(envelopeID string) (*Envelope, error) {
 	return nil, lastErr
 }
 
+func (db *DB) loadEnvelopeLocked(envelopeID string) (*Envelope, error) {
+	if envelopeID == "" {
+		return nil, fmt.Errorf("envelope id is required")
+	}
+	data, err := os.ReadFile(db.envelopePath(envelopeID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrEnvelopeNotFound
+		}
+		return nil, err
+	}
+	return db.unmarshalEnvelopeFile(data, db.envelopeStorageAAD(envelopeID))
+}
+
 // saveEnvelope writes envelope state to disk atomically as an encrypted secure file.
 func (db *DB) saveEnvelope(env *Envelope) error {
+	db.envelopeMu.Lock()
+	defer db.envelopeMu.Unlock()
+	return db.saveEnvelopeLocked(env)
+}
+
+func (db *DB) saveEnvelopeLocked(env *Envelope) error {
 	if env == nil {
 		return fmt.Errorf("envelope is nil")
 	}
@@ -1134,9 +1157,6 @@ func (db *DB) saveEnvelope(env *Envelope) error {
 		os.Remove(tmpPath)
 		return err
 	}
-
-	db.envelopeMu.Lock()
-	defer db.envelopeMu.Unlock()
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
@@ -1208,16 +1228,15 @@ func (db *DB) encryptEnvelopeBytes(plaintext, aad []byte) ([]byte, error) {
 }
 
 func (db *DB) decryptEnvelopeBytes(data, aad []byte) ([]byte, error) {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 {
+	if len(data) == 0 {
 		return nil, fmt.Errorf("empty envelope file")
 	}
 
-	if bytes.HasPrefix(trimmed, []byte(envelopeSecureFileMagic)) {
+	if bytes.HasPrefix(data, []byte(envelopeSecureFileMagic)) {
 		if db.crypto == nil {
 			return nil, fmt.Errorf("envelope decryption unavailable")
 		}
-		plaintext, err := db.crypto.DecryptStream(trimmed[len(envelopeSecureFileMagic):], aad)
+		plaintext, err := db.crypto.DecryptStream(data[len(envelopeSecureFileMagic):], aad)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt envelope: %w", err)
 		}

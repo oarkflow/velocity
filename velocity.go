@@ -3,6 +3,7 @@ package velocity
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"log"
@@ -41,6 +42,13 @@ const (
 	Version     = 1
 )
 
+const flushCheckpointName = "flush.checkpoint"
+
+type flushCheckpoint struct {
+	SSTable string `json:"sstable"`
+	Started int64  `json:"started"`
+}
+
 // DB - Main database struct
 type DB struct {
 	path       string
@@ -49,6 +57,7 @@ type DB struct {
 	levels     [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
 	mutex      sync.RWMutex
 	envelopeMu sync.RWMutex
+	flushMu    sync.Mutex
 	compacting atomic.Bool
 	flushing   atomic.Bool // Prevent concurrent flushes
 	cache      *LRUCache
@@ -69,9 +78,18 @@ type DB struct {
 	masterKey        []byte // Store the master key
 
 	// Search indexing
-	searchSchema       *SearchSchema
-	searchIndexEnabled bool
-	searchSchemas      map[string]*SearchSchema
+	searchSchema            *SearchSchema
+	searchIndexEnabled      bool
+	searchSchemas           map[string]*SearchSchema
+	hashIndexValues         map[string]map[string]struct{}
+	hashIndexPostings       map[string]map[string][]uint64
+	valueIndexValues        map[string]map[string]struct{}
+	valueIndexPostings      map[string]map[string][]uint64
+	docIDByKey              map[string]uint64
+	docKeyByID              map[uint64][]byte
+	indexMetaByID           map[uint64]indexMeta
+	nextDocID               uint64
+	disableIndexPersistence bool
 
 	// Graceful shutdown
 	closed     atomic.Bool
@@ -168,9 +186,10 @@ type Config struct {
 	JWTSecret          string                   // Secret for API authentication
 
 	// Performance options - disable for maximum throughput benchmarks
-	DisableEncryption bool // Skip encryption/decryption (INSECURE - benchmarks only)
-	DisableWAL        bool // Skip WAL writes (data loss risk - benchmarks only)
-	DisableFsync      bool // Skip fsync on WAL writes (data loss risk on crash)
+	DisableEncryption       bool // Skip encryption/decryption (INSECURE - benchmarks only)
+	DisableWAL              bool // Skip WAL writes (data loss risk - benchmarks only)
+	DisableFsync            bool // Skip fsync on WAL writes (data loss risk on crash)
+	DisableIndexPersistence bool // Keep derived search indexes in memory only (benchmarks only)
 }
 
 const (
@@ -195,6 +214,9 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		currentPath = defaultPath
 	}
 	if err := os.MkdirAll(currentPath, 0755); err != nil {
+		return nil, err
+	}
+	if err := recoverFlushCheckpoint(currentPath); err != nil {
 		return nil, err
 	}
 
@@ -277,23 +299,31 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		path:               currentPath,
-		memTable:           NewMemTable(),
-		wal:                wal,
-		levels:             make([][]*SSTable, MaxLevels),
-		memTableSize:       DefaultMemTableSize,
-		cache:              nil,
-		crypto:             cryptoProvider,
-		MaxUploadSize:      cfg.MaxUploadSize,
-		searchSchema:       cfg.SearchSchema,
-		searchIndexEnabled: cfg.SearchIndexEnabled || cfg.SearchSchema != nil,
-		searchSchemas:      cfg.SearchSchemas,
-		masterKey:          key,
-		masterKeyManager:   masterKeyManager,
-		shutdownCh:         make(chan struct{}),
-		nodeID:             cfg.NodeID,
-		jwtSecret:          cfg.JWTSecret,
-		disableWAL:         cfg.DisableWAL,
+		path:                    currentPath,
+		memTable:                NewMemTable(),
+		wal:                     wal,
+		levels:                  make([][]*SSTable, MaxLevels),
+		memTableSize:            DefaultMemTableSize,
+		cache:                   nil,
+		crypto:                  cryptoProvider,
+		MaxUploadSize:           cfg.MaxUploadSize,
+		searchSchema:            cfg.SearchSchema,
+		searchIndexEnabled:      cfg.SearchIndexEnabled || cfg.SearchSchema != nil,
+		searchSchemas:           cfg.SearchSchemas,
+		hashIndexValues:         make(map[string]map[string]struct{}),
+		hashIndexPostings:       make(map[string]map[string][]uint64),
+		valueIndexValues:        make(map[string]map[string]struct{}),
+		valueIndexPostings:      make(map[string]map[string][]uint64),
+		docIDByKey:              make(map[string]uint64),
+		docKeyByID:              make(map[uint64][]byte),
+		indexMetaByID:           make(map[uint64]indexMeta),
+		masterKey:               key,
+		masterKeyManager:        masterKeyManager,
+		shutdownCh:              make(chan struct{}),
+		nodeID:                  cfg.NodeID,
+		jwtSecret:               cfg.JWTSecret,
+		disableWAL:              cfg.DisableWAL,
+		disableIndexPersistence: cfg.DisableIndexPersistence && cfg.DisableWAL,
 	}
 	if db.nodeID == "" {
 		host, _ := os.Hostname()
@@ -396,6 +426,61 @@ func (db *DB) NodeID() string {
 
 func (db *DB) JWTSecret() string {
 	return db.jwtSecret
+}
+
+func writeFlushCheckpoint(dir, sstable string) error {
+	cp := flushCheckpoint{
+		SSTable: sstable,
+		Started: time.Now().UnixNano(),
+	}
+	data, err := json.Marshal(cp)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dir, flushCheckpointName)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+func removeFlushCheckpoint(dir string) error {
+	path := filepath.Join(dir, flushCheckpointName)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDir(dir)
+}
+
+func recoverFlushCheckpoint(dir string) error {
+	path := filepath.Join(dir, flushCheckpointName)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var cp flushCheckpoint
+	if err := json.Unmarshal(data, &cp); err != nil {
+		return fmt.Errorf("velocity: corrupt flush checkpoint: %w", err)
+	}
+	if cp.SSTable != "" {
+		sstPath := filepath.Join(dir, cp.SSTable)
+		if _, err := os.Stat(sstPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "sst_*.db.tmp.*"))
+	if err != nil {
+		return err
+	}
+	for _, match := range matches {
+		if err := os.Remove(match); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return removeFlushCheckpoint(dir)
 }
 
 // SetPerformanceMode toggles high-level performance profiles for the DB.
@@ -652,6 +737,9 @@ func (db *DB) Delete(key []byte) error {
 }
 
 func (db *DB) flushMemTable() error {
+	db.flushMu.Lock()
+	defer db.flushMu.Unlock()
+
 	// Prevent concurrent flushes
 	if !db.flushing.CompareAndSwap(false, true) {
 		return nil // Already flushing
@@ -689,6 +777,9 @@ func (db *DB) flushMemTable() error {
 	// Create new SSTable in L0
 	level := 0
 	sstPath := filepath.Join(db.path, fmt.Sprintf("sst_L%d_%d.db", level, time.Now().UnixNano()))
+	if err := writeFlushCheckpoint(db.path, filepath.Base(sstPath)); err != nil {
+		return err
+	}
 	sst, err := NewSSTable(sstPath, entries, db.crypto)
 	if err != nil {
 		return err
@@ -702,6 +793,10 @@ func (db *DB) flushMemTable() error {
 			log.Printf("velocity: WAL truncation failed: %v", err)
 			return err
 		}
+	}
+	if err := removeFlushCheckpoint(db.path); err != nil {
+		log.Printf("velocity: flush checkpoint cleanup failed: %v", err)
+		return err
 	}
 
 	return nil
@@ -719,11 +814,10 @@ func (db *DB) Close() error {
 	// Signal shutdown to any background goroutines
 	if db.shutdownCh != nil {
 		close(db.shutdownCh)
-		db.shutdownCh = nil
 	}
 
 	// Flush memtable to ensure all data is persisted
-	if db.memTable != nil && (db.wal != nil || db.disableWAL) {
+	if db.wal != nil || db.disableWAL {
 		if err := db.flushMemTable(); err != nil {
 			log.Printf("velocity: memtable flush failed during close: %v", err)
 		}
@@ -1308,12 +1402,13 @@ func entryIsDeletedInMemTable(mt *MemTable, key []byte) bool {
 func (db *DB) compactionLoop() {
 	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
 	defer ticker.Stop()
+	shutdownCh := db.shutdownCh
 
 	for {
 		select {
 		case <-ticker.C:
 			db.performCompaction()
-		case <-db.shutdownCh:
+		case <-shutdownCh:
 			return
 		}
 	}

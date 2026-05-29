@@ -6,8 +6,18 @@ import (
 	"time"
 )
 
+func exampleConfig(path string) Config {
+	return Config{
+		Path:              path,
+		DisableEncryption: true,
+		DisableWAL:        true,
+	}
+}
+
 func Example_putGet() {
-	db, _ := NewWithConfig(Config{Path: "./tmpdb_example"})
+	tmpdir, _ := os.MkdirTemp("", "velocity_example_")
+	defer os.RemoveAll(tmpdir)
+	db, _ := NewWithConfig(exampleConfig(tmpdir))
 	defer db.Close()
 
 	_ = db.Put([]byte("foo"), []byte("bar"))
@@ -17,7 +27,9 @@ func Example_putGet() {
 }
 
 func Example_putWithTTL() {
-	db, _ := NewWithConfig(Config{Path: "./tmpdb_example2"})
+	tmpdir, _ := os.MkdirTemp("", "velocity_example_")
+	defer os.RemoveAll(tmpdir)
+	db, _ := NewWithConfig(exampleConfig(tmpdir))
 	defer db.Close()
 
 	_ = db.PutWithTTL([]byte("temp"), []byte("value"), 2*time.Second)
@@ -35,7 +47,9 @@ func Example_putWithTTL() {
 }
 
 func Example_keys() {
-	db, _ := NewWithConfig(Config{Path: "./tmpdb_example3"})
+	tmpdir, _ := os.MkdirTemp("", "velocity_example_")
+	defer os.RemoveAll(tmpdir)
+	db, _ := NewWithConfig(exampleConfig(tmpdir))
 	defer db.Close()
 
 	_ = db.Put([]byte("a:1"), []byte("1"))
@@ -52,7 +66,9 @@ func Example_keys() {
 }
 
 func Example_incrDecr() {
-	db, _ := NewWithConfig(Config{Path: "./tmpdb_example4"})
+	tmpdir, _ := os.MkdirTemp("", "velocity_example_")
+	defer os.RemoveAll(tmpdir)
+	db, _ := NewWithConfig(exampleConfig(tmpdir))
 	defer db.Close()
 
 	_ = db.Put([]byte("counter"), []byte("0"))
@@ -69,7 +85,7 @@ func Example_keysPage() {
 	tmpdir, _ := os.MkdirTemp("", "velocity_example_")
 	defer os.RemoveAll(tmpdir)
 
-	db, _ := NewWithConfig(Config{Path: tmpdir})
+	db, _ := NewWithConfig(exampleConfig(tmpdir))
 	defer db.Close()
 
 	for i := 0; i < 10; i++ {

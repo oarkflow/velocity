@@ -3,6 +3,7 @@ package velocity
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,19 +14,19 @@ import (
 
 // BackupMetadata contains information about a backup
 type BackupMetadata struct {
-	Version         string            `json:"version"`
-	CreatedAt       time.Time         `json:"created_at"`
-	DBPath          string            `json:"db_path"`
-	Compressed      bool              `json:"compressed"`
-	Encrypted       bool              `json:"encrypted"`
-	ItemCount       int               `json:"item_count"`
-	TotalSize       int64             `json:"total_size"`
-	User            string            `json:"user"`
-	Description     string            `json:"description,omitempty"`
-	Signature       BackupSignature   `json:"signature"`
-	AuditID         string            `json:"audit_id"`
-	IntegrityCheck  string            `json:"integrity_check"`
-	ChainLinks      []string          `json:"chain_links,omitempty"`
+	Version        string          `json:"version"`
+	CreatedAt      time.Time       `json:"created_at"`
+	DBPath         string          `json:"db_path"`
+	Compressed     bool            `json:"compressed"`
+	Encrypted      bool            `json:"encrypted"`
+	ItemCount      int             `json:"item_count"`
+	TotalSize      int64           `json:"total_size"`
+	User           string          `json:"user"`
+	Description    string          `json:"description,omitempty"`
+	Signature      BackupSignature `json:"signature"`
+	AuditID        string          `json:"audit_id"`
+	IntegrityCheck string          `json:"integrity_check"`
+	ChainLinks     []string        `json:"chain_links,omitempty"`
 }
 
 // BackupItem represents an item in a backup
@@ -58,15 +59,15 @@ type RestoreOptions struct {
 
 // ExportOptions configures export behavior
 type ExportOptions struct {
-	Format      string // "json", "encrypted-json", "tar", "tar.gz"
-	OutputPath  string
-	Pretty      bool
-	Compress    bool
-	Encrypt     bool
-	User        string
-	ItemType    string // "secret", "folder", "object"
-	Paths       []string
-	Recursive   bool
+	Format     string // "json", "encrypted-json", "tar", "tar.gz"
+	OutputPath string
+	Pretty     bool
+	Compress   bool
+	Encrypt    bool
+	User       string
+	ItemType   string // "secret", "folder", "object"
+	Paths      []string
+	Recursive  bool
 }
 
 // ImportOptions configures import behavior
@@ -201,17 +202,17 @@ func (db *DB) Backup(opts BackupOptions) error {
 	chainLinks := db.getBackupChainLinks(3) // Last 3 backups
 
 	metadata := BackupMetadata{
-		Version:        "1.0",
-		CreatedAt:      time.Now(),
-		DBPath:         db.path,
-		Compressed:     opts.Compress,
-		Encrypted:      opts.Encrypt,
-		ItemCount:      len(items),
-		TotalSize:      totalSize,
-		User:           opts.User,
-		Description:    opts.Description,
-		Signature:      signature,
-		ChainLinks:     chainLinks,
+		Version:     "1.0",
+		CreatedAt:   time.Now(),
+		DBPath:      db.path,
+		Compressed:  opts.Compress,
+		Encrypted:   opts.Encrypt,
+		ItemCount:   len(items),
+		TotalSize:   totalSize,
+		User:        opts.User,
+		Description: opts.Description,
+		Signature:   signature,
+		ChainLinks:  chainLinks,
 	}
 
 	// Record audit trail
@@ -224,10 +225,10 @@ func (db *DB) Backup(opts BackupOptions) error {
 		Success:   true,
 		Signature: signature,
 		Metadata: map[string]interface{}{
-			"compressed":  opts.Compress,
-			"item_types":  opts.IncludeTypes,
-			"filter":      opts.Filter,
-			"total_size":  totalSize,
+			"compressed": opts.Compress,
+			"item_types": opts.IncludeTypes,
+			"filter":     opts.Filter,
+			"total_size": totalSize,
 		},
 	}
 
@@ -309,8 +310,18 @@ func (db *DB) Restore(opts RestoreOptions) error {
 				continue
 			}
 
-			key := secretData["key"].(string)
-			value := secretData["value"].(string)
+			key, ok := secretData["key"].(string)
+			if !ok || key == "" {
+				fmt.Printf("Warning: invalid secret key in backup item %s\n", item.Path)
+				errors++
+				continue
+			}
+			value, err := backupSecretValueBytes(secretData["value"])
+			if err != nil {
+				fmt.Printf("Warning: invalid secret value for %s: %v\n", item.Path, err)
+				errors++
+				continue
+			}
 
 			// Check if exists
 			if !opts.Overwrite {
@@ -320,7 +331,7 @@ func (db *DB) Restore(opts RestoreOptions) error {
 				}
 			}
 
-			if err := db.Put([]byte(key), []byte(value)); err != nil {
+			if err := db.Put([]byte(key), value); err != nil {
 				fmt.Printf("Warning: failed to restore secret %s: %v\n", item.Path, err)
 				errors++
 				continue
@@ -419,10 +430,10 @@ func (db *DB) Restore(opts RestoreOptions) error {
 		Success:   errors == 0,
 		Signature: metadata.Signature,
 		Metadata: map[string]interface{}{
-			"restored": restored,
-			"skipped":  skipped,
-			"errors":   errors,
-			"overwrite": opts.Overwrite,
+			"restored":         restored,
+			"skipped":          skipped,
+			"errors":           errors,
+			"overwrite":        opts.Overwrite,
 			"source_backup_id": metadata.AuditID,
 		},
 	}
@@ -434,6 +445,9 @@ func (db *DB) Restore(opts RestoreOptions) error {
 		fmt.Printf("Warning: failed to record audit: %v\n", err)
 	}
 
+	if errors > 0 {
+		return fmt.Errorf("restore completed with %d errors", errors)
+	}
 	return nil
 }
 
@@ -739,29 +753,82 @@ func (db *DB) writeSecureBackup(path string, metadata BackupMetadata, items []Ba
 		return fmt.Errorf("failed to encode backup: %w", err)
 	}
 
-	// Write to file
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("failed to create backup file: %w", err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
-	defer f.Close()
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary backup file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	var writer io.Writer = f
+	var writer io.Writer = tmp
 
 	if compress {
-		gzWriter := gzip.NewWriter(f)
-		defer gzWriter.Close()
+		gzWriter := gzip.NewWriter(tmp)
 		writer = gzWriter
 	}
 
 	if _, err := writer.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("failed to write backup: %w", err)
 	}
+	if closer, ok := writer.(interface{ Close() error }); ok && writer != tmp {
+		if err := closer.Close(); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("failed to finish backup stream: %w", err)
+		}
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to sync backup file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to close backup file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("failed to commit backup file: %w", err)
+	}
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("failed to sync backup directory: %w", err)
+	}
+	committed = true
 
 	// Store backup reference for chain linking
 	db.storeBackupReference(metadata.AuditID, path)
 
 	return nil
+}
+
+func backupSecretValueBytes(value any) ([]byte, error) {
+	switch v := value.(type) {
+	case string:
+		if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+			return decoded, nil
+		}
+		return []byte(v), nil
+	case []byte:
+		return append([]byte(nil), v...), nil
+	case []any:
+		out := make([]byte, len(v))
+		for i, item := range v {
+			n, ok := item.(float64)
+			if !ok || n < 0 || n > 255 {
+				return nil, fmt.Errorf("invalid byte at index %d", i)
+			}
+			out[i] = byte(n)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unsupported value type %T", value)
+	}
 }
 
 func (db *DB) writeBackup(path string, metadata BackupMetadata, items []BackupItem, compress, encrypt bool) error {
@@ -847,9 +914,9 @@ func (db *DB) exportJSON(path string, items []map[string]any, pretty, encrypt bo
 	}
 
 	return encoder.Encode(map[string]any{
-		"version":    "1.0",
+		"version":     "1.0",
 		"exported_at": time.Now(),
-		"items":      items,
+		"items":       items,
 	})
 }
 

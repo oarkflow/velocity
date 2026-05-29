@@ -14,9 +14,14 @@ import (
 )
 
 var (
-	engines   = make(map[string]*velocity.DB)
+	engines   = make(map[string]*engineState)
 	enginesMu sync.Mutex
 )
+
+type engineState struct {
+	db   *velocity.DB
+	refs int
+}
 
 // DSNConfigs allows injecting pre-configured velocity.Config setups for a given DSN.
 // This is extremely useful for setting up SearchSchemas before using sql.Open().
@@ -48,19 +53,22 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 	enginesMu.Lock()
 	defer enginesMu.Unlock()
 
-	db, ok := engines[path]
+	state, ok := engines[path]
 	if !ok {
-		db, err = velocity.NewWithConfig(*config)
+		db, err := velocity.NewWithConfig(*config)
 		if err != nil {
 			return nil, fmt.Errorf("velocity driver: failed to open db at %s: %w", path, err)
 		}
 		if err := loadPersistedTableSchemas(db, config.SearchSchemas); err != nil {
+			_ = db.Close()
 			return nil, fmt.Errorf("velocity driver: failed to load table schemas: %w", err)
 		}
-		engines[path] = db
+		state = &engineState{db: db}
+		engines[path] = state
 	}
+	state.refs++
 
-	return &Conn{db: db}, nil
+	return &Conn{db: state.db, path: path}, nil
 }
 
 // OpenConnector must optionally be implemented by a Driver in order to

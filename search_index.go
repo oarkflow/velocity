@@ -23,6 +23,7 @@ const (
 	indexMetaPrefix     = "__idx:meta:"
 	indexTermPrefix     = "__idx:term:"
 	indexHashPrefix     = "__idx:hash:"
+	indexValuePrefix    = "__idx:value:"
 )
 
 func isIndexKey(key []byte) bool {
@@ -35,6 +36,7 @@ type SearchSchemaField struct {
 	Name       string
 	Searchable bool // full-text search
 	HashSearch bool // equality-only hash search
+	ValueIndex bool // structured value posting index for range/equality filters
 }
 
 // SearchSchema defines indexing rules for a record.
@@ -89,6 +91,26 @@ func (db *DB) PutIndexed(key, value []byte, schema *SearchSchema) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 	return db.putIndexedLocked(key, value, schema)
+}
+
+func (db *DB) PutWithIndexFieldPairs(key, value []byte, fields []IndexFieldValue) error {
+	if isIndexKey(key) {
+		return fmt.Errorf("reserved index key prefix")
+	}
+
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	prefix, schema := db.schemaForKeyLocked(key)
+	if schema == nil {
+		return db.put(key, value)
+	}
+	if err := db.put(key, value); err != nil {
+		return err
+	}
+	return db.indexEntryWithProjectionsLocked(key, value, prefix, schema, func() ([]string, map[string]string, map[string]string) {
+		return buildIndexProjectionsFromFieldPairs(fields, schema)
+	})
 }
 
 // SetSearchSchema updates the default schema used by Put().
@@ -234,7 +256,14 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 		batch := make([]indexWorkItem, 0, end-start)
 		for _, p := range pairs[start:end] {
 			terms, hashes, values := buildIndexProjections(p.value, schema)
-			batch = append(batch, indexWorkItem{key: p.key, value: p.value, terms: terms, hashes: hashes, values: values})
+			batch = append(batch, indexWorkItem{
+				key:           p.key,
+				value:         p.value,
+				terms:         terms,
+				hashes:        hashes,
+				values:        values,
+				valuePostings: valuePostingsForSchema(values, schema),
+			})
 		}
 		if err := db.applyIndexBatch(prefix, batch, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL}); err != nil {
 			return err
@@ -245,11 +274,12 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 }
 
 type indexWorkItem struct {
-	key    []byte
-	value  []byte
-	terms  []string
-	hashes map[string]string
-	values map[string]string
+	key           []byte
+	value         []byte
+	terms         []string
+	hashes        map[string]string
+	values        map[string]string
+	valuePostings map[string]string
 }
 
 func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *RebuildOptions) error {
@@ -283,11 +313,7 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 		if err != nil {
 			return err
 		}
-		if noWAL {
-			if err := db.putIndexNoWALLocked(indexMetaKey(docID), metaBytes); err != nil {
-				return err
-			}
-		} else if err := db.put(indexMetaKey(docID), metaBytes); err != nil {
+		if err := db.storeIndexMetaLocked(docID, meta, metaBytes); err != nil {
 			return err
 		}
 		for _, term := range item.terms {
@@ -295,8 +321,20 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 			additions[k] = append(additions[k], docID)
 		}
 		for field, hash := range item.hashes {
-			k := string(indexHashKey(prefix, field, hash))
-			additions[k] = append(additions[k], docID)
+			db.rememberHashIndexPostingLocked(prefix, field, hash, docID)
+			if !db.disableIndexPersistence {
+				k := string(indexHashKey(prefix, field, hash))
+				additions[k] = append(additions[k], docID)
+			}
+		}
+		if db.canUsePlainValueIndexLocked() {
+			for field, value := range item.valuePostings {
+				db.rememberValueIndexPostingLocked(prefix, field, value, docID)
+				if !db.disableIndexPersistence {
+					k := string(indexValueKey(prefix, field, value))
+					additions[k] = append(additions[k], docID)
+				}
+			}
 		}
 	}
 
@@ -328,6 +366,7 @@ func (db *DB) clearIndexForPrefix(prefix string, opts *RebuildOptions) error {
 	tag := indexPrefixTag(prefix)
 	terms, _ := db.keysLocked(indexTermPrefix + tag + ":*")
 	hashes, _ := db.keysLocked(indexHashPrefix + tag + ":*")
+	values, _ := db.keysLocked(indexValuePrefix + tag + ":*")
 	noWAL := opts != nil && opts.NoWAL
 	for _, k := range terms {
 		if noWAL {
@@ -337,6 +376,13 @@ func (db *DB) clearIndexForPrefix(prefix string, opts *RebuildOptions) error {
 		}
 	}
 	for _, k := range hashes {
+		if noWAL {
+			_ = db.deleteIndexNoWALLocked([]byte(k))
+		} else {
+			_ = db.deleteLocked([]byte(k))
+		}
+	}
+	for _, k := range values {
 		if noWAL {
 			_ = db.deleteIndexNoWALLocked([]byte(k))
 		} else {
@@ -419,7 +465,12 @@ func (db *DB) indexEntryLocked(key, value []byte, prefix string, schema *SearchS
 	if isIndexKey(key) {
 		return fmt.Errorf("reserved index key prefix")
 	}
+	return db.indexEntryWithProjectionsLocked(key, value, prefix, schema, func() ([]string, map[string]string, map[string]string) {
+		return buildIndexProjections(value, schema)
+	})
+}
 
+func (db *DB) indexEntryWithProjectionsLocked(key, value []byte, prefix string, schema *SearchSchema, projections func() ([]string, map[string]string, map[string]string)) error {
 	// Get or allocate docID
 	docID, exists, err := db.getDocIDLocked(key)
 	if err != nil {
@@ -439,17 +490,20 @@ func (db *DB) indexEntryLocked(key, value []byte, prefix string, schema *SearchS
 	}
 
 	// Index the new value
-	terms, hashes, values := buildIndexProjections(value, schema)
-	if err := db.addIndexEntriesLocked(docID, prefix, terms, hashes); err != nil {
+	terms, hashes, values := projections()
+	if err := db.addIndexEntriesLocked(docID, prefix, terms, hashes, valuePostingsForSchema(values, schema)); err != nil {
 		return err
 	}
 
 	meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes, Values: values}
-	metaBytes, err := json.Marshal(meta)
-	if err != nil {
-		return err
+	var metaBytes []byte
+	if !db.disableIndexPersistence {
+		metaBytes, err = json.Marshal(meta)
+		if err != nil {
+			return err
+		}
 	}
-	if err := db.put(indexMetaKey(docID), metaBytes); err != nil {
+	if err := db.storeIndexMetaLocked(docID, meta, metaBytes); err != nil {
 		return err
 	}
 
@@ -476,6 +530,9 @@ func (db *DB) deleteIndexedLocked(key []byte) error {
 		if err := db.removeIndexEntriesLocked(docID); err != nil {
 			return err
 		}
+		delete(db.docKeyByID, docID)
+		delete(db.docIDByKey, string(key))
+		delete(db.indexMetaByID, docID)
 		_ = db.deleteLocked(indexDocKey(docID))
 		_ = db.deleteLocked(indexDocIDKey(key))
 		_ = db.deleteLocked(indexMetaKey(docID))
@@ -491,6 +548,18 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 
 	if q.Limit <= 0 {
 		q.Limit = 100
+	}
+
+	if id, ok := exactIDFilterValue(q.Filters); ok && q.Prefix != "" {
+		key := []byte(q.Prefix + ":" + id)
+		value, err := db.get(key)
+		if err != nil {
+			return nil, nil
+		}
+		if matchesQuery(value, q) {
+			return []SearchResult{{Key: append([]byte{}, key...), Value: append([]byte{}, value...)}}, nil
+		}
+		return nil, nil
 	}
 
 	indexEnabled := db.searchIndexEnabled
@@ -528,13 +597,20 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 		if f.Op == "=" || f.Op == "==" {
 			if indexEnabled && f.HashOnly {
 				hash := hashValue(normalizeValue(f.Value))
-				ids, err := db.getPostingListLocked(indexHashKey(q.Prefix, f.Field, hash))
+				ids := db.hashIndexPostingLocked(q.Prefix, f.Field, hash)
+				var err error
+				if ids == nil {
+					ids, err = db.getPostingListLocked(indexHashKey(q.Prefix, f.Field, hash))
+				}
 				if err != nil {
 					return nil, err
 				}
 				if ids == nil {
 					// Hash index is not available for this field/value.
 					// Fall back to scan-based evaluation instead of returning an empty result set.
+					if db.hasHashIndexFieldLocked(q.Prefix, f.Field) {
+						return nil, nil
+					}
 					continue
 				}
 				if candidates == nil {
@@ -546,6 +622,20 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 				if len(candidates) == 0 {
 					return nil, nil
 				}
+			}
+		}
+	}
+
+	if !usedIndex && indexEnabled {
+		ids, ok, err := db.valueIndexCandidatesLocked(q)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			candidates = ids
+			usedIndex = true
+			if len(candidates) == 0 {
+				return nil, nil
 			}
 		}
 	}
@@ -597,6 +687,17 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 		q.Limit = int(^uint(0) >> 1)
 	}
 
+	if id, ok := exactIDFilterValue(q.Filters); ok && q.Prefix != "" {
+		value, err := db.get([]byte(q.Prefix + ":" + id))
+		if err != nil {
+			return 0, nil
+		}
+		if matchesQuery(value, q) {
+			return 1, nil
+		}
+		return 0, nil
+	}
+
 	indexEnabled := db.searchIndexEnabled
 	var candidates []uint64
 	usedIndex := false
@@ -629,11 +730,18 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 	for _, f := range q.Filters {
 		if (f.Op == "=" || f.Op == "==") && indexEnabled && f.HashOnly {
 			hash := hashValue(normalizeValue(f.Value))
-			ids, err := db.getPostingListLocked(indexHashKey(q.Prefix, f.Field, hash))
+			ids := db.hashIndexPostingLocked(q.Prefix, f.Field, hash)
+			var err error
+			if ids == nil {
+				ids, err = db.getPostingListLocked(indexHashKey(q.Prefix, f.Field, hash))
+			}
 			if err != nil {
 				return 0, err
 			}
 			if ids == nil {
+				if db.hasHashIndexFieldLocked(q.Prefix, f.Field) {
+					return 0, nil
+				}
 				continue
 			}
 			if candidates == nil {
@@ -641,6 +749,35 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 			} else {
 				candidates = intersectSorted(candidates, ids)
 			}
+			usedIndex = true
+			if len(candidates) == 0 {
+				return 0, nil
+			}
+		}
+	}
+
+	if !usedIndex && indexEnabled {
+		if len(q.Filters) == 1 && strings.TrimSpace(q.FullText) == "" {
+			count, ok, err := db.valueIndexCountLocked(q.Prefix, q.Filters[0], q.Limit)
+			if err != nil {
+				return 0, err
+			}
+			if ok {
+				return count, nil
+			}
+		}
+		ids, ok, err := db.valueIndexCandidatesLocked(q)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			if len(q.Filters) == 1 && strings.TrimSpace(q.FullText) == "" {
+				if len(ids) > q.Limit {
+					return q.Limit, nil
+				}
+				return len(ids), nil
+			}
+			candidates = ids
 			usedIndex = true
 			if len(candidates) == 0 {
 				return 0, nil
@@ -688,6 +825,164 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 	}
 
 	return count, nil
+}
+
+func (db *DB) valueIndexCandidatesLocked(q SearchQuery) ([]uint64, bool, error) {
+	var candidates []uint64
+	used := false
+
+	for _, f := range q.Filters {
+		if f.Field == "" || f.Field == "$value" {
+			continue
+		}
+
+		var ids []uint64
+		var usable bool
+		var err error
+		switch f.Op {
+		case "=", "==":
+			ids = db.valueIndexPostingLocked(q.Prefix, f.Field, normalizeValue(f.Value))
+			if ids == nil {
+				ids, err = db.getPostingListLocked(indexValueKey(q.Prefix, f.Field, normalizeValue(f.Value)))
+			}
+			usable = ids != nil
+			if !usable && db.hasValueIndexFieldLocked(q.Prefix, f.Field) {
+				ids = []uint64{}
+				usable = true
+			}
+		case "!=", ">", ">=", "<", "<=":
+			ids, usable, err = db.rangeValueIndexCandidatesLocked(q.Prefix, f)
+		default:
+			continue
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if !usable {
+			continue
+		}
+		if ids == nil {
+			ids = []uint64{}
+		}
+		if candidates == nil {
+			candidates = ids
+		} else {
+			candidates = intersectSorted(candidates, ids)
+		}
+		used = true
+		if len(candidates) == 0 {
+			return candidates, true, nil
+		}
+	}
+
+	return candidates, used, nil
+}
+
+func (db *DB) valueIndexCountLocked(prefix string, f SearchFilter, limit int) (int, bool, error) {
+	if f.Field == "" || f.Field == "$value" {
+		return 0, false, nil
+	}
+	if limit <= 0 {
+		limit = int(^uint(0) >> 1)
+	}
+
+	countIDs := func(ids []uint64) (int, bool) {
+		if ids == nil {
+			return 0, false
+		}
+		if len(ids) > limit {
+			return limit, true
+		}
+		return len(ids), true
+	}
+
+	switch f.Op {
+	case "=", "==":
+		value := normalizeValue(f.Value)
+		if ids := db.valueIndexPostingLocked(prefix, f.Field, value); ids != nil {
+			count, _ := countIDs(ids)
+			return count, true, nil
+		}
+		ids, err := db.getPostingListLocked(indexValueKey(prefix, f.Field, value))
+		if err != nil {
+			return 0, false, err
+		}
+		count, ok := countIDs(ids)
+		if !ok && db.hasValueIndexFieldLocked(prefix, f.Field) {
+			return 0, true, nil
+		}
+		return count, ok, nil
+	case "!=", ">", ">=", "<", "<=":
+	default:
+		return 0, false, nil
+	}
+
+	keyPrefix := string(indexValueFieldPrefix(prefix, f.Field))
+	keys := db.valueIndexKeysLocked(prefix, f.Field)
+	if len(keys) == 0 {
+		var err error
+		keys, err = db.keysLocked(keyPrefix + "*")
+		if err != nil {
+			return 0, false, err
+		}
+	}
+	if len(keys) == 0 {
+		return 0, false, nil
+	}
+
+	count := 0
+	for _, key := range keys {
+		value := strings.TrimPrefix(key, keyPrefix)
+		if !compareValues(value, f.Value, f.Op) {
+			continue
+		}
+		ids := db.valueIndexPostingLocked(prefix, f.Field, value)
+		if ids == nil {
+			var err error
+			ids, err = db.getPostingListLocked([]byte(key))
+			if err != nil {
+				return 0, false, err
+			}
+		}
+		count += len(ids)
+		if count >= limit {
+			return limit, true, nil
+		}
+	}
+	return count, true, nil
+}
+
+func (db *DB) rangeValueIndexCandidatesLocked(prefix string, f SearchFilter) ([]uint64, bool, error) {
+	keyPrefix := string(indexValueFieldPrefix(prefix, f.Field))
+	keys := db.valueIndexKeysLocked(prefix, f.Field)
+	if len(keys) == 0 {
+		var err error
+		keys, err = db.keysLocked(keyPrefix + "*")
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	if len(keys) == 0 {
+		return nil, false, nil
+	}
+
+	var out []uint64
+	for _, key := range keys {
+		value := strings.TrimPrefix(key, keyPrefix)
+		if !compareValues(value, f.Value, f.Op) {
+			continue
+		}
+		ids := db.valueIndexPostingLocked(prefix, f.Field, value)
+		if ids == nil {
+			var err error
+			ids, err = db.getPostingListLocked([]byte(key))
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		out = mergeSortedUnique(out, ids)
+	}
+	return out, true, nil
 }
 
 func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
@@ -790,6 +1085,20 @@ func matchesQuery(value []byte, q SearchQuery) bool {
 	return true
 }
 
+func exactIDFilterValue(filters []SearchFilter) (string, bool) {
+	for _, f := range filters {
+		if !strings.EqualFold(f.Field, "id") || (f.Op != "=" && f.Op != "==") {
+			continue
+		}
+		id := normalizeValue(f.Value)
+		if id == "" {
+			return "", false
+		}
+		return id, true
+	}
+	return "", false
+}
+
 func needsJSONForFilters(filters []SearchFilter) bool {
 	for _, f := range filters {
 		if f.Field != "" && f.Field != "$value" {
@@ -887,9 +1196,9 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 		return terms, map[string]string{}, map[string]string{"$value": normalizeValue(value)}
 	}
 
-	hashes := make(map[string]string)
-	values := make(map[string]string)
-	termsSet := make(map[string]struct{})
+	var hashes map[string]string
+	var values map[string]string
+	var termsSet map[string]struct{}
 
 	var doc map[string]any
 	needsJSON := false
@@ -899,7 +1208,8 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 			break
 		}
 	}
-	if needsJSON {
+	useFastScalars := needsJSON && canUseFastJSONScalars(schema)
+	if needsJSON && !useFastScalars {
 		_ = json.Unmarshal(value, &doc)
 	}
 
@@ -907,6 +1217,12 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 		var v any
 		if field.Name == "" || field.Name == "$value" {
 			v = string(value)
+		} else if useFastScalars {
+			scalar, ok := extractJSONScalar(value, field.Name)
+			if !ok {
+				continue
+			}
+			v = scalar
 		} else if doc != nil {
 			v = doc[field.Name]
 		}
@@ -914,26 +1230,196 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 			continue
 		}
 		normalized := normalizeValue(v)
+		if values == nil {
+			values = make(map[string]string)
+		}
 		values[field.Name] = normalized
 		if field.Searchable {
+			if termsSet == nil {
+				termsSet = make(map[string]struct{})
+			}
 			for _, t := range tokenize(strings.ToLower(normalized)) {
 				termsSet[hashValue(t)] = struct{}{}
 			}
 		}
 		if field.HashSearch {
+			if hashes == nil {
+				hashes = make(map[string]string)
+			}
 			hashes[field.Name] = hashValue(normalized)
 		}
 	}
 
-	terms := make([]string, 0, len(termsSet))
-	for t := range termsSet {
-		terms = append(terms, t)
+	var terms []string
+	if len(termsSet) > 0 {
+		terms = make([]string, 0, len(termsSet))
+		for t := range termsSet {
+			terms = append(terms, t)
+		}
+		sort.Strings(terms)
 	}
-	sort.Strings(terms)
 	return terms, hashes, values
 }
 
+func buildIndexProjectionsFromFields(fields map[string]any, schema *SearchSchema) ([]string, map[string]string, map[string]string) {
+	pairs := make([]IndexFieldValue, 0, len(fields))
+	for name, value := range fields {
+		pairs = append(pairs, IndexFieldValue{Name: name, Value: value})
+	}
+	return buildIndexProjectionsFromFieldPairs(pairs, schema)
+}
+
+func buildIndexProjectionsFromFieldPairs(fields []IndexFieldValue, schema *SearchSchema) ([]string, map[string]string, map[string]string) {
+	if schema == nil || len(schema.Fields) == 0 {
+		return nil, nil, nil
+	}
+
+	var hashes map[string]string
+	var values map[string]string
+	var termsSet map[string]struct{}
+
+	for _, field := range schema.Fields {
+		if field.Name == "" || field.Name == "$value" {
+			continue
+		}
+		v, ok := indexFieldPairValue(fields, field.Name)
+		if !ok || v == nil {
+			continue
+		}
+		normalized := normalizeValue(v)
+		if values == nil {
+			values = make(map[string]string)
+		}
+		values[field.Name] = normalized
+		if field.Searchable {
+			if termsSet == nil {
+				termsSet = make(map[string]struct{})
+			}
+			for _, t := range tokenize(strings.ToLower(normalized)) {
+				termsSet[hashValue(t)] = struct{}{}
+			}
+		}
+		if field.HashSearch {
+			if hashes == nil {
+				hashes = make(map[string]string)
+			}
+			hashes[field.Name] = hashValue(normalized)
+		}
+	}
+
+	var terms []string
+	if len(termsSet) > 0 {
+		terms = make([]string, 0, len(termsSet))
+		for t := range termsSet {
+			terms = append(terms, t)
+		}
+		sort.Strings(terms)
+	}
+	return terms, hashes, values
+}
+
+func indexFieldPairValue(fields []IndexFieldValue, name string) (any, bool) {
+	for _, field := range fields {
+		if field.Name == name {
+			return field.Value, true
+		}
+	}
+	return nil, false
+}
+
+func canUseFastJSONScalars(schema *SearchSchema) bool {
+	for _, field := range schema.Fields {
+		if field.Name == "" || field.Name == "$value" || field.Searchable {
+			return false
+		}
+	}
+	return true
+}
+
+func extractJSONScalar(raw []byte, field string) (string, bool) {
+	if field == "" {
+		return "", false
+	}
+	pattern := []byte(strconv.Quote(field))
+	for searchFrom := 0; searchFrom < len(raw); {
+		idx := bytes.Index(raw[searchFrom:], pattern)
+		if idx < 0 {
+			return "", false
+		}
+		i := searchFrom + idx + len(pattern)
+		for i < len(raw) && isJSONSpace(raw[i]) {
+			i++
+		}
+		if i >= len(raw) || raw[i] != ':' {
+			searchFrom = searchFrom + idx + 1
+			continue
+		}
+		i++
+		for i < len(raw) && isJSONSpace(raw[i]) {
+			i++
+		}
+		if i >= len(raw) {
+			return "", false
+		}
+		if raw[i] == '"' {
+			end := i + 1
+			escaped := false
+			for end < len(raw) {
+				c := raw[end]
+				if c == '\\' {
+					escaped = true
+					end += 2
+					continue
+				}
+				if c == '"' {
+					if !escaped {
+						return string(raw[i+1 : end]), true
+					}
+					unquoted, err := strconv.Unquote(string(raw[i : end+1]))
+					if err != nil {
+						return "", false
+					}
+					return unquoted, true
+				}
+				end++
+			}
+			return "", false
+		}
+		end := i
+		for end < len(raw) && raw[end] != ',' && raw[end] != '}' {
+			end++
+		}
+		return strings.TrimSpace(string(raw[i:end])), true
+	}
+	return "", false
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
+}
+
+func valuePostingsForSchema(values map[string]string, schema *SearchSchema) map[string]string {
+	if len(values) == 0 || schema == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, field := range schema.Fields {
+		if !field.ValueIndex {
+			continue
+		}
+		value, ok := values[field.Name]
+		if !ok {
+			continue
+		}
+		out[field.Name] = value
+	}
+	return out
+}
+
 func (db *DB) getIndexMetaLocked(docID uint64) (indexMeta, bool, error) {
+	if meta, ok := db.indexMetaByID[docID]; ok {
+		return meta, true, nil
+	}
 	raw, err := db.get(indexMetaKey(docID))
 	if err != nil {
 		return indexMeta{}, false, nil
@@ -967,13 +1453,12 @@ func matchesQueryMeta(meta indexMeta, q SearchQuery) (bool, bool) {
 		}
 		if (f.Op == "=" || f.Op == "==") && f.HashOnly {
 			hash, ok := meta.Hashes[f.Field]
-			if !ok {
-				return false, false
+			if ok {
+				if hash != hashValue(normalizeValue(f.Value)) {
+					return false, true
+				}
+				continue
 			}
-			if hash != hashValue(normalizeValue(f.Value)) {
-				return false, true
-			}
-			continue
 		}
 		value, ok := meta.Values[f.Field]
 		if !ok {
@@ -1064,6 +1549,173 @@ func indexHashKey(prefix, field, hash string) []byte {
 	return []byte(indexHashPrefix + indexPrefixTag(prefix) + ":" + field + ":" + hash)
 }
 
+func indexValueFieldPrefix(prefix, field string) []byte {
+	return []byte(indexValuePrefix + indexPrefixTag(prefix) + ":" + field + ":")
+}
+
+func indexValueKey(prefix, field, value string) []byte {
+	return append(indexValueFieldPrefix(prefix, field), value...)
+}
+
+func valueIndexValuesKey(prefix, field string) string {
+	return indexPrefixTag(prefix) + ":" + field
+}
+
+func (db *DB) rememberHashIndexLocked(prefix, field, hash string) {
+	if db.hashIndexValues == nil {
+		db.hashIndexValues = make(map[string]map[string]struct{})
+	}
+	key := valueIndexValuesKey(prefix, field)
+	values := db.hashIndexValues[key]
+	if values == nil {
+		values = make(map[string]struct{})
+		db.hashIndexValues[key] = values
+	}
+	values[hash] = struct{}{}
+}
+
+func (db *DB) rememberHashIndexPostingLocked(prefix, field, hash string, docID uint64) {
+	db.rememberHashIndexLocked(prefix, field, hash)
+	if db.hashIndexPostings == nil {
+		db.hashIndexPostings = make(map[string]map[string][]uint64)
+	}
+	key := valueIndexValuesKey(prefix, field)
+	postings := db.hashIndexPostings[key]
+	if postings == nil {
+		postings = make(map[string][]uint64)
+		db.hashIndexPostings[key] = postings
+	}
+	ids := postings[hash]
+	idx := sort.Search(len(ids), func(i int) bool { return ids[i] >= docID })
+	if idx < len(ids) && ids[idx] == docID {
+		return
+	}
+	ids = append(ids, 0)
+	copy(ids[idx+1:], ids[idx:])
+	ids[idx] = docID
+	postings[hash] = ids
+}
+
+func (db *DB) forgetHashIndexPostingLocked(prefix, field, hash string, docID uint64) {
+	postings := db.hashIndexPostings[valueIndexValuesKey(prefix, field)]
+	if len(postings) == 0 {
+		return
+	}
+	ids := postings[hash]
+	idx := sort.Search(len(ids), func(i int) bool { return ids[i] >= docID })
+	if idx >= len(ids) || ids[idx] != docID {
+		return
+	}
+	ids = append(ids[:idx], ids[idx+1:]...)
+	if len(ids) == 0 {
+		delete(postings, hash)
+		return
+	}
+	postings[hash] = ids
+}
+
+func (db *DB) hashIndexPostingLocked(prefix, field, hash string) []uint64 {
+	postings := db.hashIndexPostings[valueIndexValuesKey(prefix, field)]
+	if len(postings) == 0 {
+		return nil
+	}
+	ids := postings[hash]
+	if len(ids) == 0 {
+		return nil
+	}
+	return append([]uint64(nil), ids...)
+}
+
+func (db *DB) hasHashIndexFieldLocked(prefix, field string) bool {
+	return len(db.hashIndexValues[valueIndexValuesKey(prefix, field)]) > 0
+}
+
+func (db *DB) canUsePlainValueIndexLocked() bool {
+	return db.crypto == nil || db.crypto.noop
+}
+
+func (db *DB) rememberValueIndexLocked(prefix, field, value string) {
+	if db.valueIndexValues == nil {
+		db.valueIndexValues = make(map[string]map[string]struct{})
+	}
+	key := valueIndexValuesKey(prefix, field)
+	values := db.valueIndexValues[key]
+	if values == nil {
+		values = make(map[string]struct{})
+		db.valueIndexValues[key] = values
+	}
+	values[value] = struct{}{}
+}
+
+func (db *DB) rememberValueIndexPostingLocked(prefix, field, value string, docID uint64) {
+	db.rememberValueIndexLocked(prefix, field, value)
+	if db.valueIndexPostings == nil {
+		db.valueIndexPostings = make(map[string]map[string][]uint64)
+	}
+	key := valueIndexValuesKey(prefix, field)
+	postings := db.valueIndexPostings[key]
+	if postings == nil {
+		postings = make(map[string][]uint64)
+		db.valueIndexPostings[key] = postings
+	}
+	ids := postings[value]
+	idx := sort.Search(len(ids), func(i int) bool { return ids[i] >= docID })
+	if idx < len(ids) && ids[idx] == docID {
+		return
+	}
+	ids = append(ids, 0)
+	copy(ids[idx+1:], ids[idx:])
+	ids[idx] = docID
+	postings[value] = ids
+}
+
+func (db *DB) forgetValueIndexPostingLocked(prefix, field, value string, docID uint64) {
+	postings := db.valueIndexPostings[valueIndexValuesKey(prefix, field)]
+	if len(postings) == 0 {
+		return
+	}
+	ids := postings[value]
+	idx := sort.Search(len(ids), func(i int) bool { return ids[i] >= docID })
+	if idx >= len(ids) || ids[idx] != docID {
+		return
+	}
+	ids = append(ids[:idx], ids[idx+1:]...)
+	if len(ids) == 0 {
+		delete(postings, value)
+		return
+	}
+	postings[value] = ids
+}
+
+func (db *DB) valueIndexPostingLocked(prefix, field, value string) []uint64 {
+	postings := db.valueIndexPostings[valueIndexValuesKey(prefix, field)]
+	if len(postings) == 0 {
+		return nil
+	}
+	ids := postings[value]
+	if len(ids) == 0 {
+		return nil
+	}
+	return append([]uint64(nil), ids...)
+}
+
+func (db *DB) valueIndexKeysLocked(prefix, field string) []string {
+	values := db.valueIndexValues[valueIndexValuesKey(prefix, field)]
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for value := range values {
+		keys = append(keys, string(indexValueKey(prefix, field, value)))
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (db *DB) hasValueIndexFieldLocked(prefix, field string) bool {
+	return len(db.valueIndexValues[valueIndexValuesKey(prefix, field)]) > 0
+}
+
 // putIndexNoWALLocked writes index keys to memtable without WAL.
 func (db *DB) putIndexNoWALLocked(key, value []byte) error {
 	e := entryPool.Get().(*Entry)
@@ -1078,6 +1730,36 @@ func (db *DB) putIndexNoWALLocked(key, value []byte) error {
 	db.memTable.PutEntry(e)
 	entryPool.Put(e)
 	return nil
+}
+
+func (db *DB) putIndexLocked(key, value []byte) error {
+	if db.disableIndexPersistence && isVolatileIndexKey(key) {
+		return nil
+	}
+	if db.disableWAL {
+		return db.putIndexNoWALLocked(key, value)
+	}
+	return db.put(key, value)
+}
+
+func isVolatileIndexKey(key []byte) bool {
+	return bytes.Equal(key, []byte(indexNextIDKey)) ||
+		bytes.HasPrefix(key, []byte(indexDocIDKeyPrefix)) ||
+		bytes.HasPrefix(key, []byte(indexDocKeyPrefix)) ||
+		bytes.HasPrefix(key, []byte(indexMetaPrefix)) ||
+		bytes.HasPrefix(key, []byte(indexHashPrefix)) ||
+		bytes.HasPrefix(key, []byte(indexValuePrefix))
+}
+
+func (db *DB) storeIndexMetaLocked(docID uint64, meta indexMeta, metaBytes []byte) error {
+	if db.indexMetaByID == nil {
+		db.indexMetaByID = make(map[uint64]indexMeta)
+	}
+	db.indexMetaByID[docID] = meta
+	if db.disableIndexPersistence {
+		return nil
+	}
+	return db.putIndexLocked(indexMetaKey(docID), metaBytes)
 }
 
 // deleteIndexNoWALLocked tombstones index keys without WAL.
@@ -1102,35 +1784,26 @@ func (db *DB) allocateDocIDLockedNoWAL(key []byte) (uint64, error) {
 }
 
 func (db *DB) allocateDocIDLockedWithWAL(key []byte, useWAL bool) (uint64, error) {
-	nextID := uint64(1)
-	if raw, err := db.get([]byte(indexNextIDKey)); err == nil {
-		nextID = decodeUint64(raw)
-		if nextID == 0 {
-			nextID = 1
-		}
+	nextID, err := db.nextDocIDLocked()
+	if err != nil {
+		return 0, err
 	}
 
 	docID := nextID
 	nextID++
 
 	if useWAL {
-		if err := db.put([]byte(indexNextIDKey), encodeUint64(nextID)); err != nil {
+		if err := db.storeNextDocIDLocked(nextID); err != nil {
 			return 0, err
 		}
-		if err := db.put(indexDocIDKey(key), encodeUint64(docID)); err != nil {
-			return 0, err
-		}
-		if err := db.put(indexDocKey(docID), key); err != nil {
+		if err := db.bindDocIDLocked(key, docID); err != nil {
 			return 0, err
 		}
 	} else {
-		if err := db.putIndexNoWALLocked([]byte(indexNextIDKey), encodeUint64(nextID)); err != nil {
+		if err := db.storeNextDocIDLocked(nextID); err != nil {
 			return 0, err
 		}
-		if err := db.putIndexNoWALLocked(indexDocIDKey(key), encodeUint64(docID)); err != nil {
-			return 0, err
-		}
-		if err := db.putIndexNoWALLocked(indexDocKey(docID), key); err != nil {
+		if err := db.bindDocIDLocked(key, docID); err != nil {
 			return 0, err
 		}
 	}
@@ -1138,7 +1811,51 @@ func (db *DB) allocateDocIDLockedWithWAL(key []byte, useWAL bool) (uint64, error
 	return docID, nil
 }
 
+func (db *DB) nextDocIDLocked() (uint64, error) {
+	if db.nextDocID != 0 {
+		return db.nextDocID, nil
+	}
+	nextID := uint64(1)
+	if raw, err := db.get([]byte(indexNextIDKey)); err == nil {
+		nextID = decodeUint64(raw)
+		if nextID == 0 {
+			nextID = 1
+		}
+	}
+	db.nextDocID = nextID
+	return nextID, nil
+}
+
+func (db *DB) storeNextDocIDLocked(nextID uint64) error {
+	db.nextDocID = nextID
+	if db.disableIndexPersistence {
+		return nil
+	}
+	return db.putIndexLocked([]byte(indexNextIDKey), encodeUint64(nextID))
+}
+
+func (db *DB) bindDocIDLocked(key []byte, docID uint64) error {
+	if db.docIDByKey == nil {
+		db.docIDByKey = make(map[string]uint64)
+	}
+	if db.docKeyByID == nil {
+		db.docKeyByID = make(map[uint64][]byte)
+	}
+	db.docIDByKey[string(key)] = docID
+	db.docKeyByID[docID] = append([]byte(nil), key...)
+	if db.disableIndexPersistence {
+		return nil
+	}
+	if err := db.putIndexLocked(indexDocIDKey(key), encodeUint64(docID)); err != nil {
+		return err
+	}
+	return db.putIndexLocked(indexDocKey(docID), key)
+}
+
 func (db *DB) getDocIDLocked(key []byte) (uint64, bool, error) {
+	if id, ok := db.docIDByKey[string(key)]; ok && id != 0 {
+		return id, true, nil
+	}
 	raw, err := db.get(indexDocIDKey(key))
 	if err != nil {
 		return 0, false, nil
@@ -1151,6 +1868,9 @@ func (db *DB) getDocIDLocked(key []byte) (uint64, bool, error) {
 }
 
 func (db *DB) getDocKeyLocked(docID uint64) ([]byte, error) {
+	if key, ok := db.docKeyByID[docID]; ok {
+		return append([]byte(nil), key...), nil
+	}
 	raw, err := db.get(indexDocKey(docID))
 	if err != nil {
 		return nil, err
@@ -1166,28 +1886,38 @@ func (db *DB) getPostingListLocked(key []byte) ([]uint64, error) {
 	return decodePostingList(raw), nil
 }
 
-func (db *DB) addIndexEntriesLocked(docID uint64, prefix string, terms []string, hashes map[string]string) error {
+func (db *DB) addIndexEntriesLocked(docID uint64, prefix string, terms []string, hashes map[string]string, values map[string]string) error {
 	for _, term := range terms {
 		if err := db.addPostingLocked(indexTermKey(prefix, term), docID); err != nil {
 			return err
 		}
 	}
 	for field, hash := range hashes {
-		if err := db.addPostingLocked(indexHashKey(prefix, field, hash), docID); err != nil {
-			return err
+		db.rememberHashIndexPostingLocked(prefix, field, hash, docID)
+		key := indexHashKey(prefix, field, hash)
+		if !db.disableIndexPersistence {
+			if err := db.addPostingLocked(key, docID); err != nil {
+				return err
+			}
+		}
+	}
+	if db.canUsePlainValueIndexLocked() {
+		for field, value := range values {
+			db.rememberValueIndexPostingLocked(prefix, field, value, docID)
+			key := indexValueKey(prefix, field, value)
+			if !db.disableIndexPersistence {
+				if err := db.addPostingLocked(key, docID); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
 }
 
 func (db *DB) removeIndexEntriesLocked(docID uint64) error {
-	raw, err := db.get(indexMetaKey(docID))
-	if err != nil {
-		return nil
-	}
-
-	var meta indexMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
+	meta, found, err := db.getIndexMetaLocked(docID)
+	if err != nil || !found {
 		return nil
 	}
 
@@ -1197,8 +1927,21 @@ func (db *DB) removeIndexEntriesLocked(docID uint64) error {
 		}
 	}
 	for field, hash := range meta.Hashes {
-		if err := db.removePostingLocked(indexHashKey(meta.Prefix, field, hash), docID); err != nil {
-			return err
+		db.forgetHashIndexPostingLocked(meta.Prefix, field, hash, docID)
+		if !db.disableIndexPersistence {
+			if err := db.removePostingLocked(indexHashKey(meta.Prefix, field, hash), docID); err != nil {
+				return err
+			}
+		}
+	}
+	if db.canUsePlainValueIndexLocked() {
+		for field, value := range meta.Values {
+			db.forgetValueIndexPostingLocked(meta.Prefix, field, value, docID)
+			if !db.disableIndexPersistence {
+				if err := db.removePostingLocked(indexValueKey(meta.Prefix, field, value), docID); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -1217,7 +1960,7 @@ func (db *DB) addPostingLocked(key []byte, docID uint64) error {
 		copy(ids[idx+1:], ids[idx:])
 		ids[idx] = docID
 	}
-	return db.put(key, encodePostingList(ids))
+	return db.putIndexLocked(key, encodePostingList(ids))
 }
 
 func (db *DB) removePostingLocked(key []byte, docID uint64) error {
@@ -1233,7 +1976,7 @@ func (db *DB) removePostingLocked(key []byte, docID uint64) error {
 	if len(ids) == 0 {
 		return db.deleteLocked(key)
 	}
-	return db.put(key, encodePostingList(ids))
+	return db.putIndexLocked(key, encodePostingList(ids))
 }
 
 func encodePostingList(ids []uint64) []byte {

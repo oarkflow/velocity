@@ -3,6 +3,7 @@ package sqldriver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/oarkflow/velocity"
 )
@@ -19,14 +20,27 @@ type Iterator interface {
 // TableScanIterator handles reading from a single Velocity Prefix collection.
 // It wraps a pre-executed db.Search query or directly streams if Velocity adds a cursor later.
 type TableScanIterator struct {
-	db      *velocity.DB
-	prefix  string
-	results []velocity.SearchResult
-	cursor  int
-	schema  *velocity.SearchSchema // Extracted schema logic
+	db        *velocity.DB
+	conn      *Conn
+	prefix    string
+	tableName string
+	results   []velocity.SearchResult
+	cursor    int
+	schema    *velocity.SearchSchema // Extracted schema logic
 }
 
 func NewTableScanIterator(db *velocity.DB, prefix string, query velocity.SearchQuery) (*TableScanIterator, error) {
+	return newTableScanIterator(db, nil, prefix, query)
+}
+
+func NewConnTableScanIterator(conn *Conn, prefix string, query velocity.SearchQuery) (*TableScanIterator, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("velocity driver: nil connection")
+	}
+	return newTableScanIterator(conn.db, conn, prefix, query)
+}
+
+func newTableScanIterator(db *velocity.DB, conn *Conn, prefix string, query velocity.SearchQuery) (*TableScanIterator, error) {
 	// Execute the search upfront since Velocity's API currently returns an array
 	// rather than a streaming cursor. We iterate locally over the slice.
 	results, err := db.Search(query)
@@ -35,12 +49,46 @@ func NewTableScanIterator(db *velocity.DB, prefix string, query velocity.SearchQ
 		return nil, err
 	}
 
+	if conn != nil && conn.tx != nil {
+		results = overlayPendingTableResults(results, conn.PendingTableEntries(query.Prefix))
+	}
+
 	return &TableScanIterator{
-		db:      db,
-		prefix:  prefix,
-		results: results,
-		cursor:  0,
+		db:        db,
+		conn:      conn,
+		prefix:    prefix,
+		tableName: query.Prefix,
+		results:   results,
+		cursor:    0,
 	}, nil
+}
+
+func overlayPendingTableResults(committed []velocity.SearchResult, pending []velocity.Entry) []velocity.SearchResult {
+	if len(pending) == 0 {
+		return committed
+	}
+	shadowed := make(map[string]velocity.Entry, len(pending))
+	for _, entry := range pending {
+		shadowed[string(entry.Key)] = entry
+	}
+	results := make([]velocity.SearchResult, 0, len(committed)+len(pending))
+	for _, row := range committed {
+		if entry, ok := shadowed[string(row.Key)]; ok {
+			if !entry.Deleted {
+				results = append(results, velocity.SearchResult{Key: entry.Key, Value: entry.Value})
+			}
+			delete(shadowed, string(row.Key))
+			continue
+		}
+		results = append(results, row)
+	}
+	for _, entry := range shadowed {
+		if entry.Deleted {
+			continue
+		}
+		results = append(results, velocity.SearchResult{Key: entry.Key, Value: entry.Value})
+	}
+	return results
 }
 
 func (it *TableScanIterator) Next(ctx context.Context) (Row, error) {

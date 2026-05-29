@@ -1,6 +1,7 @@
 package velocity
 
 import (
+	"bytes"
 	"encoding/json"
 	"hash/crc32"
 	"sort"
@@ -10,26 +11,67 @@ import (
 
 // BatchWriter for high-throughput writes with minimal memory allocation
 type BatchWriter struct {
-	db      *DB
-	entries []Entry // Value type instead of pointer to reduce GC pressure
-	mutex   sync.Mutex
-	maxSize int
-	crcBuf  []byte // Reusable buffer for checksum computation
+	db              *DB
+	entries         []Entry // Value type instead of pointer to reduce GC pressure
+	indexFieldPairs []IndexFieldValue
+	indexFieldSpans []indexFieldSpan
+	mutex           sync.Mutex
+	maxSize         int
+}
+
+type IndexFieldValue struct {
+	Name  string
+	Value any
+}
+
+type indexFieldSpan struct {
+	start int
+	end   int
 }
 
 func (db *DB) NewBatchWriter(maxSize int) *BatchWriter {
 	return &BatchWriter{
-		db:      db,
-		entries: make([]Entry, 0, maxSize),
-		maxSize: maxSize,
-		crcBuf:  make([]byte, 0, 4096), // Reusable buffer
+		db:              db,
+		entries:         make([]Entry, 0, maxSize),
+		indexFieldPairs: make([]IndexFieldValue, 0, maxSize),
+		indexFieldSpans: make([]indexFieldSpan, 0, maxSize),
+		maxSize:         maxSize,
 	}
 }
 
 func (bw *BatchWriter) Put(key, value []byte) error {
 	bw.mutex.Lock()
 	defer bw.mutex.Unlock()
+	return bw.putWithIndexFieldsUnsafe(key, value, nil)
+}
 
+// PutUnsafe appends to the batch without taking BatchWriter's mutex. It is for
+// callers that already serialize access to the writer, such as a SQL transaction
+// bound to one driver connection.
+func (bw *BatchWriter) PutUnsafe(key, value []byte) error {
+	return bw.putWithIndexFieldsUnsafe(key, value, nil)
+}
+
+func (bw *BatchWriter) PutWithIndexFieldsUnsafe(key, value []byte, fields map[string]any) error {
+	pairs := make([]IndexFieldValue, 0, len(fields))
+	for name, value := range fields {
+		pairs = append(pairs, IndexFieldValue{Name: name, Value: value})
+	}
+	return bw.putWithIndexFieldPairsUnsafe(key, value, pairs)
+}
+
+func (bw *BatchWriter) putWithIndexFieldsUnsafe(key, value []byte, fields map[string]any) error {
+	if fields != nil {
+		return bw.PutWithIndexFieldsUnsafe(key, value, fields)
+	}
+	return bw.putWithIndexFieldPairsUnsafe(key, value, nil)
+}
+
+func (bw *BatchWriter) PutWithIndexFieldPairsUnsafe(key, value []byte, fields []IndexFieldValue) error {
+	return bw.putWithIndexFieldPairsUnsafe(key, value, fields)
+}
+
+func (bw *BatchWriter) putWithIndexFieldPairsUnsafe(key, value []byte, fields []IndexFieldValue) error {
 	// Grow slice in-place, avoid pointer allocation
 	bw.entries = append(bw.entries, Entry{
 		Key:       append([]byte(nil), key...),
@@ -37,13 +79,13 @@ func (bw *BatchWriter) Put(key, value []byte) error {
 		Timestamp: uint64(time.Now().UnixNano()),
 		Deleted:   false,
 	})
+	start := len(bw.indexFieldPairs)
+	bw.indexFieldPairs = append(bw.indexFieldPairs, fields...)
+	bw.indexFieldSpans = append(bw.indexFieldSpans, indexFieldSpan{start: start, end: len(bw.indexFieldPairs)})
 
-	// Compute checksum using reusable buffer
 	idx := len(bw.entries) - 1
 	entry := &bw.entries[idx]
-	bw.crcBuf = append(bw.crcBuf[:0], entry.Key...)
-	bw.crcBuf = append(bw.crcBuf, entry.Value...)
-	entry.checksum = crc32.ChecksumIEEE(bw.crcBuf)
+	entry.checksum = crc32.Update(crc32.ChecksumIEEE(entry.Key), crc32.IEEETable, entry.Value)
 
 	if len(bw.entries) >= bw.maxSize {
 		return bw.flushUnsafe()
@@ -62,12 +104,65 @@ func (bw *BatchWriter) Cancel() {
 	bw.mutex.Lock()
 	defer bw.mutex.Unlock()
 	bw.entries = bw.entries[:0]
+	bw.indexFieldPairs = bw.indexFieldPairs[:0]
+	bw.indexFieldSpans = bw.indexFieldSpans[:0]
 }
 
 func (bw *BatchWriter) Delete(key []byte) error {
 	bw.mutex.Lock()
 	defer bw.mutex.Unlock()
+	return bw.deleteUnsafe(key)
+}
 
+// DeleteUnsafe appends a delete marker without taking BatchWriter's mutex.
+func (bw *BatchWriter) DeleteUnsafe(key []byte) error {
+	return bw.deleteUnsafe(key)
+}
+
+// PendingGet returns the latest queued value for key without flushing the
+// batch. It is intended for serialized transaction owners.
+func (bw *BatchWriter) PendingGet(key []byte) ([]byte, bool, bool) {
+	for i := len(bw.entries) - 1; i >= 0; i-- {
+		entry := &bw.entries[i]
+		if !bytes.Equal(entry.Key, key) {
+			continue
+		}
+		if entry.Deleted {
+			return nil, true, true
+		}
+		return append([]byte(nil), entry.Value...), true, false
+	}
+	return nil, false, false
+}
+
+// PendingEntriesWithPrefix returns the latest queued mutation for each key
+// matching prefix. Returned entries own their key/value buffers.
+func (bw *BatchWriter) PendingEntriesWithPrefix(prefix []byte) []Entry {
+	seen := make(map[string]struct{})
+	entries := make([]Entry, 0)
+	for i := len(bw.entries) - 1; i >= 0; i-- {
+		entry := &bw.entries[i]
+		if !bytes.HasPrefix(entry.Key, prefix) {
+			continue
+		}
+		key := string(entry.Key)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		entries = append(entries, Entry{
+			Key:       append([]byte(nil), entry.Key...),
+			Value:     append([]byte(nil), entry.Value...),
+			Timestamp: entry.Timestamp,
+			ExpiresAt: entry.ExpiresAt,
+			Deleted:   entry.Deleted,
+			checksum:  entry.checksum,
+		})
+	}
+	return entries
+}
+
+func (bw *BatchWriter) deleteUnsafe(key []byte) error {
 	// Grow slice in-place, avoid pointer allocation
 	bw.entries = append(bw.entries, Entry{
 		Key:       append([]byte(nil), key...),
@@ -75,12 +170,11 @@ func (bw *BatchWriter) Delete(key []byte) error {
 		Timestamp: uint64(time.Now().UnixNano()),
 		Deleted:   true,
 	})
+	bw.indexFieldSpans = append(bw.indexFieldSpans, indexFieldSpan{start: len(bw.indexFieldPairs), end: len(bw.indexFieldPairs)})
 
-	// Compute checksum using reusable buffer
 	idx := len(bw.entries) - 1
 	entry := &bw.entries[idx]
-	bw.crcBuf = append(bw.crcBuf[:0], entry.Key...)
-	entry.checksum = crc32.ChecksumIEEE(bw.crcBuf)
+	entry.checksum = crc32.ChecksumIEEE(entry.Key)
 
 	if len(bw.entries) >= bw.maxSize {
 		return bw.flushUnsafe()
@@ -94,32 +188,26 @@ func (bw *BatchWriter) flushUnsafe() error {
 		return nil
 	}
 
-	// Convert to pointer slice for WAL (required by interface)
-	ptrs := make([]*Entry, len(bw.entries))
-	for i := range bw.entries {
-		ptrs[i] = &bw.entries[i]
-	}
-
 	// Batch write to WAL with single sync (skip if WAL disabled)
 	if bw.db.wal != nil {
+		// Convert to pointer slice for WAL (required by interface)
+		ptrs := make([]*Entry, len(bw.entries))
+		for i := range bw.entries {
+			ptrs[i] = &bw.entries[i]
+		}
 		if err := bw.db.wal.WriteBatch(ptrs); err != nil {
 			return err
 		}
 	}
 
 	// Batch write to memtable
-	for i := range bw.entries {
-		if bw.entries[i].Deleted {
-			bw.db.memTable.Delete(bw.entries[i].Key)
-		} else {
-			bw.db.memTable.Put(bw.entries[i].Key, bw.entries[i].Value)
-		}
-	}
+	bw.db.memTable.PutEntriesOwned(bw.entries)
 
 	// Update search index if enabled
 	if bw.db.searchIndexEnabled {
 		bw.db.mutex.Lock()
 		additions := make(map[string][]uint64)
+		nextDocID, nextDocIDLoaded := uint64(0), false
 		for i := range bw.entries {
 			entry := &bw.entries[i]
 			if isIndexKey(entry.Key) {
@@ -148,20 +236,44 @@ func (bw *BatchWriter) flushUnsafe() error {
 			}
 
 			if !exists {
-				docID, err = bw.db.allocateDocIDLocked(entry.Key)
+				if !nextDocIDLoaded {
+					nextDocID, err = bw.db.nextDocIDLocked()
+					if err != nil {
+						bw.db.mutex.Unlock()
+						return err
+					}
+					nextDocIDLoaded = true
+				}
+				docID = nextDocID
+				nextDocID++
+				if err := bw.db.bindDocIDLocked(entry.Key, docID); err != nil {
+					bw.db.mutex.Unlock()
+					return err
+				}
+			}
+			var terms []string
+			var hashes, values map[string]string
+			if i < len(bw.indexFieldSpans) {
+				span := bw.indexFieldSpans[i]
+				if span.end > span.start {
+					terms, hashes, values = buildIndexProjectionsFromFieldPairs(bw.indexFieldPairs[span.start:span.end], schema)
+				} else {
+					terms, hashes, values = buildIndexProjections(entry.Value, schema)
+				}
+			} else {
+				terms, hashes, values = buildIndexProjections(entry.Value, schema)
+			}
+			meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes, Values: values}
+			var metaBytes []byte
+			if !bw.db.disableIndexPersistence {
+				var err error
+				metaBytes, err = json.Marshal(meta)
 				if err != nil {
 					bw.db.mutex.Unlock()
 					return err
 				}
 			}
-			terms, hashes, values := buildIndexProjections(entry.Value, schema)
-			meta := indexMeta{Prefix: prefix, Terms: terms, Hashes: hashes, Values: values}
-			metaBytes, err := json.Marshal(meta)
-			if err != nil {
-				bw.db.mutex.Unlock()
-				return err
-			}
-			if err := bw.db.put(indexMetaKey(docID), metaBytes); err != nil {
+			if err := bw.db.storeIndexMetaLocked(docID, meta, metaBytes); err != nil {
 				bw.db.mutex.Unlock()
 				return err
 			}
@@ -170,8 +282,27 @@ func (bw *BatchWriter) flushUnsafe() error {
 				additions[k] = append(additions[k], docID)
 			}
 			for field, hash := range hashes {
-				k := string(indexHashKey(prefix, field, hash))
-				additions[k] = append(additions[k], docID)
+				bw.db.rememberHashIndexPostingLocked(prefix, field, hash, docID)
+				if !bw.db.disableIndexPersistence {
+					k := string(indexHashKey(prefix, field, hash))
+					additions[k] = append(additions[k], docID)
+				}
+			}
+			if bw.db.canUsePlainValueIndexLocked() {
+				for field, value := range valuePostingsForSchema(values, schema) {
+					bw.db.rememberValueIndexPostingLocked(prefix, field, value, docID)
+					if !bw.db.disableIndexPersistence {
+						k := string(indexValueKey(prefix, field, value))
+						additions[k] = append(additions[k], docID)
+					}
+				}
+			}
+		}
+
+		if nextDocIDLoaded {
+			if err := bw.db.storeNextDocIDLocked(nextDocID); err != nil {
+				bw.db.mutex.Unlock()
+				return err
 			}
 		}
 
@@ -183,7 +314,7 @@ func (bw *BatchWriter) flushUnsafe() error {
 			ids = uniqueSorted(ids)
 			existing, _ := bw.db.getPostingListLocked([]byte(k))
 			merged := mergeSortedUnique(existing, ids)
-			if err := bw.db.put([]byte(k), encodePostingList(merged)); err != nil {
+			if err := bw.db.putIndexLocked([]byte(k), encodePostingList(merged)); err != nil {
 				bw.db.mutex.Unlock()
 				return err
 			}
@@ -194,6 +325,8 @@ func (bw *BatchWriter) flushUnsafe() error {
 
 	// Reset batch - reuse underlying array
 	bw.entries = bw.entries[:0]
+	bw.indexFieldPairs = bw.indexFieldPairs[:0]
+	bw.indexFieldSpans = bw.indexFieldSpans[:0]
 
 	return nil
 }

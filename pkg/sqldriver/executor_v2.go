@@ -1,11 +1,13 @@
 package sqldriver
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,9 @@ type putOperation struct {
 type tableSchemaMeta struct {
 	Columns      []string               `json:"columns"`
 	SearchSchema *velocity.SearchSchema `json:"search_schema,omitempty"`
+	PrimaryKey   string                 `json:"primary_key,omitempty"`
+	Unique       []string               `json:"unique,omitempty"`
+	NotNull      []string               `json:"not_null,omitempty"`
 }
 
 type projectedRow struct {
@@ -79,11 +84,27 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	if err != nil {
 		return nil, err
 	}
+	meta, _, err := e.loadTableSchemaMeta(tableName)
+	if err != nil {
+		return nil, err
+	}
+	if res, ok, err := e.tryFastBulkInsert(tableName, columns, n, args); ok || err != nil {
+		return res, err
+	}
 
 	eval := e.newEvaluator(ctx, args)
 	inserted := int64(0)
 	var lastInsertID int64
 	var puts []putOperation
+	batchConstraintKeys := make(map[string]struct{})
+	needsExistingRow := n.Ignore || n.OnConflictDoNothing || len(n.OnDupKey) > 0 || len(n.OnConflictUpdate) > 0
+	var encodedColumns [][]byte
+	if !needsExistingRow && n.Select == nil && len(columns) > 0 {
+		encodedColumns = make([][]byte, len(columns))
+		for i, col := range columns {
+			encodedColumns[i] = strconv.AppendQuote(nil, col)
+		}
+	}
 
 	appendRow := func(data map[string]interface{}) error {
 		key, keyValue := insertKey(tableName, data, inserted)
@@ -93,33 +114,39 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 			}
 		}
 
-		if existing, err := e.conn.db.Get([]byte(key)); err == nil {
-			switch {
-			case n.Ignore || n.OnConflictDoNothing:
-				return nil
-			case len(n.OnDupKey) > 0 || len(n.OnConflictUpdate) > 0:
-				var doc map[string]interface{}
-				if err := json.Unmarshal(existing, &doc); err != nil {
-					doc = make(map[string]interface{})
-				}
-				rowCtx := make(Row, len(doc))
-				for k, v := range doc {
-					rowCtx[k] = v
-				}
-				assignments := n.OnDupKey
-				if len(assignments) == 0 {
-					assignments = n.OnConflictUpdate
-				}
-				for _, asg := range assignments {
-					val, err := eval.Eval(asg.Value, rowCtx)
-					if err != nil {
-						return err
+		if err := e.checkInsertConstraints(tableName, meta, data, key, batchConstraintKeys); err != nil {
+			return err
+		}
+
+		if needsExistingRow {
+			if existing, err := e.conn.Get([]byte(key)); err == nil {
+				switch {
+				case n.Ignore || n.OnConflictDoNothing:
+					return nil
+				case len(n.OnDupKey) > 0 || len(n.OnConflictUpdate) > 0:
+					var doc map[string]interface{}
+					if err := json.Unmarshal(existing, &doc); err != nil {
+						doc = make(map[string]interface{})
 					}
-					name := identToString(asg.Column)
-					doc[name] = val
-					rowCtx[name] = val
+					rowCtx := make(Row, len(doc))
+					for k, v := range doc {
+						rowCtx[k] = v
+					}
+					assignments := n.OnDupKey
+					if len(assignments) == 0 {
+						assignments = n.OnConflictUpdate
+					}
+					for _, asg := range assignments {
+						val, err := eval.Eval(asg.Value, rowCtx)
+						if err != nil {
+							return err
+						}
+						name := identToString(asg.Column)
+						doc[name] = val
+						rowCtx[name] = val
+					}
+					data = doc
 				}
-				data = doc
 			}
 		}
 
@@ -156,6 +183,23 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 			if len(columns) > 0 && len(rowExprs) != len(columns) {
 				return nil, fmt.Errorf("velocity driver: insert column/value count mismatch")
 			}
+			if encodedColumns != nil {
+				key, keyValue, payload, data, err := e.fastInsertPayload(tableName, columns, encodedColumns, rowExprs, eval, inserted, len(n.Values) > 1, rowIdx)
+				if err != nil {
+					return nil, err
+				}
+				if keyValue != nil {
+					if id, ok := asFloat(keyValue); ok {
+						lastInsertID = int64(id)
+					}
+				}
+				if err := e.checkInsertConstraints(tableName, meta, data, key, batchConstraintKeys); err != nil {
+					return nil, err
+				}
+				puts = append(puts, putOperation{key: []byte(key), value: payload})
+				inserted++
+				continue
+			}
 			data := make(map[string]interface{}, len(rowExprs))
 			for colIdx, expr := range rowExprs {
 				val, err := eval.Eval(expr, nil)
@@ -181,21 +225,227 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	return &Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
 }
 
+func (e *ExecutorV2) tryFastBulkInsert(tableName string, columns []string, n *ast.InsertStmt, args []driver.NamedValue) (driver.Result, bool, error) {
+	if n.Select != nil || n.Ignore || n.OnConflictDoNothing || len(n.OnDupKey) > 0 || len(n.OnConflictUpdate) > 0 {
+		return nil, false, nil
+	}
+	if len(columns) == 0 || len(n.Values) < 2 {
+		return nil, false, nil
+	}
+
+	encodedColumns := make([][]byte, len(columns))
+	idIndex := -1
+	for i, col := range columns {
+		encodedColumns[i] = strconv.AppendQuote(nil, col)
+		if col == "id" {
+			idIndex = i
+		}
+	}
+	for _, rowExprs := range n.Values {
+		for _, expr := range rowExprs {
+			param, ok := expr.(*ast.Param)
+			if !ok || string(param.Raw) != "?" {
+				return nil, false, nil
+			}
+		}
+	}
+
+	write := func(put func([]byte, []byte) error) (driver.Result, error) {
+		inserted := int64(0)
+		var lastInsertID int64
+		batchConstraintKeys := make(map[string]struct{})
+		for _, rowExprs := range n.Values {
+			if len(rowExprs) != len(columns) {
+				return nil, fmt.Errorf("velocity driver: insert column/value count mismatch")
+			}
+
+			payload := make([]byte, 0, 96)
+			payload = append(payload, '{')
+			var keyValue interface{}
+			values := make([]any, len(columns))
+			for colIdx, expr := range rowExprs {
+				value, ok, err := e.fastInsertExprValue(expr, args)
+				if err != nil || !ok {
+					return nil, err
+				}
+				values[colIdx] = value
+				if colIdx > 0 {
+					payload = append(payload, ',')
+				}
+				payload = append(payload, encodedColumns[colIdx]...)
+				payload = append(payload, ':')
+				payload = appendJSONValue(payload, value)
+				if colIdx == idIndex {
+					keyValue = value
+				}
+			}
+			payload = append(payload, '}')
+
+			var key []byte
+			if keyValue != nil {
+				key = appendTableKey(nil, tableName, keyValue)
+				if id, ok := asFloat(keyValue); ok {
+					lastInsertID = int64(id)
+				}
+			} else {
+				key = strconv.AppendInt(append(append(key, tableName...), ':'), time.Now().UnixNano()+inserted, 10)
+			}
+			if err := e.conn.checkRawInsertConstraintsWithSeen(tableName, columns, values, key, batchConstraintKeys); err != nil {
+				return nil, err
+			}
+			if err := put(key, payload); err != nil {
+				return nil, err
+			}
+			inserted++
+		}
+		return &Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
+	}
+
+	if e.conn.tx != nil {
+		res, err := write(e.conn.tx.PutUnsafe)
+		return res, true, err
+	}
+	bw := e.conn.db.NewBatchWriter(len(n.Values))
+	res, err := write(bw.PutUnsafe)
+	if err != nil {
+		return nil, true, err
+	}
+	if err := bw.Flush(); err != nil {
+		return nil, true, err
+	}
+	return res, true, nil
+}
+
+func (e *ExecutorV2) fastInsertExprValue(expr ast.Expr, args []driver.NamedValue) (interface{}, bool, error) {
+	param, ok := expr.(*ast.Param)
+	if !ok || string(param.Raw) != "?" {
+		return nil, false, nil
+	}
+	ordinal := 1
+	if e.paramOrder != nil {
+		var found bool
+		ordinal, found = e.paramOrder[param.TokPos]
+		if !found {
+			return nil, false, fmt.Errorf("missing argument for parameter ?")
+		}
+	}
+	value, err := namedArgByOrdinal(args, ordinal)
+	return value, true, err
+}
+
+func (e *ExecutorV2) checkInsertConstraints(tableName string, meta tableSchemaMeta, data map[string]interface{}, primaryKey string, seen map[string]struct{}) error {
+	hasSeen := func(key string) bool {
+		if seen != nil {
+			if _, exists := seen[key]; exists {
+				return true
+			}
+		}
+		if e.conn.txConstraintKeys != nil {
+			if _, exists := e.conn.txConstraintKeys[key]; exists {
+				return true
+			}
+		}
+		return false
+	}
+	markSeen := func(key string) {
+		if seen != nil {
+			seen[key] = struct{}{}
+		}
+		if e.conn.txConstraintKeys != nil {
+			e.conn.txConstraintKeys[key] = struct{}{}
+		}
+	}
+	for _, col := range meta.NotNull {
+		if data[col] == nil {
+			return fmt.Errorf("velocity driver: column %s.%s cannot be NULL", tableName, col)
+		}
+	}
+	if meta.PrimaryKey != "" {
+		if value, ok := data[meta.PrimaryKey]; ok {
+			if value == nil {
+				return fmt.Errorf("velocity driver: primary key %s.%s cannot be NULL", tableName, meta.PrimaryKey)
+			}
+			txKey := "pk\x00" + primaryKey
+			if hasSeen(txKey) {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", tableName, meta.PrimaryKey)
+			}
+			if _, err := e.conn.Get([]byte(primaryKey)); err == nil {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", tableName, meta.PrimaryKey)
+			}
+			markSeen(txKey)
+		}
+	}
+	for _, col := range meta.Unique {
+		value, ok := data[col]
+		if !ok {
+			continue
+		}
+		if value == nil {
+			continue
+		}
+		txKey := "unique\x00" + tableName + "\x00" + col + "\x00" + fmt.Sprintf("%v", value)
+		if hasSeen(txKey) {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", tableName, col)
+		}
+		count, err := e.conn.db.SearchCount(velocity.SearchQuery{
+			Prefix: tableName,
+			Filters: []velocity.SearchFilter{{
+				Field:    col,
+				Op:       "==",
+				Value:    value,
+				HashOnly: true,
+			}},
+			Limit: 1,
+		})
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", tableName, col)
+		}
+		for _, entry := range e.conn.PendingTableEntries(tableName) {
+			if entry.Deleted {
+				continue
+			}
+			var doc map[string]interface{}
+			if err := json.Unmarshal(entry.Value, &doc); err != nil {
+				continue
+			}
+			if sqlValueEqual(doc[col], value) {
+				return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", tableName, col)
+			}
+		}
+		markSeen(txKey)
+	}
+	return nil
+}
+
 func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args []driver.NamedValue) (driver.Result, error) {
 	rows, err := e.selectMutationRows(ctx, n.Tables, n.Where, n.Order, n.Limit, args)
 	if err != nil {
 		return nil, err
 	}
 
+	tableName, hasSingleTable := updateTargetTableName(n)
+	var meta tableSchemaMeta
+	if hasSingleTable {
+		if loaded, found, err := e.loadTableSchemaMeta(tableName); err != nil {
+			return nil, err
+		} else if found {
+			meta = loaded
+		}
+	}
+
 	eval := e.newEvaluator(ctx, args)
 	puts := make([]putOperation, 0, len(rows))
+	uniqueSeen := make(map[string]string)
 	updated := int64(0)
 	for _, row := range rows {
 		key, ok := row["_key"].(string)
 		if !ok || key == "" {
 			continue
 		}
-		raw, err := e.conn.db.Get([]byte(key))
+		raw, err := e.conn.Get([]byte(key))
 		if err != nil {
 			continue
 		}
@@ -203,6 +453,7 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			doc = make(map[string]interface{})
 		}
+		original := copyStringAnyMap(doc)
 		for _, asg := range n.Set {
 			val, err := eval.Eval(asg.Value, row)
 			if err != nil {
@@ -211,6 +462,11 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 			name := identToString(asg.Column)
 			doc[name] = val
 			row[name] = val
+		}
+		if hasSingleTable {
+			if err := e.checkUpdateConstraints(tableName, meta, key, original, doc, uniqueSeen); err != nil {
+				return nil, err
+			}
 		}
 		payload, err := json.Marshal(doc)
 		if err != nil {
@@ -224,6 +480,95 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 		return nil, err
 	}
 	return &Result{rowsAffected: updated}, nil
+}
+
+func updateTargetTableName(n *ast.UpdateStmt) (string, bool) {
+	if n == nil || len(n.Tables) != 1 || hasJoinRef(n.Tables) {
+		return "", false
+	}
+	table, ok := n.Tables[0].(*ast.SimpleTable)
+	if !ok {
+		return "", false
+	}
+	name := qualifiedIdentToString(table.Name)
+	return name, name != ""
+}
+
+func copyStringAnyMap(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func (e *ExecutorV2) checkUpdateConstraints(tableName string, meta tableSchemaMeta, key string, oldDoc, newDoc map[string]interface{}, uniqueSeen map[string]string) error {
+	for _, col := range meta.NotNull {
+		if newDoc[col] == nil {
+			return fmt.Errorf("velocity driver: column %s.%s cannot be NULL", tableName, col)
+		}
+	}
+	if meta.PrimaryKey != "" {
+		if newDoc[meta.PrimaryKey] == nil {
+			return fmt.Errorf("velocity driver: primary key %s.%s cannot be NULL", tableName, meta.PrimaryKey)
+		}
+		if !sqlValueEqual(oldDoc[meta.PrimaryKey], newDoc[meta.PrimaryKey]) {
+			return fmt.Errorf("velocity driver: updating primary key %s.%s is not supported", tableName, meta.PrimaryKey)
+		}
+	}
+	for _, col := range meta.Unique {
+		newValue, ok := newDoc[col]
+		if !ok || newValue == nil || sqlValueEqual(oldDoc[col], newValue) {
+			continue
+		}
+		valueKey := fmt.Sprintf("%s\x00%s\x00%v", tableName, col, newValue)
+		if existingKey, exists := uniqueSeen[valueKey]; exists && existingKey != key {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", tableName, col)
+		}
+		uniqueSeen[valueKey] = key
+		if err := e.checkUniqueValueAvailableForUpdate(tableName, col, newValue, key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *ExecutorV2) checkUniqueValueAvailableForUpdate(tableName, col string, value interface{}, currentKey string) error {
+	rows, err := e.conn.db.Search(velocity.SearchQuery{
+		Prefix: tableName,
+		Filters: []velocity.SearchFilter{{
+			Field:    col,
+			Op:       "==",
+			Value:    value,
+			HashOnly: true,
+		}},
+		Limit: maxSearchLimit,
+	})
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if string(row.Key) != currentKey {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", tableName, col)
+		}
+	}
+	for _, entry := range e.conn.PendingTableEntries(tableName) {
+		if entry.Deleted || string(entry.Key) == currentKey {
+			continue
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal(entry.Value, &doc); err != nil {
+			continue
+		}
+		if sqlValueEqual(doc[col], value) {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", tableName, col)
+		}
+	}
+	return nil
+}
+
+func sqlValueEqual(a, b interface{}) bool {
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
 func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args []driver.NamedValue) (driver.Result, error) {
@@ -359,6 +704,9 @@ func (e *ExecutorV2) executeSelectStatement(ctx context.Context, stmt *ast.Selec
 }
 
 func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, error) {
+	if rows, ok, err := e.tryFastPrimaryKeySelect(sel, args); ok {
+		return rows, err
+	}
 	if rows, ok, err := e.tryFastCountSelect(sel, args); ok {
 		return rows, err
 	}
@@ -403,6 +751,132 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStm
 		schemaCols: schemaCols,
 		rowMaps:    rowMaps,
 	}, nil
+}
+
+func (e *ExecutorV2) tryFastPrimaryKeySelect(sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, bool, error) {
+	if sel == nil || sel.Where == nil || sel.Distinct || len(sel.GroupBy) > 0 || len(sel.OrderBy) > 0 || sel.Having != nil || sel.Limit != nil {
+		return nil, false, nil
+	}
+	if len(sel.From) != 1 || hasJoinRef(sel.From) {
+		return nil, false, nil
+	}
+	table, ok := sel.From[0].(*ast.SimpleTable)
+	if !ok || table.Alias != nil {
+		return nil, false, nil
+	}
+	tableName := qualifiedIdentToString(table.Name)
+	if tableName == "" {
+		return nil, false, nil
+	}
+	columns := explicitColumnNames(sel.Columns)
+	if len(columns) == 0 {
+		return nil, false, nil
+	}
+
+	binary, ok := sel.Where.(*ast.BinaryExpr)
+	if !ok || binary.Op != lexer.EQ || exprColumnName(binary.Left) != "id" {
+		return nil, false, nil
+	}
+	eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
+	id, err := eval.Eval(binary.Right, nil)
+	if err != nil || id == nil {
+		return nil, false, err
+	}
+
+	raw, err := e.conn.Get(appendTableKey(nil, tableName, id))
+	if err != nil {
+		return &Rows{columns: columns, rowMaps: nil}, true, nil
+	}
+	row := make(Row, len(columns))
+	for _, col := range columns {
+		value, ok := fastJSONFieldValue(raw, col)
+		if !ok {
+			var doc map[string]any
+			if err := json.Unmarshal(raw, &doc); err != nil {
+				return nil, true, err
+			}
+			value = doc[col]
+		}
+		row[col] = value
+	}
+	return &Rows{columns: columns, rowMaps: []Row{row}}, true, nil
+}
+
+func fastJSONFieldValue(raw []byte, field string) (any, bool) {
+	if field == "" {
+		return nil, false
+	}
+	pattern := []byte(strconv.Quote(field))
+	for searchFrom := 0; searchFrom < len(raw); {
+		idx := bytes.Index(raw[searchFrom:], pattern)
+		if idx < 0 {
+			return nil, false
+		}
+		i := searchFrom + idx + len(pattern)
+		for i < len(raw) && isJSONSpaceByte(raw[i]) {
+			i++
+		}
+		if i >= len(raw) || raw[i] != ':' {
+			searchFrom = searchFrom + idx + 1
+			continue
+		}
+		i++
+		for i < len(raw) && isJSONSpaceByte(raw[i]) {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, false
+		}
+		if raw[i] == '"' {
+			end := i + 1
+			escaped := false
+			for end < len(raw) {
+				c := raw[end]
+				if c == '\\' {
+					escaped = true
+					end += 2
+					continue
+				}
+				if c == '"' {
+					if !escaped {
+						return string(raw[i+1 : end]), true
+					}
+					unquoted, err := strconv.Unquote(string(raw[i : end+1]))
+					if err != nil {
+						return nil, false
+					}
+					return unquoted, true
+				}
+				end++
+			}
+			return nil, false
+		}
+		end := i
+		for end < len(raw) && raw[end] != ',' && raw[end] != '}' {
+			end++
+		}
+		token := strings.TrimSpace(string(raw[i:end]))
+		switch token {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		case "null":
+			return nil, true
+		}
+		if n, err := strconv.ParseInt(token, 10, 64); err == nil {
+			return n, true
+		}
+		if f, err := strconv.ParseFloat(token, 64); err == nil {
+			return f, true
+		}
+		return token, true
+	}
+	return nil, false
+}
+
+func isJSONSpaceByte(c byte) bool {
+	return c == ' ' || c == '\n' || c == '\r' || c == '\t'
 }
 
 func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt, args []driver.NamedValue) ([]Row, []string, error) {
@@ -532,7 +1006,7 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 		if queryLimit <= 0 {
 			queryLimit = maxSearchLimit
 		}
-		return NewTableScanIterator(e.conn.db, alias, velocity.SearchQuery{
+		return NewConnTableScanIterator(e.conn, alias, velocity.SearchQuery{
 			Prefix:   tableName,
 			FullText: plan.fullText,
 			Filters:  plan.filters,
@@ -737,6 +1211,9 @@ func hasExactIDFilter(filters []velocity.SearchFilter) bool {
 }
 
 func (e *ExecutorV2) tryFastCountSelect(sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, bool, error) {
+	if e.conn.tx != nil {
+		return nil, false, nil
+	}
 	if sel == nil || sel.Distinct || len(sel.GroupBy) > 0 || sel.Having != nil || sel.SetOp != nil || len(sel.From) != 1 || hasJoinRef(sel.From) {
 		return nil, false, nil
 	}
@@ -1174,6 +1651,17 @@ func (e *ExecutorV2) schemaMetaFromCreateStmt(ctx context.Context, stmt *ast.Cre
 		if col.PrimaryKey || col.Unique {
 			field.HashSearch = true
 		}
+		if col.PrimaryKey {
+			meta.PrimaryKey = name
+			meta.Unique = appendUniqueString(meta.Unique, name)
+			meta.NotNull = appendUniqueString(meta.NotNull, name)
+		}
+		if col.Unique {
+			meta.Unique = appendUniqueString(meta.Unique, name)
+		}
+		if col.NotNull {
+			meta.NotNull = appendUniqueString(meta.NotNull, name)
+		}
 		if meta.SearchSchema == nil {
 			meta.SearchSchema = &velocity.SearchSchema{}
 		}
@@ -1181,12 +1669,23 @@ func (e *ExecutorV2) schemaMetaFromCreateStmt(ctx context.Context, stmt *ast.Cre
 		fieldByName[name] = &meta.SearchSchema.Fields[len(meta.SearchSchema.Fields)-1]
 	}
 	for _, constraint := range stmt.Constraints {
-		if (constraint.Type != ast.PrimaryKeyConstraint && constraint.Type != ast.UniqueConstraint) || len(constraint.Columns) != 1 {
+		if constraint.Type != ast.PrimaryKeyConstraint && constraint.Type != ast.UniqueConstraint {
 			continue
+		}
+		if len(constraint.Columns) != 1 {
+			return tableSchemaMeta{}, fmt.Errorf("velocity driver: composite %s constraints are not supported", strings.ToLower(string(constraint.Type)))
 		}
 		name := identToString(constraint.Columns[0].Name)
 		if field, ok := fieldByName[name]; ok {
 			field.HashSearch = true
+		}
+		if constraint.Type == ast.PrimaryKeyConstraint {
+			meta.PrimaryKey = name
+			meta.Unique = appendUniqueString(meta.Unique, name)
+			meta.NotNull = appendUniqueString(meta.NotNull, name)
+		}
+		if constraint.Type == ast.UniqueConstraint {
+			meta.Unique = appendUniqueString(meta.Unique, name)
 		}
 	}
 
@@ -1457,8 +1956,92 @@ func insertKey(tableName string, data map[string]interface{}, rowNum int64) (str
 	return fmt.Sprintf("%s:%d", tableName, time.Now().UnixNano()), nil
 }
 
+func (e *ExecutorV2) fastInsertPayload(tableName string, columns []string, encodedColumns [][]byte, rowExprs []ast.Expr, eval *Evaluator, inserted int64, multiRow bool, rowIdx int) (string, interface{}, []byte, map[string]interface{}, error) {
+	var keyValue interface{}
+	data := make(map[string]interface{}, len(rowExprs))
+	payload := make([]byte, 0, 96)
+	payload = append(payload, '{')
+	for colIdx, expr := range rowExprs {
+		val, err := eval.Eval(expr, nil)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		data[columns[colIdx]] = val
+		if colIdx > 0 {
+			payload = append(payload, ',')
+		}
+		payload = append(payload, encodedColumns[colIdx]...)
+		payload = append(payload, ':')
+		payload = appendJSONValue(payload, val)
+		if columns[colIdx] == "id" {
+			keyValue = val
+		}
+	}
+	payload = append(payload, '}')
+
+	if keyValue != nil {
+		return fmt.Sprintf("%s:%v", tableName, keyValue), keyValue, payload, data, nil
+	}
+	if multiRow {
+		return fmt.Sprintf("%s:%d:%d", tableName, time.Now().UnixNano(), rowIdx), nil, payload, data, nil
+	}
+	return fmt.Sprintf("%s:%d", tableName, time.Now().UnixNano()), nil, payload, data, nil
+}
+
+func appendJSONValue(dst []byte, value interface{}) []byte {
+	switch v := value.(type) {
+	case nil:
+		return append(dst, "null"...)
+	case string:
+		return strconv.AppendQuote(dst, v)
+	case []byte:
+		return strconv.AppendQuote(dst, string(v))
+	case bool:
+		return strconv.AppendBool(dst, v)
+	case int:
+		return strconv.AppendInt(dst, int64(v), 10)
+	case int8:
+		return strconv.AppendInt(dst, int64(v), 10)
+	case int16:
+		return strconv.AppendInt(dst, int64(v), 10)
+	case int32:
+		return strconv.AppendInt(dst, int64(v), 10)
+	case int64:
+		return strconv.AppendInt(dst, v, 10)
+	case uint:
+		return strconv.AppendUint(dst, uint64(v), 10)
+	case uint8:
+		return strconv.AppendUint(dst, uint64(v), 10)
+	case uint16:
+		return strconv.AppendUint(dst, uint64(v), 10)
+	case uint32:
+		return strconv.AppendUint(dst, uint64(v), 10)
+	case uint64:
+		return strconv.AppendUint(dst, v, 10)
+	case float32:
+		return strconv.AppendFloat(dst, float64(v), 'f', -1, 32)
+	case float64:
+		return strconv.AppendFloat(dst, v, 'f', -1, 64)
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return append(dst, "null"...)
+		}
+		return append(dst, encoded...)
+	}
+}
+
 func schemaStorageKey(tableName string) []byte {
 	return []byte(tableSchemaPrefix + tableName)
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func exprToPositiveInt(expr ast.Expr, args []driver.NamedValue, paramOrder map[int32]int, fallback int) int {
