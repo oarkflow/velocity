@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/oarkflow/sqlparser/ast"
 	"github.com/oarkflow/velocity"
 )
 
@@ -128,21 +129,31 @@ func (it *TableScanIterator) Close() error {
 
 // NestedLoopJoinIterator performs a Cartesian product evaluating a condition string
 type NestedLoopJoinIterator struct {
-	left       Iterator
-	right      Iterator
-	leftRow    Row
-	rightCache []Row // Because velocity doesn't stream, we buffer right side
-	rCursor    int
-	joinReady  bool
+	left               Iterator
+	right              Iterator
+	leftRow            Row
+	rightCache         []Row // Because velocity doesn't stream, we buffer right side
+	rightMatched       []bool
+	rCursor            int
+	joinReady          bool
+	currentLeftMatched bool
+	emitRightOnly      bool
+	rightOnlyCursor    int
 	// ConditionFunc evaluates the JOIN expression logic.
 	ConditionFunc func(left, right Row) bool
+	kind          ast.JoinKind
 }
 
 func NewNestedLoopJoinIterator(ctx context.Context, left, right Iterator, condition func(Row, Row) bool) (*NestedLoopJoinIterator, error) {
+	return NewJoinIterator(ctx, left, right, ast.InnerJoin, condition)
+}
+
+func NewJoinIterator(ctx context.Context, left, right Iterator, kind ast.JoinKind, condition func(Row, Row) bool) (*NestedLoopJoinIterator, error) {
 	it := &NestedLoopJoinIterator{
 		left:          left,
 		right:         right,
 		ConditionFunc: condition,
+		kind:          kind,
 	}
 
 	// Buffer right side fully since we must loop over it multiple times
@@ -156,6 +167,7 @@ func NewNestedLoopJoinIterator(ctx context.Context, left, right Iterator, condit
 		}
 		it.rightCache = append(it.rightCache, r)
 	}
+	it.rightMatched = make([]bool, len(it.rightCache))
 
 	// Pre-load first left row
 	lr, err := left.Next(ctx)
@@ -174,6 +186,10 @@ func (it *NestedLoopJoinIterator) Next(ctx context.Context) (Row, error) {
 	for it.joinReady {
 		// exhausted right cache for current left row?
 		if it.rCursor >= len(it.rightCache) {
+			if !it.currentLeftMatched && (it.kind == ast.LeftJoin || it.kind == ast.FullJoin) {
+				it.currentLeftMatched = true
+				return copyRow(it.leftRow), nil
+			}
 			lr, err := it.left.Next(ctx)
 			if err != nil {
 				return nil, err
@@ -181,29 +197,56 @@ func (it *NestedLoopJoinIterator) Next(ctx context.Context) (Row, error) {
 			it.leftRow = lr
 			if it.leftRow == nil {
 				it.joinReady = false
-				return nil, nil // Absolute EOF
+				if it.kind == ast.RightJoin || it.kind == ast.FullJoin {
+					it.emitRightOnly = true
+					break
+				}
+				return nil, nil
 			}
-			it.rCursor = 0 // reset right cursor
+			it.rCursor = 0
+			it.currentLeftMatched = false
 		}
 
 		// Pull right row
+		if len(it.rightCache) == 0 {
+			it.rCursor = len(it.rightCache)
+			continue
+		}
 		rightRow := it.rightCache[it.rCursor]
+		rightIdx := it.rCursor
 		it.rCursor++
 
 		// Evaluate join condition
 		if it.ConditionFunc == nil || it.ConditionFunc(it.leftRow, rightRow) {
+			it.currentLeftMatched = true
+			if rightIdx >= 0 && rightIdx < len(it.rightMatched) {
+				it.rightMatched[rightIdx] = true
+			}
 			// Merge the rows (Cartesian product result)
-			merged := make(Row)
-			for k, v := range it.leftRow {
-				merged[k] = v
-			}
-			for k, v := range rightRow {
-				merged[k] = v // Overwrites ambiguous unqualified keys, aliases remain
-			}
-			return merged, nil
+			return mergeRows(it.leftRow, rightRow), nil
 		}
 	}
+	for it.emitRightOnly {
+		if it.rightOnlyCursor >= len(it.rightCache) {
+			it.emitRightOnly = false
+			return nil, nil
+		}
+		idx := it.rightOnlyCursor
+		it.rightOnlyCursor++
+		if idx < len(it.rightMatched) && it.rightMatched[idx] {
+			continue
+		}
+		return copyRow(it.rightCache[idx]), nil
+	}
 	return nil, nil
+}
+
+func copyRow(row Row) Row {
+	out := make(Row, len(row))
+	for k, v := range row {
+		out[k] = v
+	}
+	return out
 }
 
 func (it *NestedLoopJoinIterator) Close() error {

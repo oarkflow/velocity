@@ -14,7 +14,7 @@ import (
 type Evaluator struct {
 	Args           []driver.NamedValue
 	ParamOrder     map[int32]int
-	SubqueryRunner func(*ast.SelectStmt) ([]Row, error)
+	SubqueryRunner func(*ast.SelectStmt, Row) ([]Row, error)
 }
 
 // Eval evaluates an AST expression against a specific Row context and bound arguments
@@ -86,10 +86,10 @@ func (e *Evaluator) Eval(expr ast.Expr, row Row) (interface{}, error) {
 		return e.evalCase(v, row)
 
 	case *ast.SubqueryExpr:
-		return e.evalScalarSubquery(v)
+		return e.evalScalarSubquery(v, row)
 
 	case *ast.ExistsExpr:
-		return e.evalExists(v)
+		return e.evalExists(v, row)
 
 	case *ast.CastExpr:
 		return e.evalCast(v, row)
@@ -446,7 +446,7 @@ func (e *Evaluator) evalIn(v *ast.InExpr, row Row) (interface{}, error) {
 		if e.SubqueryRunner == nil {
 			return nil, fmt.Errorf("velocity engine: subquery not supported in evaluator")
 		}
-		rows, err := e.SubqueryRunner(v.Subq)
+		rows, err := e.SubqueryRunner(v.Subq, row)
 		if err != nil {
 			return false, err
 		}
@@ -561,11 +561,11 @@ func (e *Evaluator) evalCase(v *ast.CaseExpr, row Row) (interface{}, error) {
 	return nil, nil
 }
 
-func (e *Evaluator) evalExists(v *ast.ExistsExpr) (interface{}, error) {
+func (e *Evaluator) evalExists(v *ast.ExistsExpr, row Row) (interface{}, error) {
 	if e.SubqueryRunner == nil {
 		return nil, fmt.Errorf("velocity engine: subquery not supported in evaluator")
 	}
-	rows, err := e.SubqueryRunner(v.Subq)
+	rows, err := e.SubqueryRunner(v.Subq, row)
 	if err != nil {
 		return false, err
 	}
@@ -576,11 +576,11 @@ func (e *Evaluator) evalExists(v *ast.ExistsExpr) (interface{}, error) {
 	return result, nil
 }
 
-func (e *Evaluator) evalScalarSubquery(v *ast.SubqueryExpr) (interface{}, error) {
+func (e *Evaluator) evalScalarSubquery(v *ast.SubqueryExpr, row Row) (interface{}, error) {
 	if e.SubqueryRunner == nil {
 		return nil, fmt.Errorf("velocity engine: scalar subquery not supported in evaluator")
 	}
-	rows, err := e.SubqueryRunner(v.Subq)
+	rows, err := e.SubqueryRunner(v.Subq, row)
 	if err != nil {
 		return nil, err
 	}

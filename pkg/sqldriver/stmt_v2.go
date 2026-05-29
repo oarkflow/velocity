@@ -60,12 +60,12 @@ func (s *StmtV2) ExecContext(ctx context.Context, args []driver.NamedValue) (dri
 	if s.fastInsert != nil {
 		return s.fastInsert.Exec(s.conn, args)
 	}
-	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query}
 	return executor.Execute(ctx, s.stmt, args)
 }
 
 func (s *StmtV2) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query}
 	return executor.ExecuteSelect(ctx, s.stmt, args)
 }
 

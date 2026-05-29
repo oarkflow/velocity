@@ -20,11 +20,15 @@ import (
 const (
 	maxSearchLimit    = int(^uint(0) >> 1)
 	tableSchemaPrefix = "__schema:"
+	viewPrefix        = "__view:"
 )
 
 type ExecutorV2 struct {
 	conn       *Conn
 	paramOrder map[int32]int
+	ctes       map[string]*Rows
+	outerRow   Row
+	rawSQL     string
 }
 
 type putOperation struct {
@@ -38,6 +42,11 @@ type tableSchemaMeta struct {
 	PrimaryKey   string                 `json:"primary_key,omitempty"`
 	Unique       []string               `json:"unique,omitempty"`
 	NotNull      []string               `json:"not_null,omitempty"`
+}
+
+type viewMeta struct {
+	Columns []string `json:"columns,omitempty"`
+	Select  string   `json:"select"`
 }
 
 type projectedRow struct {
@@ -61,6 +70,8 @@ func (e *ExecutorV2) Execute(ctx context.Context, stmt sqlparser.Statement, args
 		return e.executeDelete(ctx, n, args)
 	case *ast.CreateTableStmt:
 		return e.executeCreateTable(ctx, n, args)
+	case *ast.CreateViewStmt:
+		return e.executeCreateView(ctx, n)
 	case *ast.DropTableStmt:
 		return e.executeDropTable(n)
 	case *ast.TruncateStmt:
@@ -593,6 +604,11 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 
 func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableStmt, args []driver.NamedValue) (driver.Result, error) {
 	tableName := qualifiedIdentToString(n.Table)
+	if _, found, err := e.loadViewMeta(tableName); err != nil {
+		return nil, err
+	} else if found {
+		return nil, fmt.Errorf("velocity driver: relation %s already exists as a view", tableName)
+	}
 	if _, found, err := e.loadTableSchemaMeta(tableName); err != nil {
 		return nil, err
 	} else if found {
@@ -637,6 +653,39 @@ func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableS
 	return &Result{rowsAffected: inserted}, nil
 }
 
+func (e *ExecutorV2) executeCreateView(ctx context.Context, n *ast.CreateViewStmt) (driver.Result, error) {
+	viewName := qualifiedIdentToString(n.Name)
+	if viewName == "" || n.Select == nil {
+		return nil, fmt.Errorf("velocity driver: invalid CREATE VIEW")
+	}
+	if _, found, err := e.loadTableSchemaMeta(viewName); err != nil {
+		return nil, err
+	} else if found {
+		return nil, fmt.Errorf("velocity driver: relation %s already exists as a table", viewName)
+	}
+	if _, found, err := e.loadViewMeta(viewName); err != nil {
+		return nil, err
+	} else if found && !n.OrReplace {
+		return nil, fmt.Errorf("velocity driver: view %s already exists", viewName)
+	}
+	selectSQL, err := extractCreateViewSelectSQL(e.rawSQL)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := parseViewSelect(selectSQL); err != nil {
+		return nil, err
+	}
+	columns := make([]string, 0, len(n.Columns))
+	for _, col := range n.Columns {
+		columns = append(columns, identToString(col))
+	}
+	meta := viewMeta{Columns: columns, Select: selectSQL}
+	if err := e.saveViewMeta(viewName, meta); err != nil {
+		return nil, err
+	}
+	return &Result{}, nil
+}
+
 func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, error) {
 	var total int64
 	for _, table := range n.Tables {
@@ -647,7 +696,24 @@ func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, erro
 		if _, found, err := e.loadTableSchemaMeta(tableName); err != nil {
 			return nil, err
 		} else if !found && !n.IfExists {
+			if _, viewFound, viewErr := e.loadViewMeta(tableName); viewErr != nil {
+				return nil, viewErr
+			} else if viewFound {
+				if err := e.conn.Delete(viewStorageKey(tableName)); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			return nil, fmt.Errorf("velocity driver: table %s does not exist", tableName)
+		} else if !found {
+			if _, viewFound, viewErr := e.loadViewMeta(tableName); viewErr != nil {
+				return nil, viewErr
+			} else if viewFound {
+				if err := e.conn.Delete(viewStorageKey(tableName)); err != nil {
+					return nil, err
+				}
+			}
+			continue
 		}
 
 		rows, err := e.conn.db.Search(velocity.SearchQuery{Prefix: tableName, Limit: maxSearchLimit})
@@ -684,9 +750,18 @@ func (e *ExecutorV2) executeTruncateTable(tableName string) (driver.Result, erro
 }
 
 func (e *ExecutorV2) executeSelectStatement(ctx context.Context, stmt *ast.SelectStmt, args []driver.NamedValue) (*Rows, error) {
+	exec := e
+	if stmt.With != nil {
+		var err error
+		exec, err = e.withMaterializedCTEs(ctx, stmt.With, args)
+		if err != nil {
+			return nil, err
+		}
+	}
 	base := *stmt
 	base.SetOp = nil
-	left, err := e.executeSingleSelect(ctx, &base, args)
+	base.With = nil
+	left, err := exec.executeSingleSelect(ctx, &base, args)
 	if err != nil {
 		return nil, err
 	}
@@ -694,13 +769,45 @@ func (e *ExecutorV2) executeSelectStatement(ctx context.Context, stmt *ast.Selec
 	for op := stmt.SetOp; op != nil; op = op.Right.SetOp {
 		rightBase := *op.Right
 		rightBase.SetOp = nil
-		right, err := e.executeSingleSelect(ctx, &rightBase, args)
+		right, err := exec.executeSelectStatement(ctx, &rightBase, args)
 		if err != nil {
 			return nil, err
 		}
 		left = applySetOperation(left, right, op)
 	}
 	return left, nil
+}
+
+func (e *ExecutorV2) withMaterializedCTEs(ctx context.Context, with *ast.WithClause, args []driver.NamedValue) (*ExecutorV2, error) {
+	if with == nil || len(with.CTEs) == 0 {
+		return e, nil
+	}
+	if with.Recursive {
+		return nil, fmt.Errorf("velocity driver: recursive CTEs are not supported")
+	}
+	child := &ExecutorV2{
+		conn:       e.conn,
+		paramOrder: e.paramOrder,
+		ctes:       make(map[string]*Rows, len(e.ctes)+len(with.CTEs)),
+		outerRow:   e.outerRow,
+		rawSQL:     e.rawSQL,
+	}
+	for name, rows := range e.ctes {
+		child.ctes[name] = rows
+	}
+	for _, cte := range with.CTEs {
+		name := identToString(cte.Name)
+		if name == "" || cte.Subq == nil {
+			return nil, fmt.Errorf("velocity driver: invalid CTE")
+		}
+		rows, err := child.executeSelectStatement(ctx, cte.Subq, args)
+		if err != nil {
+			return nil, fmt.Errorf("velocity driver: CTE %s failed: %w", name, err)
+		}
+		rows = renameCTEColumns(rows, cte.Columns)
+		child.ctes[name] = rows
+	}
+	return child, nil
 }
 
 func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, error) {
@@ -930,6 +1037,9 @@ func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt,
 		if row == nil {
 			break
 		}
+		if len(e.outerRow) > 0 {
+			row = mergeRows(e.outerRow, row)
+		}
 		rows = append(rows, row)
 	}
 
@@ -985,6 +1095,9 @@ func (e *ExecutorV2) collectSourceRowsWithPlan(ctx context.Context, sel *ast.Sel
 		if row == nil {
 			break
 		}
+		if len(e.outerRow) > 0 {
+			row = mergeRows(e.outerRow, row)
+		}
 		rows = append(rows, row)
 	}
 
@@ -1002,6 +1115,26 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 		alias := tableName
 		if t.Alias != nil {
 			alias = identToString(t.Alias)
+		}
+		if rows, ok := e.ctes[tableName]; ok {
+			return &MemoryIterator{
+				alias:  alias,
+				rows:   rowMapsToResults(rows.rowMaps),
+				cursor: 0,
+			}, nil
+		}
+		if view, found, err := e.loadViewMeta(tableName); err != nil {
+			return nil, err
+		} else if found {
+			rows, err := e.executeView(ctx, tableName, view, args)
+			if err != nil {
+				return nil, err
+			}
+			return &MemoryIterator{
+				alias:  alias,
+				rows:   rowMapsToResults(rows.rowMaps),
+				cursor: 0,
+			}, nil
 		}
 		if queryLimit <= 0 {
 			queryLimit = maxSearchLimit
@@ -1037,7 +1170,7 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 		if err != nil {
 			return nil, err
 		}
-		return NewNestedLoopJoinIterator(ctx, left, right, e.buildJoinCondition(ctx, t, args))
+		return NewJoinIterator(ctx, left, right, t.Kind, e.buildJoinCondition(ctx, t, args))
 	}
 
 	return nil, fmt.Errorf("velocity driver: unsupported table reference %T", ref)
@@ -1046,6 +1179,9 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 func (e *ExecutorV2) buildWhereCondition(ctx context.Context, expr ast.Expr, args []driver.NamedValue) func(Row) bool {
 	eval := e.newEvaluator(ctx, args)
 	return func(row Row) bool {
+		if len(e.outerRow) > 0 {
+			row = mergeRows(e.outerRow, row)
+		}
 		ok, err := eval.evalBool(expr, row)
 		return err == nil && ok
 	}
@@ -1584,8 +1720,14 @@ func (e *ExecutorV2) newEvaluator(ctx context.Context, args []driver.NamedValue)
 	return &Evaluator{
 		Args:       args,
 		ParamOrder: e.paramOrder,
-		SubqueryRunner: func(stmt *ast.SelectStmt) ([]Row, error) {
-			rows, err := e.executeSelectStatement(ctx, stmt, args)
+		SubqueryRunner: func(stmt *ast.SelectStmt, outer Row) ([]Row, error) {
+			child := *e
+			if len(e.outerRow) > 0 && len(outer) > 0 {
+				child.outerRow = mergeRows(e.outerRow, outer)
+			} else if len(outer) > 0 {
+				child.outerRow = outer
+			}
+			rows, err := child.executeSelectStatement(ctx, stmt, args)
 			if err != nil {
 				return nil, err
 			}
@@ -1732,6 +1874,42 @@ func (e *ExecutorV2) loadTableSchemaMeta(tableName string) (tableSchemaMeta, boo
 		return tableSchemaMeta{}, false, err
 	}
 	return meta, true, nil
+}
+
+func (e *ExecutorV2) saveViewMeta(viewName string, meta viewMeta) error {
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return e.conn.Put(viewStorageKey(viewName), data)
+}
+
+func (e *ExecutorV2) loadViewMeta(viewName string) (viewMeta, bool, error) {
+	data, err := e.conn.db.Get(viewStorageKey(viewName))
+	if err != nil {
+		return viewMeta{}, false, nil
+	}
+	var meta viewMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return viewMeta{}, false, err
+	}
+	return meta, true, nil
+}
+
+func (e *ExecutorV2) executeView(ctx context.Context, viewName string, meta viewMeta, args []driver.NamedValue) (*Rows, error) {
+	stmt, err := parseViewSelect(meta.Select)
+	if err != nil {
+		return nil, fmt.Errorf("velocity driver: invalid view %s: %w", viewName, err)
+	}
+	child := *e
+	rows, err := child.executeSelectStatement(ctx, stmt, args)
+	if err != nil {
+		return nil, err
+	}
+	if len(meta.Columns) > 0 {
+		rows = renameRowsColumns(rows, meta.Columns)
+	}
+	return rows, nil
 }
 
 func (e *ExecutorV2) defaultStarColumns(from []ast.TableRef) []string {
@@ -1941,6 +2119,64 @@ func rowMapsToResults(rows []Row) []velocity.SearchResult {
 	return out
 }
 
+func renameCTEColumns(rows *Rows, aliases []*ast.Ident) *Rows {
+	if rows == nil || len(aliases) == 0 {
+		return rows
+	}
+	names := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		name := identToString(alias)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return renameRowsColumns(rows, names)
+}
+
+func renameRowsColumns(rows *Rows, names []string) *Rows {
+	if rows == nil || len(names) == 0 {
+		return rows
+	}
+	limit := len(names)
+	if limit > len(rows.columns) {
+		limit = len(rows.columns)
+	}
+	if limit == 0 {
+		return rows
+	}
+	oldCols := append([]string(nil), rows.columns...)
+	newCols := append([]string(nil), rows.columns...)
+	for i := 0; i < limit; i++ {
+		if names[i] != "" {
+			newCols[i] = names[i]
+		}
+	}
+	renamed := make([]Row, 0, len(rows.rowMaps))
+	for _, row := range rows.rowMaps {
+		next := make(Row, len(row))
+		for k, v := range row {
+			next[k] = v
+		}
+		for i := 0; i < limit; i++ {
+			oldName := oldCols[i]
+			newName := newCols[i]
+			if oldName == newName || newName == "" {
+				continue
+			}
+			if v, ok := row[oldName]; ok {
+				next[newName] = v
+				delete(next, oldName)
+			}
+		}
+		renamed = append(renamed, next)
+	}
+	return &Rows{
+		columns:    newCols,
+		schemaCols: rows.schemaCols,
+		rowMaps:    renamed,
+	}
+}
+
 func rowToJSONBytes(row Row) []byte {
 	data, _ := json.Marshal(row)
 	return data
@@ -2033,6 +2269,55 @@ func appendJSONValue(dst []byte, value interface{}) []byte {
 
 func schemaStorageKey(tableName string) []byte {
 	return []byte(tableSchemaPrefix + tableName)
+}
+
+func viewStorageKey(viewName string) []byte {
+	return []byte(viewPrefix + viewName)
+}
+
+func extractCreateViewSelectSQL(query string) (string, error) {
+	query = strings.TrimSpace(strings.TrimSuffix(query, ";"))
+	if query == "" {
+		return "", fmt.Errorf("velocity driver: CREATE VIEW requires original SQL text")
+	}
+	upper := strings.ToUpper(query)
+	for i := 0; i < len(upper)-1; i++ {
+		if upper[i] != 'A' || upper[i+1] != 'S' {
+			continue
+		}
+		if i > 0 && isSQLIdentByte(upper[i-1]) {
+			continue
+		}
+		j := i + 2
+		for j < len(upper) && isSQLSpaceByte(upper[j]) {
+			j++
+		}
+		if strings.HasPrefix(upper[j:], "SELECT") || strings.HasPrefix(upper[j:], "WITH") {
+			return strings.TrimSpace(query[j:]), nil
+		}
+	}
+	return "", fmt.Errorf("velocity driver: CREATE VIEW missing AS SELECT")
+}
+
+func parseViewSelect(sqlText string) (*ast.SelectStmt, error) {
+	parser := sqlparser.NewString(sqlText)
+	stmt, err := parser.Next()
+	if err != nil {
+		return nil, err
+	}
+	sel, ok := stmt.(*ast.SelectStmt)
+	if !ok {
+		return nil, fmt.Errorf("view definition must be a SELECT, got %T", stmt)
+	}
+	return sel, nil
+}
+
+func isSQLSpaceByte(b byte) bool {
+	return b == ' ' || b == '\n' || b == '\r' || b == '\t'
+}
+
+func isSQLIdentByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
 func appendUniqueString(values []string, value string) []string {
