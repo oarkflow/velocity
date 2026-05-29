@@ -13,6 +13,8 @@ func TestSQLDriver_NonHashEqualityFallsBackToScan(t *testing.T) {
 	defer os.RemoveAll("./testdb_hash_fallback")
 
 	DSNConfigs["./testdb_hash_fallback"] = velocity.Config{
+		DisableEncryption: true,
+		DisableFsync:      true,
 		SearchSchemas: map[string]*velocity.SearchSchema{
 			"users": {
 				Fields: []velocity.SearchSchemaField{
@@ -47,6 +49,8 @@ func TestSQLDriver_SelectNotLimitedTo1000(t *testing.T) {
 	defer os.RemoveAll("./testdb_select_limit")
 
 	DSNConfigs["./testdb_select_limit"] = velocity.Config{
+		DisableEncryption: true,
+		DisableFsync:      true,
 		SearchSchemas: map[string]*velocity.SearchSchema{
 			"users": {
 				Fields: []velocity.SearchSchemaField{

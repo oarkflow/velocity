@@ -17,6 +17,14 @@ type BatchWriter struct {
 	indexFieldSpans []indexFieldSpan
 	mutex           sync.Mutex
 	maxSize         int
+	skipIndex       bool
+}
+
+// DisableIndexMaintenance makes this writer skip online secondary-index updates.
+// Callers that use it must rebuild affected indexes after the logical bulk load.
+func (bw *BatchWriter) DisableIndexMaintenance() *BatchWriter {
+	bw.skipIndex = true
+	return bw
 }
 
 type IndexFieldValue struct {
@@ -204,7 +212,7 @@ func (bw *BatchWriter) flushUnsafe() error {
 	bw.db.memTable.PutEntriesOwned(bw.entries)
 
 	// Update search index if enabled
-	if bw.db.searchIndexEnabled {
+	if bw.db.searchIndexEnabled && !bw.skipIndex {
 		bw.db.mutex.Lock()
 		additions := make(map[string][]uint64)
 		nextDocID, nextDocIDLoaded := uint64(0), false
@@ -321,6 +329,12 @@ func (bw *BatchWriter) flushUnsafe() error {
 		}
 
 		bw.db.mutex.Unlock()
+	}
+
+	if !bw.db.skipCloseFlush && bw.db.memTable.Size() > bw.db.memTableSize {
+		if !bw.db.flushing.Load() {
+			go bw.db.flushMemTable()
+		}
 	}
 
 	// Reset batch - reuse underlying array

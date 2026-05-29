@@ -51,17 +51,18 @@ type flushCheckpoint struct {
 
 // DB - Main database struct
 type DB struct {
-	path       string
-	memTable   *MemTable
-	wal        *WAL
-	levels     [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
-	mutex      sync.RWMutex
-	envelopeMu sync.RWMutex
-	flushMu    sync.Mutex
-	compacting atomic.Bool
-	flushing   atomic.Bool // Prevent concurrent flushes
-	cache      *LRUCache
-	crypto     *CryptoProvider
+	path              string
+	memTable          *MemTable
+	flushingMemTables []*MemTable
+	wal               *WAL
+	levels            [][]*SSTable // levels[0] = L0, levels[1] = L1, etc.
+	mutex             sync.RWMutex
+	envelopeMu        sync.RWMutex
+	flushMu           sync.Mutex
+	compacting        atomic.Bool
+	flushing          atomic.Bool // Prevent concurrent flushes
+	cache             *LRUCache
+	crypto            *CryptoProvider
 
 	complianceTagManager *ComplianceTagManager
 	classificationEngine *DataClassificationEngine
@@ -92,15 +93,17 @@ type DB struct {
 	disableIndexPersistence bool
 
 	// Graceful shutdown
-	closed     atomic.Bool
-	shutdownCh chan struct{}
+	closed       atomic.Bool
+	shutdownCh   chan struct{}
+	compactionWG sync.WaitGroup
 
 	// Production configuration
 	nodeID    string
 	jwtSecret string
 
 	// Performance flags
-	disableWAL bool // Skip WAL writes for maximum throughput (data loss risk)
+	disableWAL     bool // Skip WAL writes for maximum throughput (data loss risk)
+	skipCloseFlush bool // Skip clean-close memtable flush and rely on WAL replay
 
 	// Knowledge Graph engine
 	kg *KnowledgeGraphEngine
@@ -190,6 +193,7 @@ type Config struct {
 	DisableWAL              bool // Skip WAL writes (data loss risk - benchmarks only)
 	DisableFsync            bool // Skip fsync on WAL writes (data loss risk on crash)
 	DisableIndexPersistence bool // Keep derived search indexes in memory only (benchmarks only)
+	SkipCloseFlush          bool // Skip clean-close memtable flush and rely on WAL replay (benchmarks only)
 }
 
 const (
@@ -323,6 +327,7 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		nodeID:                  cfg.NodeID,
 		jwtSecret:               cfg.JWTSecret,
 		disableWAL:              cfg.DisableWAL,
+		skipCloseFlush:          cfg.SkipCloseFlush,
 		disableIndexPersistence: cfg.DisableIndexPersistence && cfg.DisableWAL,
 	}
 	if db.nodeID == "" {
@@ -382,9 +387,15 @@ func NewWithConfig(cfg Config) (*DB, error) {
 			}
 			// Parse level from filename, e.g., sst_L0_001.db -> level 0
 			level := 0
-			if len(name) > 6 && name[4:6] == "L" {
-				if l, err := strconv.Atoi(name[5:6]); err == nil && l < MaxLevels {
-					level = l
+			if len(name) > 6 && name[:5] == "sst_L" {
+				end := 5
+				for end < len(name) && name[end] >= '0' && name[end] <= '9' {
+					end++
+				}
+				if end > 5 {
+					if l, err := strconv.Atoi(name[5:end]); err == nil && l < MaxLevels {
+						level = l
+					}
 				}
 			}
 			if level >= len(db.levels) {
@@ -402,7 +413,11 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	}
 
 	// Start background compaction
-	go db.compactionLoop()
+	db.compactionWG.Add(1)
+	go func() {
+		defer db.compactionWG.Done()
+		db.compactionLoop()
+	}()
 
 	return db, nil
 }
@@ -697,6 +712,21 @@ func (db *DB) get(key []byte) ([]byte, error) {
 		}
 		return value, nil
 	}
+	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
+		if entry := db.flushingMemTables[i].Get(key); entry != nil {
+			if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
+				return nil, fmt.Errorf("key not found")
+			}
+			if entry.Deleted {
+				return nil, fmt.Errorf("key not found")
+			}
+			value := entry.Value
+			if db.cache != nil {
+				db.cache.Put(keyStr, append([]byte{}, value...))
+			}
+			return value, nil
+		}
+	}
 
 	// Check SSTables by level
 	for level := 0; level < len(db.levels); level++ {
@@ -740,33 +770,42 @@ func (db *DB) flushMemTable() error {
 	db.flushMu.Lock()
 	defer db.flushMu.Unlock()
 
-	// Prevent concurrent flushes
 	if !db.flushing.CompareAndSwap(false, true) {
-		return nil // Already flushing
+		return nil
 	}
 	defer db.flushing.Store(false)
 
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	for {
+		flushed, err := db.flushMemTableOnce()
+		if err != nil {
+			return err
+		}
+		if !flushed || db.memTable.Size() <= db.memTableSize {
+			return nil
+		}
+	}
+}
 
-	// Nil check
+func (db *DB) flushMemTableOnce() (bool, error) {
+	db.mutex.Lock()
 	if db.memTable == nil {
-		return fmt.Errorf("memTable is not initialized")
+		db.mutex.Unlock()
+		return false, fmt.Errorf("memTable is not initialized")
 	}
 
-	// Create new memtable
 	oldMemTable := db.memTable
 	db.memTable = NewMemTable()
+	db.flushingMemTables = append(db.flushingMemTables, oldMemTable)
 
-	// Collect all entries
 	var entries []*Entry
 	oldMemTable.entries.Range(func(key, value any) bool {
 		entries = append(entries, value.(*Entry))
 		return true
 	})
+	db.mutex.Unlock()
 
 	if len(entries) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Sort entries by key
@@ -778,28 +817,50 @@ func (db *DB) flushMemTable() error {
 	level := 0
 	sstPath := filepath.Join(db.path, fmt.Sprintf("sst_L%d_%d.db", level, time.Now().UnixNano()))
 	if err := writeFlushCheckpoint(db.path, filepath.Base(sstPath)); err != nil {
-		return err
+		return false, err
 	}
 	sst, err := NewSSTable(sstPath, entries, db.crypto)
 	if err != nil {
-		return err
+		db.mutex.Lock()
+		oldMemTable.entries.Range(func(key, value any) bool {
+			db.memTable.entries.Store(key, value)
+			return true
+		})
+		db.removeFlushingMemTableLocked(oldMemTable)
+		db.mutex.Unlock()
+		return false, err
 	}
 
+	db.mutex.Lock()
 	db.levels[level] = append(db.levels[level], sst)
+	db.removeFlushingMemTableLocked(oldMemTable)
+	db.mutex.Unlock()
 
 	// Truncate WAL after successfully flushing memtable to SSTable
 	if db.wal != nil {
 		if err := db.wal.Truncate(); err != nil {
 			log.Printf("velocity: WAL truncation failed: %v", err)
-			return err
+			return false, err
 		}
 	}
 	if err := removeFlushCheckpoint(db.path); err != nil {
 		log.Printf("velocity: flush checkpoint cleanup failed: %v", err)
-		return err
+		return false, err
 	}
 
-	return nil
+	return true, nil
+}
+
+func (db *DB) removeFlushingMemTableLocked(mt *MemTable) {
+	for i, flushing := range db.flushingMemTables {
+		if flushing != mt {
+			continue
+		}
+		copy(db.flushingMemTables[i:], db.flushingMemTables[i+1:])
+		db.flushingMemTables[len(db.flushingMemTables)-1] = nil
+		db.flushingMemTables = db.flushingMemTables[:len(db.flushingMemTables)-1]
+		return
+	}
 }
 
 func (db *DB) Close() error {
@@ -815,9 +876,10 @@ func (db *DB) Close() error {
 	if db.shutdownCh != nil {
 		close(db.shutdownCh)
 	}
+	db.compactionWG.Wait()
 
 	// Flush memtable to ensure all data is persisted
-	if db.wal != nil || db.disableWAL {
+	if db.disableWAL || (db.wal != nil && !db.skipCloseFlush) {
 		if err := db.flushMemTable(); err != nil {
 			log.Printf("velocity: memtable flush failed during close: %v", err)
 		}
@@ -1511,17 +1573,12 @@ func (db *DB) compactLevel(level int) {
 			seen[keyStr] = entry
 		}
 	}
-	// Filter out tombstone entries (deleted entries) and expired entries during compaction
-	// Tombstones should not be persisted beyond compaction
+	// Filter out expired entries during compaction. Preserve tombstones so
+	// deletes cannot resurrect older values that live in lower levels.
 	// Entries with ExpiresAt=0 never expire
 	now := uint64(time.Now().UnixNano())
-	deletedCount := 0
 	expiredCount := 0
 	for _, entry := range seen {
-		if entry.Deleted {
-			deletedCount++
-			continue // Skip deleted entries
-		}
 		if entry.ExpiresAt > 0 && entry.ExpiresAt < now {
 			expiredCount++
 			continue // Skip expired entries

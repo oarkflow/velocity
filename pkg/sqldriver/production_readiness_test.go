@@ -1,7 +1,9 @@
 package sqldriver
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -249,6 +251,182 @@ func TestSQLDriver_ProductionTransactionReadYourWritesByPrimaryKey(t *testing.T)
 	}
 	if name != "Alice" {
 		t.Fatalf("unexpected committed name: %q", name)
+	}
+}
+
+func TestSQLDriver_ProductionLargeBulkClearsStaleIndexesAndRemainsQueryable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large_bulk_stale_index")
+	DSNConfigs[path] = velocity.Config{
+		Path:              path,
+		DisableEncryption: true,
+		SearchSchemas: map[string]*velocity.SearchSchema{
+			"events": {
+				Fields: []velocity.SearchSchemaField{
+					{Name: "id", HashSearch: true, ValueIndex: true},
+					{Name: "kind", HashSearch: true},
+				},
+			},
+		},
+	}
+	t.Cleanup(func() { delete(DSNConfigs, path) })
+
+	db, err := sql.Open(DriverName, path)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE events (id BIGINT PRIMARY KEY, kind TEXT, note TEXT)`); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO events (id, kind, note) VALUES (1, 'old', 'before bulk')`); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn failed: %v", err)
+	}
+	err = conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		inserted, err := c.BulkInsertFuncBatchSize("events", []string{"id", "kind", "note"}, 10_001, 2_000, func(i int, dst []any) {
+			id := i + 2
+			dst[0] = id
+			if id%2 == 0 {
+				dst[1] = "even"
+			} else {
+				dst[1] = "odd"
+			}
+			dst[2] = fmt.Sprintf("event-%d", id)
+		})
+		if err != nil {
+			return err
+		}
+		if inserted != 10_001 {
+			return fmt.Errorf("inserted %d, want 10001", inserted)
+		}
+		return nil
+	})
+	_ = conn.Close()
+	if err != nil {
+		t.Fatalf("bulk insert failed: %v", err)
+	}
+
+	var evenCount int
+	if err := db.QueryRow(`SELECT count(*) FROM events WHERE kind = 'even'`).Scan(&evenCount); err != nil {
+		t.Fatalf("count even failed: %v", err)
+	}
+	if evenCount != 5001 {
+		t.Fatalf("even count = %d, want 5001", evenCount)
+	}
+	var oldCount int
+	if err := db.QueryRow(`SELECT count(*) FROM events WHERE kind = 'old'`).Scan(&oldCount); err != nil {
+		t.Fatalf("count old failed: %v", err)
+	}
+	if oldCount != 1 {
+		t.Fatalf("old count = %d, want 1", oldCount)
+	}
+}
+
+func TestSQLDriver_ProductionRepeatedCloseReopenAndTransactions(t *testing.T) {
+	db, path := openProductionTestDB(t, "repeated_close_reopen")
+	if _, err := db.Exec(`CREATE TABLE accounts (id BIGINT PRIMARY KEY, email TEXT UNIQUE, balance BIGINT)`); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO accounts (id, email, balance) VALUES (1, 'a@example.test', 10)`); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("second close failed: %v", err)
+	}
+
+	DSNConfigs[path] = velocity.Config{Path: path, DisableEncryption: true}
+	reopened, err := sql.Open(DriverName, path)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	tx, err := reopened.Begin()
+	if err != nil {
+		t.Fatalf("begin failed: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE accounts SET balance = balance + 5 WHERE id = 1`); err != nil {
+		t.Fatalf("tx update failed: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO accounts (id, email, balance) VALUES (2, 'b@example.test', 20)`); err != nil {
+		t.Fatalf("tx insert failed: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
+	var balance int
+	if err := reopened.QueryRow(`SELECT balance FROM accounts WHERE id = 1`).Scan(&balance); err != nil {
+		t.Fatalf("read after rollback failed: %v", err)
+	}
+	if balance != 10 {
+		t.Fatalf("rollback balance = %d, want 10", balance)
+	}
+
+	tx, err = reopened.Begin()
+	if err != nil {
+		t.Fatalf("second begin failed: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE accounts SET balance = balance + 5 WHERE id = 1`); err != nil {
+		t.Fatalf("second tx update failed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit failed: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close reopened failed: %v", err)
+	}
+
+	DSNConfigs[path] = velocity.Config{Path: path, DisableEncryption: true}
+	again, err := sql.Open(DriverName, path)
+	if err != nil {
+		t.Fatalf("second reopen failed: %v", err)
+	}
+	defer again.Close()
+	if err := again.QueryRow(`SELECT balance FROM accounts WHERE id = 1`).Scan(&balance); err != nil {
+		t.Fatalf("read after second reopen failed: %v", err)
+	}
+	if balance != 15 {
+		t.Fatalf("committed balance = %d, want 15", balance)
+	}
+}
+
+func TestSQLDriver_ProductionSkipCloseFlushReplaysWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "skip_close_flush")
+	DSNConfigs[path] = velocity.Config{Path: path, DisableEncryption: true, SkipCloseFlush: true}
+	t.Cleanup(func() { delete(DSNConfigs, path) })
+
+	db, err := sql.Open(DriverName, path)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE items (id BIGINT PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO items (id, name) VALUES (1, 'alpha')`); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	DSNConfigs[path] = velocity.Config{Path: path, DisableEncryption: true}
+	reopened, err := sql.Open(DriverName, path)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	defer reopened.Close()
+	var name string
+	if err := reopened.QueryRow(`SELECT name FROM items WHERE id = 1`).Scan(&name); err != nil {
+		t.Fatalf("WAL replay read failed: %v", err)
+	}
+	if name != "alpha" {
+		t.Fatalf("name = %q, want alpha", name)
 	}
 }
 

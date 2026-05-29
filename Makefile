@@ -10,7 +10,10 @@ TMP_HOME ?= $(ROOT_DIR)/.tmp_make_home
 TMP_GOCACHE ?= $(ROOT_DIR)/.tmp_make_gocache
 TMP_SANDBOX_HOME ?= $(ROOT_DIR)/.tmp_make_sandbox_home
 
-.PHONY: help build build-secretr build-velocity test test-cli test-cli-commands test-go test-production test-destructive test-soak test-all sandbox-smoke clean
+VELOCITY_SQL_MILLION_ROWS ?= 1000000
+VELOCITY_SQL_MILLION_CHUNK ?= 50000
+
+.PHONY: help build build-secretr build-velocity test test-cli test-cli-commands test-go test-production test-destructive test-soak test-million-sql run-sql-million-example test-all sandbox-smoke clean
 
 help:
 	@echo "Targets:"
@@ -24,6 +27,8 @@ help:
 	@echo "  make test-production - Run Velocity production readiness tests"
 	@echo "  make test-destructive - Run destructive crash/corruption tests"
 	@echo "  make test-soak      - Run longer destructive crash/corruption soak tests"
+	@echo "  make test-million-sql - Run the opt-in 1M-row SQL workload"
+	@echo "  make run-sql-million-example - Run the 1M-row SQL example"
 	@echo "  make test-all       - Run CLI and Go tests"
 	@echo "  make sandbox-smoke  - Run sandbox exec smoke checks"
 	@echo "  make clean          - Remove temporary test/build artifacts"
@@ -84,6 +89,12 @@ test-destructive:
 
 test-soak:
 	VELOCITY_DESTRUCTIVE_SOAK_ITERS=800 go test -tags destructive -run 'TestDestructive|TestProduction' ./...
+
+test-million-sql:
+	VELOCITY_SQL_MILLION_ROWS="$(VELOCITY_SQL_MILLION_ROWS)" VELOCITY_SQL_MILLION_CHUNK="$(VELOCITY_SQL_MILLION_CHUNK)" go test -tags million ./pkg/sqldriver -run TestSQLDriver_MillionRowComplexWorkload -count=1 -v
+
+run-sql-million-example:
+	cd examples && VELOCITY_SQL_MILLION_ROWS="$(VELOCITY_SQL_MILLION_ROWS)" VELOCITY_SQL_MILLION_CHUNK="$(VELOCITY_SQL_MILLION_CHUNK)" go run ./sql_million_demo
 
 test-all: test-cli-commands test-cli test-go
 

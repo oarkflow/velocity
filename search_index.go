@@ -44,6 +44,11 @@ type SearchSchema struct {
 	Fields []SearchSchemaField
 }
 
+func isHighCardinalityIdentifierField(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == "id" || strings.HasSuffix(name, "_id")
+}
+
 // SearchFilter defines a filter for search queries.
 // Op supports: "=", "==", "!=", ">", ">=", "<", "<=".
 // If HashOnly is true, equality uses the hash index when available.
@@ -70,8 +75,9 @@ type SearchResult struct {
 
 // RebuildOptions controls bulk index rebuild.
 type RebuildOptions struct {
-	BatchSize int
-	NoWAL     bool // skip WAL writes for index entries during rebuild
+	BatchSize           int
+	NoWAL               bool // skip WAL writes for index entries during rebuild
+	SkipHighCardinality bool // avoid rebuilding identifier-like secondary postings
 }
 
 type indexMeta struct {
@@ -161,12 +167,16 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 
 	batchSize := 2000
 	noWAL := true // Always skip WAL for index rebuild - index is rebuildable
+	skipHighCardinality := false
 	if opts != nil && opts.BatchSize > 0 {
 		batchSize = opts.BatchSize
 	}
+	if opts != nil && opts.SkipHighCardinality {
+		skipHighCardinality = true
+	}
 
 	// Clear existing postings for this prefix
-	if err := db.clearIndexForPrefix(prefix, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL}); err != nil {
+	if err := db.clearIndexForPrefix(prefix, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL, SkipHighCardinality: skipHighCardinality}); err != nil {
 		return err
 	}
 
@@ -176,6 +186,7 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 		value []byte
 	}
 	var pairs []kvPair
+	seen := make(map[string]bool)
 
 	db.mutex.RLock()
 	// Scan memtable
@@ -197,39 +208,59 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 			key:   append([]byte{}, e.Key...),
 			value: append([]byte{}, e.Value...),
 		})
+		seen[string(e.Key)] = true
 		return true
 	})
-
-	// Scan SSTables (collect keys not already in memtable)
-	seen := make(map[string]bool, len(pairs))
-	for _, p := range pairs {
-		seen[string(p.key)] = true
+	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
+		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
+			e := v.(*Entry)
+			if e.Deleted || isIndexKey(e.Key) {
+				return true
+			}
+			if prefix != "" && !prefixMatch(string(e.Key), prefix) {
+				return true
+			}
+			if e.ExpiresAt != 0 && time.Now().UnixNano() > int64(e.ExpiresAt) {
+				return true
+			}
+			keyStr := string(e.Key)
+			if seen[keyStr] {
+				return true
+			}
+			seen[keyStr] = true
+			pairs = append(pairs, kvPair{
+				key:   append([]byte{}, e.Key...),
+				value: append([]byte{}, e.Value...),
+			})
+			return true
+		})
 	}
 
+	// Scan SSTables (collect keys not already in newer memtables/SSTables)
 	for _, level := range db.levels {
-		for _, sst := range level {
+		for sstIdx := len(level) - 1; sstIdx >= 0; sstIdx-- {
+			sst := level[sstIdx]
 			idxPos := uint32(0)
 			for i := 0; i < sst.entryCount; i++ {
-				entry, err := sst.readIndexEntryAt(idxPos)
+				indexEntry, err := sst.readIndexEntryAt(idxPos)
 				if err != nil {
 					break
 				}
-				keyStr := string(entry.Key)
-				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				keyStr := string(indexEntry.Key)
+				idxEntrySize := 4 + len(indexEntry.Key) + 8 + 4
 				idxPos += uint32(idxEntrySize)
 
 				if seen[keyStr] {
 					continue
 				}
-				if isIndexKey(entry.Key) {
+				if isIndexKey(indexEntry.Key) {
 					continue
 				}
 				if prefix != "" && !prefixMatch(keyStr, prefix) {
 					continue
 				}
 
-				// Read value from SSTable
-				val, err := sst.Get(entry.Key)
+				val, err := sst.readEntryAt(indexEntry.Offset, indexEntry.Size)
 				if err != nil || val == nil || val.Deleted {
 					continue
 				}
@@ -239,7 +270,7 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 
 				seen[keyStr] = true
 				pairs = append(pairs, kvPair{
-					key:   append([]byte{}, entry.Key...),
+					key:   append([]byte{}, indexEntry.Key...),
 					value: append([]byte{}, val.Value...),
 				})
 			}
@@ -265,12 +296,18 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 				valuePostings: valuePostingsForSchema(values, schema),
 			})
 		}
-		if err := db.applyIndexBatch(prefix, batch, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL}); err != nil {
+		if err := db.applyIndexBatch(prefix, batch, &RebuildOptions{BatchSize: batchSize, NoWAL: noWAL, SkipHighCardinality: skipHighCardinality}); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// ClearIndexForPrefix removes derived search postings for prefix. Primary data
+// remains untouched; queries fall back to scans until the index is rebuilt.
+func (db *DB) ClearIndexForPrefix(prefix string) error {
+	return db.clearIndexForPrefix(prefix, &RebuildOptions{NoWAL: true})
 }
 
 type indexWorkItem struct {
@@ -288,6 +325,8 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 	}
 	additions := make(map[string][]uint64)
 	noWAL := opts != nil && opts.NoWAL
+	skipHighCardinality := opts != nil && opts.SkipHighCardinality
+	nextDocID, nextDocIDLoaded := uint64(0), false
 
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -299,12 +338,23 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 		}
 		if !exists {
 			if noWAL {
-				docID, err = db.allocateDocIDLockedNoWAL(item.key)
+				if !nextDocIDLoaded {
+					nextDocID, err = db.nextDocIDLocked()
+					if err != nil {
+						return err
+					}
+					nextDocIDLoaded = true
+				}
+				docID = nextDocID
+				nextDocID++
+				if err := db.bindDocIDLockedNoWAL(item.key, docID); err != nil {
+					return err
+				}
 			} else {
 				docID, err = db.allocateDocIDLocked(item.key)
-			}
-			if err != nil {
-				return err
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -321,20 +371,33 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 			additions[k] = append(additions[k], docID)
 		}
 		for field, hash := range item.hashes {
-			db.rememberHashIndexPostingLocked(prefix, field, hash, docID)
-			if !db.disableIndexPersistence {
+			if skipHighCardinality && isHighCardinalityIdentifierField(field) {
+				db.rememberHashIndexLocked(prefix, field, hash)
+			} else {
+				db.rememberHashIndexPostingLocked(prefix, field, hash, docID)
+			}
+			if !db.disableIndexPersistence && !(skipHighCardinality && isHighCardinalityIdentifierField(field)) {
 				k := string(indexHashKey(prefix, field, hash))
 				additions[k] = append(additions[k], docID)
 			}
 		}
 		if db.canUsePlainValueIndexLocked() {
 			for field, value := range item.valuePostings {
-				db.rememberValueIndexPostingLocked(prefix, field, value, docID)
-				if !db.disableIndexPersistence {
+				if skipHighCardinality && isHighCardinalityIdentifierField(field) {
+					db.rememberValueIndexLocked(prefix, field, value)
+				} else {
+					db.rememberValueIndexPostingLocked(prefix, field, value, docID)
+				}
+				if !db.disableIndexPersistence && !(skipHighCardinality && isHighCardinalityIdentifierField(field)) {
 					k := string(indexValueKey(prefix, field, value))
 					additions[k] = append(additions[k], docID)
 				}
 			}
+		}
+	}
+	if nextDocIDLoaded {
+		if err := db.storeNextDocIDLockedNoWAL(nextDocID); err != nil {
+			return err
 		}
 	}
 
@@ -364,6 +427,27 @@ func (db *DB) clearIndexForPrefix(prefix string, opts *RebuildOptions) error {
 	defer db.mutex.Unlock()
 
 	tag := indexPrefixTag(prefix)
+	inMemoryPrefix := tag + ":"
+	for k := range db.hashIndexValues {
+		if strings.HasPrefix(k, inMemoryPrefix) {
+			delete(db.hashIndexValues, k)
+		}
+	}
+	for k := range db.hashIndexPostings {
+		if strings.HasPrefix(k, inMemoryPrefix) {
+			delete(db.hashIndexPostings, k)
+		}
+	}
+	for k := range db.valueIndexValues {
+		if strings.HasPrefix(k, inMemoryPrefix) {
+			delete(db.valueIndexValues, k)
+		}
+	}
+	for k := range db.valueIndexPostings {
+		if strings.HasPrefix(k, inMemoryPrefix) {
+			delete(db.valueIndexPostings, k)
+		}
+	}
 	terms, _ := db.keysLocked(indexTermPrefix + tag + ":*")
 	hashes, _ := db.keysLocked(indexHashPrefix + tag + ":*")
 	values, _ := db.keysLocked(indexValuePrefix + tag + ":*")
@@ -786,11 +870,7 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 	}
 
 	if !usedIndex {
-		results, err := db.scanSearchLocked(q)
-		if err != nil {
-			return 0, err
-		}
-		return len(results), nil
+		return db.scanSearchCountLocked(q)
 	}
 
 	count := 0
@@ -991,7 +1071,11 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 	seen := make(map[string]struct{})
 	now := time.Now().UnixNano()
 
-	addCandidate := func(key, value []byte) bool {
+	processEntry := func(entry *Entry) bool {
+		if entry == nil {
+			return false
+		}
+		key := entry.Key
 		if bytes.HasPrefix(key, []byte(indexPrefix)) {
 			return false
 		}
@@ -1003,6 +1087,13 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 			return false
 		}
 		seen[keyStr] = struct{}{}
+		if entry.Deleted {
+			return false
+		}
+		if entry.ExpiresAt != 0 && now > int64(entry.ExpiresAt) {
+			return false
+		}
+		value := entry.Value
 		if !matchesQuery(value, q) {
 			return false
 		}
@@ -1016,44 +1107,117 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 	// Scan memtable first: most recent values take precedence.
 	db.memTable.entries.Range(func(k, v any) bool {
 		e := v.(*Entry)
-		if e.Deleted {
-			return true
-		}
-		if e.ExpiresAt != 0 && now > int64(e.ExpiresAt) {
-			return true
-		}
-		return !addCandidate(e.Key, e.Value)
+		return !processEntry(e)
 	})
+	for i := len(db.flushingMemTables) - 1; i >= 0 && len(results) < q.Limit; i-- {
+		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
+			return !processEntry(v.(*Entry))
+		})
+	}
 	if len(results) >= q.Limit {
 		return results, nil
 	}
 
-	// Scan SSTables without materializing/sorting all keys.
+	// Scan SSTables newest-to-oldest without materializing/sorting all keys.
 	for _, level := range db.levels {
-		for _, sst := range level {
+		for sstIdx := len(level) - 1; sstIdx >= 0; sstIdx-- {
+			sst := level[sstIdx]
 			idxPos := uint32(0)
 			for i := 0; i < sst.entryCount; i++ {
-				entry, err := sst.readIndexEntryAt(idxPos)
+				indexEntry, err := sst.readIndexEntryAt(idxPos)
 				if err != nil {
 					break
 				}
-				idxEntrySize := 4 + len(entry.Key) + 8 + 4
+				idxEntrySize := 4 + len(indexEntry.Key) + 8 + 4
 				idxPos += uint32(idxEntrySize)
 
-				if entryIsDeletedInMemTable(db.memTable, entry.Key) {
+				if _, exists := seen[string(indexEntry.Key)]; exists {
 					continue
 				}
-				value, err := db.get(entry.Key)
+				entry, err := sst.readEntryAt(indexEntry.Offset, indexEntry.Size)
 				if err != nil {
 					continue
 				}
-				if addCandidate(entry.Key, value) {
+				if processEntry(entry) {
 					return results, nil
 				}
 			}
 		}
 	}
 	return results, nil
+}
+
+func (db *DB) scanSearchCountLocked(q SearchQuery) (int, error) {
+	seen := make(map[string]struct{})
+	now := time.Now().UnixNano()
+	count := 0
+
+	processEntry := func(entry *Entry) bool {
+		if entry == nil {
+			return false
+		}
+		key := entry.Key
+		if bytes.HasPrefix(key, []byte(indexPrefix)) {
+			return false
+		}
+		keyStr := string(key)
+		if q.Prefix != "" && !prefixMatch(keyStr, q.Prefix) {
+			return false
+		}
+		if _, exists := seen[keyStr]; exists {
+			return false
+		}
+		seen[keyStr] = struct{}{}
+		if entry.Deleted {
+			return false
+		}
+		if entry.ExpiresAt != 0 && now > int64(entry.ExpiresAt) {
+			return false
+		}
+		if !matchesQuery(entry.Value, q) {
+			return false
+		}
+		count++
+		return count >= q.Limit
+	}
+
+	db.memTable.entries.Range(func(k, v any) bool {
+		return !processEntry(v.(*Entry))
+	})
+	for i := len(db.flushingMemTables) - 1; i >= 0 && count < q.Limit; i-- {
+		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
+			return !processEntry(v.(*Entry))
+		})
+	}
+	if count >= q.Limit {
+		return count, nil
+	}
+
+	for _, level := range db.levels {
+		for sstIdx := len(level) - 1; sstIdx >= 0; sstIdx-- {
+			sst := level[sstIdx]
+			idxPos := uint32(0)
+			for i := 0; i < sst.entryCount; i++ {
+				indexEntry, err := sst.readIndexEntryAt(idxPos)
+				if err != nil {
+					break
+				}
+				idxEntrySize := 4 + len(indexEntry.Key) + 8 + 4
+				idxPos += uint32(idxEntrySize)
+				if _, exists := seen[string(indexEntry.Key)]; exists {
+					continue
+				}
+				entry, err := sst.readEntryAt(indexEntry.Offset, indexEntry.Size)
+				if err != nil {
+					continue
+				}
+				if processEntry(entry) {
+					return count, nil
+				}
+			}
+		}
+	}
+	return count, nil
 }
 
 func matchesQuery(value []byte, q SearchQuery) bool {
@@ -1834,6 +1998,14 @@ func (db *DB) storeNextDocIDLocked(nextID uint64) error {
 	return db.putIndexLocked([]byte(indexNextIDKey), encodeUint64(nextID))
 }
 
+func (db *DB) storeNextDocIDLockedNoWAL(nextID uint64) error {
+	db.nextDocID = nextID
+	if db.disableIndexPersistence {
+		return nil
+	}
+	return db.putIndexNoWALLocked([]byte(indexNextIDKey), encodeUint64(nextID))
+}
+
 func (db *DB) bindDocIDLocked(key []byte, docID uint64) error {
 	if db.docIDByKey == nil {
 		db.docIDByKey = make(map[string]uint64)
@@ -1850,6 +2022,24 @@ func (db *DB) bindDocIDLocked(key []byte, docID uint64) error {
 		return err
 	}
 	return db.putIndexLocked(indexDocKey(docID), key)
+}
+
+func (db *DB) bindDocIDLockedNoWAL(key []byte, docID uint64) error {
+	if db.docIDByKey == nil {
+		db.docIDByKey = make(map[string]uint64)
+	}
+	if db.docKeyByID == nil {
+		db.docKeyByID = make(map[uint64][]byte)
+	}
+	db.docIDByKey[string(key)] = docID
+	db.docKeyByID[docID] = append([]byte(nil), key...)
+	if db.disableIndexPersistence {
+		return nil
+	}
+	if err := db.putIndexNoWALLocked(indexDocIDKey(key), encodeUint64(docID)); err != nil {
+		return err
+	}
+	return db.putIndexNoWALLocked(indexDocKey(docID), key)
 }
 
 func (db *DB) getDocIDLocked(key []byte) (uint64, bool, error) {

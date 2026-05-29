@@ -41,6 +41,14 @@ type bulkInsertPlan struct {
 	idIndex     int
 }
 
+type rawInsertConstraintPlan struct {
+	table                 string
+	meta                  tableSchemaMeta
+	found                 bool
+	columnIndexes         map[string]int
+	skipPrimaryKeyStorage bool
+}
+
 // Prepare returns a prepared statement, bound to this connection.
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 	return c.PrepareContext(context.Background(), query)
@@ -226,10 +234,24 @@ func (c *Conn) BulkInsert(table string, columns []string, rows [][]any) (int64, 
 // BulkInsertFunc is the allocation-conscious form of BulkInsert. fill receives
 // a reusable row buffer sized to len(columns).
 func (c *Conn) BulkInsertFunc(table string, columns []string, count int, fill func(i int, dst []any)) (int64, error) {
+	return c.BulkInsertFuncBatchSize(table, columns, count, 50_000, fill)
+}
+
+// BulkInsertFuncBatchSize is BulkInsertFunc with an explicit storage flush size.
+// Constraint checks are planned once for the whole logical bulk insert, so an
+// initially empty primary-key table can still be loaded in bounded write batches.
+func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int, batchSize int, fill func(i int, dst []any)) (int64, error) {
 	if table == "" || len(columns) == 0 || count <= 0 {
 		return 0, nil
 	}
+	if batchSize <= 0 || batchSize > count {
+		batchSize = count
+	}
 	plan := c.bulkInsertPlan(table, columns)
+	constraints, err := c.rawInsertConstraintPlan(table, columns)
+	if err != nil {
+		return 0, err
+	}
 
 	inserted := int64(0)
 	row := make([]any, len(columns))
@@ -238,7 +260,7 @@ func (c *Conn) BulkInsertFunc(table string, columns []string, count int, fill fu
 		for rowIdx := 0; rowIdx < count; rowIdx++ {
 			fill(rowIdx, row)
 			key, payload, fields := plan.encodeRow(row, rowIdx)
-			if err := c.checkRawInsertConstraintsWithSeen(table, columns, row, key, batchConstraintKeys); err != nil {
+			if err := c.checkRawInsertConstraintPlan(constraints, row, key, batchConstraintKeys); err != nil {
 				return err
 			}
 			if err := put(key, payload, fields); err != nil {
@@ -253,7 +275,16 @@ func (c *Conn) BulkInsertFunc(table string, columns []string, count int, fill fu
 		err := write(c.tx.PutWithIndexFieldPairsUnsafe)
 		return inserted, err
 	}
-	bw := c.db.NewBatchWriter(count)
+	deferIndex := count >= 10_000
+	if deferIndex {
+		if err := c.db.ClearIndexForPrefix(table); err != nil {
+			return inserted, err
+		}
+	}
+	bw := c.db.NewBatchWriter(batchSize)
+	if deferIndex {
+		bw.DisableIndexMaintenance()
+	}
 	if err := write(bw.PutWithIndexFieldPairsUnsafe); err != nil {
 		return inserted, err
 	}
@@ -358,6 +389,48 @@ func (c *Conn) checkRawInsertConstraintsWithSeen(table string, columns []string,
 	if err != nil || !found {
 		return err
 	}
+	plan := rawInsertConstraintPlan{
+		table:         table,
+		meta:          meta,
+		found:         true,
+		columnIndexes: make(map[string]int, len(columns)),
+	}
+	for i, col := range columns {
+		plan.columnIndexes[col] = i
+	}
+	return c.checkRawInsertConstraintPlan(plan, values, key, seen)
+}
+
+func (c *Conn) rawInsertConstraintPlan(table string, columns []string) (rawInsertConstraintPlan, error) {
+	meta, found, err := c.loadSchemaMeta(table)
+	if err != nil || !found {
+		return rawInsertConstraintPlan{}, err
+	}
+	plan := rawInsertConstraintPlan{
+		table:         table,
+		meta:          meta,
+		found:         true,
+		columnIndexes: make(map[string]int, len(columns)),
+	}
+	for i, col := range columns {
+		plan.columnIndexes[col] = i
+	}
+	if meta.PrimaryKey != "" && c.tx == nil {
+		count, err := c.db.SearchCount(velocity.SearchQuery{Prefix: table, Limit: 1})
+		if err != nil {
+			return rawInsertConstraintPlan{}, err
+		}
+		plan.skipPrimaryKeyStorage = count == 0
+	}
+	return plan, nil
+}
+
+func (c *Conn) checkRawInsertConstraintPlan(plan rawInsertConstraintPlan, values []any, key []byte, seen map[string]struct{}) error {
+	if !plan.found {
+		return nil
+	}
+	table := plan.table
+	meta := plan.meta
 	hasSeen := func(key string) bool {
 		if seen != nil {
 			if _, exists := seen[key]; exists {
@@ -379,19 +452,21 @@ func (c *Conn) checkRawInsertConstraintsWithSeen(table string, columns []string,
 			c.txConstraintKeys[key] = struct{}{}
 		}
 	}
-	row := make(map[string]any, len(columns))
-	for i, col := range columns {
-		if i < len(values) {
-			row[col] = values[i]
+	valueFor := func(col string) (any, bool) {
+		idx, ok := plan.columnIndexes[col]
+		if !ok || idx >= len(values) {
+			return nil, false
 		}
+		return values[idx], true
 	}
 	for _, col := range meta.NotNull {
-		if row[col] == nil {
+		value, ok := valueFor(col)
+		if !ok || value == nil {
 			return fmt.Errorf("velocity driver: column %s.%s cannot be NULL", table, col)
 		}
 	}
 	if meta.PrimaryKey != "" {
-		if value, ok := row[meta.PrimaryKey]; ok {
+		if value, ok := valueFor(meta.PrimaryKey); ok {
 			if value == nil {
 				return fmt.Errorf("velocity driver: primary key %s.%s cannot be NULL", table, meta.PrimaryKey)
 			}
@@ -399,14 +474,19 @@ func (c *Conn) checkRawInsertConstraintsWithSeen(table string, columns []string,
 			if hasSeen(txKey) {
 				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
 			}
-			if _, err := c.db.Get(key); err == nil {
-				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+			if !plan.skipPrimaryKeyStorage {
+				if _, err := c.db.Get(key); err == nil {
+					return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+				}
 			}
 			markSeen(txKey)
 		}
 	}
 	for _, col := range meta.Unique {
-		value, ok := row[col]
+		if col == meta.PrimaryKey {
+			continue
+		}
+		value, ok := valueFor(col)
 		if !ok {
 			continue
 		}

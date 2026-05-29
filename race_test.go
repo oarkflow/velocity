@@ -14,8 +14,13 @@ func TestIncrDecrRaceCondition(t *testing.T) {
 	os.RemoveAll(tempDir)
 	defer os.RemoveAll(tempDir)
 
-	// Create a new database instance
-	db, err := New(tempDir)
+	// These tests validate atomic counter correctness under contention. Keep WAL
+	// enabled but buffered so the result reflects lock correctness, not fsync cost.
+	db, err := NewWithConfig(Config{
+		Path:              tempDir,
+		DisableEncryption: true,
+		DisableFsync:      true,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -218,7 +223,11 @@ func TestIncrDecrErrorHandling(t *testing.T) {
 	os.RemoveAll(tempDir)
 	defer os.RemoveAll(tempDir)
 
-	db, err := New(tempDir)
+	db, err := NewWithConfig(Config{
+		Path:              tempDir,
+		DisableEncryption: true,
+		DisableFsync:      true,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -262,7 +271,11 @@ func BenchmarkIncrConcurrent(b *testing.B) {
 	os.RemoveAll(tempDir)
 	defer os.RemoveAll(tempDir)
 
-	db, err := New(tempDir)
+	db, err := NewWithConfig(Config{
+		Path:              tempDir,
+		DisableEncryption: true,
+		DisableFsync:      true,
+	})
 	if err != nil {
 		b.Fatalf("Failed to create database: %v", err)
 	}

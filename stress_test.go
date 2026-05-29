@@ -15,7 +15,11 @@ func TestRaceConditionStress(t *testing.T) {
 	os.RemoveAll(tempDir)
 	defer os.RemoveAll(tempDir)
 
-	db, err := New(tempDir)
+	db, err := NewWithConfig(Config{
+		Path:              tempDir,
+		DisableEncryption: true,
+		DisableFsync:      true,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -79,7 +83,11 @@ func TestRealWorldScenario(t *testing.T) {
 	os.RemoveAll(tempDir)
 	defer os.RemoveAll(tempDir)
 
-	db, err := New(tempDir)
+	db, err := NewWithConfig(Config{
+		Path:              tempDir,
+		DisableEncryption: true,
+		DisableFsync:      true,
+	})
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}

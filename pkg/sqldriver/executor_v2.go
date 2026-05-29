@@ -875,6 +875,11 @@ func (e *ExecutorV2) tryFastPrimaryKeySelect(sel *ast.SelectStmt, args []driver.
 	if tableName == "" {
 		return nil, false, nil
 	}
+	if _, found, err := e.loadViewMeta(tableName); err != nil {
+		return nil, true, err
+	} else if found {
+		return nil, false, nil
+	}
 	columns := explicitColumnNames(sel.Columns)
 	if len(columns) == 0 {
 		return nil, false, nil
@@ -1236,6 +1241,9 @@ func (e *ExecutorV2) extractFilters(expr ast.Expr, args []driver.NamedValue) []v
 			if err != nil {
 				return nil
 			}
+			if value == nil {
+				return nil
+			}
 			op := tokenToFilterOp(v.Op)
 			if op == "" {
 				return nil
@@ -1363,6 +1371,18 @@ func (e *ExecutorV2) tryFastCountSelect(sel *ast.SelectStmt, args []driver.Named
 	if !ok {
 		return nil, false, nil
 	}
+	tableName := qualifiedIdentToString(tableRef.Name)
+	if tableName == "" {
+		return nil, false, nil
+	}
+	if _, found, err := e.loadViewMeta(tableName); err != nil {
+		return nil, true, err
+	} else if found {
+		return nil, false, nil
+	}
+	if !e.fastCountWhereSupported(sel.Where, args) {
+		return nil, false, nil
+	}
 
 	plan := e.extractSearchPlan(sel.Where, args)
 	if plan.fullText != "" {
@@ -1370,7 +1390,7 @@ func (e *ExecutorV2) tryFastCountSelect(sel *ast.SelectStmt, args []driver.Named
 	}
 	limit := e.extractCount(sel.Limit, args)
 	count, err := e.conn.db.SearchCount(velocity.SearchQuery{
-		Prefix:   qualifiedIdentToString(tableRef.Name),
+		Prefix:   tableName,
 		FullText: plan.fullText,
 		Filters:  plan.filters,
 		Limit:    limit,
@@ -1383,6 +1403,44 @@ func (e *ExecutorV2) tryFastCountSelect(sel *ast.SelectStmt, args []driver.Named
 		columns: []string{columnName},
 		rowMaps: []Row{{columnName: count}},
 	}, true, nil
+}
+
+func (e *ExecutorV2) fastCountWhereSupported(expr ast.Expr, args []driver.NamedValue) bool {
+	if expr == nil {
+		return true
+	}
+	switch v := expr.(type) {
+	case *ast.BinaryExpr:
+		if v.Op == lexer.AND {
+			return e.fastCountWhereSupported(v.Left, args) && e.fastCountWhereSupported(v.Right, args)
+		}
+		if v.Op != lexer.EQ && v.Op != lexer.NEQ && v.Op != lexer.GT && v.Op != lexer.GTE && v.Op != lexer.LT && v.Op != lexer.LTE {
+			return false
+		}
+		if exprColumnName(v.Left) == "" {
+			return false
+		}
+		eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
+		value, err := eval.Eval(v.Right, nil)
+		return err == nil && value != nil
+	case *ast.LikeExpr:
+		if v.Not || v.Escape != nil || exprColumnName(v.Expr) == "" {
+			return false
+		}
+		eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
+		raw, err := eval.Eval(v.Pattern, nil)
+		if err != nil {
+			return false
+		}
+		pattern, ok := raw.(string)
+		if !ok {
+			return false
+		}
+		_, ok = likePatternToFullText(pattern)
+		return ok
+	default:
+		return false
+	}
 }
 
 func countOnlySelectName(cols []ast.SelectColumn) (string, bool) {
