@@ -39,9 +39,12 @@ case "$cmd" in
       compliance)
         ./scripts/compliance_full_flow.sh "$@"
         ;;
+      kg|knowledge-graph)
+        ./scripts/knowledge_graph_demo.sh "$@"
+        ;;
       *)
         echo "Unknown demo command: $subcmd"
-        echo "Use 'velocity demo full' or 'velocity demo compliance'"
+        echo "Use 'velocity demo full', 'velocity demo compliance', or 'velocity demo kg'"
         exit 1
         ;;
     esac
@@ -71,6 +74,7 @@ Commands:
   compliance check --type TYPE [resource flags] --operation read --actor alice
   demo full                    Run the complete feature flow script
   demo compliance              Run the compliance feature flow script
+  demo kg                      Run the knowledge graph demo script
 
 Environment:
   VELOCITY_PATH   Database path (default: ./velocity_data)
@@ -85,6 +89,7 @@ Examples:
   velocity compliance tag --type secret --name api-key --framework GDPR --class confidential --encrypt
   velocity compliance check --type secret --name api-key --operation read --actor alice --encrypted
   velocity demo full
+  velocity demo kg
 EOF
     ;;
   *)

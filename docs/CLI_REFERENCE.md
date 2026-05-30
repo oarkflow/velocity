@@ -109,6 +109,12 @@ Or through the wrapper:
 ./scripts/velocity.sh demo full
 ```
 
+Run only the knowledge graph walkthrough:
+
+```bash
+./scripts/velocity.sh demo kg
+```
+
 Keep its temporary database and generated Go program:
 
 ```bash

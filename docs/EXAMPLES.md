@@ -14,6 +14,12 @@ For an executable end-to-end flow across the shipped CLI, wrapper, embedded Go A
 ./scripts/feature_full_flow.sh
 ```
 
+For a focused knowledge graph walkthrough:
+
+```bash
+./scripts/knowledge_graph_demo.sh
+```
+
 ## Storage And Search
 
 - `examples/main/main.go`: basic embedded usage.
