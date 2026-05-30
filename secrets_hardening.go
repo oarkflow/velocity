@@ -78,6 +78,7 @@ func (db *DB) CreateSecret(ctx context.Context, req SecretRequest) (*SecretRecor
 	if err := db.PutWithTTL([]byte(SecretLatestPrefix+req.Name), []byte(rec.Version), 0); err != nil {
 		return nil, err
 	}
+	db.kgAutoIndexSecretValue(rec, req.Value)
 	return rec, nil
 }
 

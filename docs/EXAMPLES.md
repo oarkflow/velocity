@@ -20,6 +20,8 @@ For a focused knowledge graph walkthrough:
 ./scripts/knowledge_graph_demo.sh
 ```
 
+That script demonstrates explicit KG ingestion, automatic indexing from normal KV, object, secret, SQL, envelope, and entity writes, and query-driven resource graph discovery.
+
 ## Storage And Search
 
 - `examples/main/main.go`: basic embedded usage.
@@ -78,6 +80,7 @@ For a focused knowledge graph walkthrough:
 - `examples/kg_search_demo/main.go`: KG search.
 - `examples/entity_data_demo/main.go`: entity-linked data.
 - `examples/entity_relations_demo/main.go`: entity relations.
+- `scripts/knowledge_graph_demo.sh`: end-to-end KG shell walkthrough, including automatic resource indexing.
 
 ## Backup And Configuration
 

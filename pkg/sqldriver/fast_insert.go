@@ -142,6 +142,9 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 	if err != nil {
 		return nil, err
 	}
+	if conn.tx == nil {
+		conn.applyKnowledgeGraphMutations([]velocity.Entry{{Key: key, Value: payload}})
+	}
 	p.keyScratch = key[:0]
 	return singleInsertResult(lastInsertID), nil
 }

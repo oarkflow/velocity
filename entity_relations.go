@@ -205,6 +205,7 @@ func (em *EntityManager) CreateEntity(ctx context.Context, req *EntityRequest) (
 	if err := em.saveEntity(entity); err != nil {
 		return nil, err
 	}
+	em.db.kgAutoIndexEntity(entity)
 
 	return entity, nil
 }
@@ -304,6 +305,7 @@ func (em *EntityManager) UpdateEntity(ctx context.Context, entityID string, req 
 	if err := em.saveEntity(existing); err != nil {
 		return nil, err
 	}
+	em.db.kgAutoIndexEntity(existing)
 
 	return existing, nil
 }
@@ -331,6 +333,7 @@ func (em *EntityManager) DeleteEntity(ctx context.Context, entityID string) erro
 	if err := em.db.Delete(entityKey); err != nil {
 		return err
 	}
+	em.db.kgAutoDeleteEntity(entityID)
 
 	return nil
 }

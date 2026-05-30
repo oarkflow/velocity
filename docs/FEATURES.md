@@ -72,9 +72,12 @@ For a runnable smoke flow across the complete feature set, use:
 - Document ingestion with text extraction from plain text, HTML, and JSON.
 - Sliding-window chunking.
 - Rule-based NER for emails, URLs, dates, money, organizations, people, and custom rules.
+- Lightweight in-memory KG search index with all/any/phrase/boolean/prefix matching and opt-in fuzzy fallback search.
 - Entity manager and entity relations with graph traversal, tags, linked secrets, objects, and envelopes.
 - Entity resolution and deduplication.
 - HNSW vector index, cosine similarity, vector search, hybrid search, graph neighbors, and analytics.
+- Opt-in automatic indexing for KV records, objects, secrets, SQL rows, envelopes, and entity records so normal writes become KG-searchable without per-record `Ingest` calls.
+- Query-driven resource graph discovery with `SearchResourceGraph`, which returns matching resources as nodes and inferred relation edges when resources mention the same extracted entities.
 
 ## APIs And Interfaces
 

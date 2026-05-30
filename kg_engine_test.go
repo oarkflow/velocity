@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -120,6 +121,86 @@ func TestKGEngine_IngestAndSearch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after deletion")
 	}
+}
+
+func TestKGEngine_SearchModesAndChunkEntities(t *testing.T) {
+	db, err := NewWithConfig(Config{Path: t.TempDir(), DisableEncryption: true, DisableIndexPersistence: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	kg := db.KnowledgeGraph()
+	ctx := context.Background()
+	if _, err := kg.Ingest(ctx, &KGIngestRequest{
+		Source:    "search-modes.txt",
+		MediaType: "text/plain",
+		Title:     "Search Modes",
+		Content:   []byte("Acme Corp published retrieval documentation for compliance search."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := kg.Search(ctx, &KGSearchRequest{Query: "retriev*", PrefixMatch: true, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefix.TotalHits == 0 {
+		t.Fatal("expected prefix full-text search hit")
+	}
+	fuzzy, err := kg.Search(ctx, &KGSearchRequest{Query: "retrival complianc", Fuzzy: true, FuzzyMaxEdits: 1, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fuzzy.TotalHits == 0 {
+		t.Fatal("expected fuzzy search hit")
+	}
+	if len(fuzzy.Hits[0].Entities) == 0 {
+		t.Fatal("expected hydrated hit entities from chunk metadata")
+	}
+}
+
+func BenchmarkKGSearchPerformance(b *testing.B) {
+	db, err := NewWithConfig(Config{Path: b.TempDir(), DisableEncryption: true, DisableIndexPersistence: true})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	kg := db.KnowledgeGraph()
+	ctx := context.Background()
+	for i := 0; i < 200; i++ {
+		_, err := kg.Ingest(ctx, &KGIngestRequest{
+			Source:    fmt.Sprintf("bench-%03d.txt", i),
+			MediaType: "text/plain",
+			Title:     "Benchmark",
+			Content:   []byte(fmt.Sprintf("Acme Corp compliance retrieval document %d mentions secops%d@example.test and risk review.", i, i)),
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.Run("keyword", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := kg.Search(ctx, &KGSearchRequest{Query: "compliance retrieval", Limit: 10}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("resource_graph", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := kg.SearchResourceGraph(ctx, &KGResourceGraphRequest{Query: "Acme Corp", Limit: 10}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("fuzzy", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := kg.Search(ctx, &KGSearchRequest{Query: "complian retrival", Fuzzy: true, FuzzyMaxEdits: 1, Limit: 10}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestKGEngine_HTMLIngest(t *testing.T) {

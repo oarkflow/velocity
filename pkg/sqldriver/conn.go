@@ -215,6 +215,7 @@ func (tx *Tx) Commit() error {
 	if conn == nil || conn.tx == nil {
 		return driver.ErrBadConn
 	}
+	pendingKG := conn.tx.PendingEntriesWithPrefix([]byte{})
 	defer func() {
 		conn.tx = nil
 		conn.txConstraintKeys = nil
@@ -236,6 +237,7 @@ func (tx *Tx) Commit() error {
 	}
 	if err == nil {
 		conn.flushTxInvalidations()
+		conn.applyKnowledgeGraphMutations(pendingKG)
 	}
 	return err
 }
@@ -631,6 +633,21 @@ func (c *Conn) Delete(key []byte) error {
 	}
 	c.markRowsChanged([][]byte{key})
 	return nil
+}
+
+func (c *Conn) applyKnowledgeGraphMutations(entries []velocity.Entry) {
+	for _, entry := range entries {
+		key := string(entry.Key)
+		table := tableNameFromStorageKey(key)
+		if table == "" {
+			continue
+		}
+		if entry.Deleted {
+			c.db.KGAutoDeleteSQLRow(table, entry.Key)
+			continue
+		}
+		c.db.KGAutoIndexSQLRow(table, entry.Key, entry.Value)
+	}
 }
 
 // BulkInsert inserts many rows through the SQL driver's storage mapping without

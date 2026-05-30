@@ -100,12 +100,25 @@ func NewKnowledgeGraphEngine(db *DB, config KGConfig) (*KnowledgeGraphEngine, er
 
 // Ingest processes a single document.
 func (e *KnowledgeGraphEngine) Ingest(ctx context.Context, req *KGIngestRequest) (*KGIngestResponse, error) {
-	return e.pipeline.Ingest(ctx, req)
+	resp, err := e.pipeline.Ingest(ctx, req)
+	if err == nil && e.search != nil {
+		e.search.markIndexDirty()
+	}
+	return resp, err
 }
 
 // IngestBatch processes multiple documents concurrently.
 func (e *KnowledgeGraphEngine) IngestBatch(ctx context.Context, reqs []*KGIngestRequest) ([]*KGIngestResponse, []error) {
-	return e.pipeline.IngestBatch(ctx, reqs)
+	resps, errs := e.pipeline.IngestBatch(ctx, reqs)
+	if e.search != nil {
+		for _, err := range errs {
+			if err == nil {
+				e.search.markIndexDirty()
+				break
+			}
+		}
+	}
+	return resps, errs
 }
 
 // Search executes a hybrid search query.
@@ -120,7 +133,28 @@ func (e *KnowledgeGraphEngine) GetDocument(docID string) (*KGDocument, error) {
 
 // DeleteDocument removes a document and its indexes.
 func (e *KnowledgeGraphEngine) DeleteDocument(docID string) error {
-	return e.pipeline.DeleteDocument(docID)
+	err := e.pipeline.DeleteDocument(docID)
+	if err == nil && e.search != nil {
+		e.search.invalidateDocument(docID)
+	}
+	return err
+}
+
+// DeleteSource removes the KG document associated with a stable source string.
+func (e *KnowledgeGraphEngine) DeleteSource(source string) error {
+	if e == nil || e.pipeline == nil || source == "" {
+		return nil
+	}
+	data, err := e.db.Get([]byte(kgSourcePrefix + source))
+	if err != nil {
+		return nil
+	}
+	docID := string(data)
+	err = e.pipeline.DeleteDocument(docID)
+	if err == nil && e.search != nil {
+		e.search.invalidateDocument(docID)
+	}
+	return err
 }
 
 // GetAnalytics returns corpus statistics.

@@ -1,6 +1,6 @@
 # Knowledge Graph
 
-Velocity includes an embedded knowledge graph subsystem for turning documents into searchable, connected knowledge. It can ingest text-like content, split it into chunks, extract entities, store document metadata, search by keyword or vector/hybrid modes, retrieve documents, traverse related entities, and report corpus analytics.
+Velocity includes an embedded knowledge graph subsystem for turning Velocity resources into searchable, connected knowledge. Its primary purpose is to identify a relationship graph between records, objects, secrets, SQL rows, envelopes, entities, and ingested documents by searching or querying their content and metadata.
 
 ## What It Is
 
@@ -13,6 +13,8 @@ In Velocity, the KG is embedded in the same storage engine as the KV store, obje
 Use the knowledge graph when you want to answer questions like:
 
 - Which documents mention a customer, company, person, email, or project?
+- Which Velocity resources are related to the same customer, case, policy, account, or identifier?
+- What records, objects, secrets, SQL rows, envelopes, and entities are connected by a search query?
 - Which chunks are most relevant to a search query?
 - What entities were discovered during ingestion?
 - Which records are related to an entity?
@@ -40,8 +42,11 @@ The KG subsystem can perform these workflows:
 - Store and retrieve ingested document metadata.
 - Delete documents and related KG records.
 - Search by keyword.
+- Search with full-text match modes, including all terms, any terms, boolean `OR`, quoted phrases, and prefix matching.
+- Use opt-in fuzzy matching for typo-tolerant fallback search.
 - Search by vector or hybrid mode when an embedder/HNSW index is configured.
 - Filter searches by metadata.
+- Return a resource relation graph from a query with `SearchResourceGraph`.
 - Rerank search hits with a custom reranker.
 - Traverse entity relationships.
 - Return corpus analytics.
@@ -164,6 +169,53 @@ for _, hit := range results.Hits {
 }
 ```
 
+Use richer full-text and typo-tolerant search:
+
+```go
+phrase, _ := kg.Search(ctx, &velocity.KGSearchRequest{
+	Query:     `"retention policy"`,
+	MatchMode: "phrase",
+	Limit:     10,
+})
+
+prefix, _ := kg.Search(ctx, &velocity.KGSearchRequest{
+	Query:       "compli* reten*",
+	PrefixMatch: true,
+	Limit:       10,
+})
+
+fuzzy, _ := kg.Search(ctx, &velocity.KGSearchRequest{
+	Query:         "complaince retenton",
+	Fuzzy:         true,
+	FuzzyMaxEdits: 1,
+	Limit:         10,
+})
+
+fmt.Println(phrase.TotalHits, prefix.TotalHits, fuzzy.TotalHits)
+```
+
+Performance notes:
+
+- Default keyword, phrase, boolean, and prefix search use a KG-specific in-memory chunk index backed by Velocity's persisted chunk records.
+- The in-memory index keeps per-chunk text, tokens, normalized text, and term postings to avoid repeated JSON hydration and query-time tokenization.
+- Fuzzy search is opt-in because it may scan KG chunks as a typo-tolerant fallback.
+- KG chunks now persist extracted entities in chunk metadata, so resource graph queries can hydrate relationships without re-running NER on every hit.
+- For large imports, batch ingest or disable online indexing during bulk loads, then rebuild derived indexes where appropriate.
+
+Local benchmark command:
+
+```bash
+go test -bench 'BenchmarkKGSearchPerformance' -benchmem -run '^$' .
+```
+
+Recent local baseline on a 200-document KG corpus:
+
+```text
+keyword        ~23 us/op   ~38 KB/op   ~61 allocs/op
+resource graph ~44 us/op   ~77 KB/op   ~332 allocs/op
+fuzzy         ~180 us/op   ~75 KB/op   ~460 allocs/op
+```
+
 Retrieve and delete a document:
 
 ```go
@@ -184,6 +236,137 @@ Read analytics:
 analytics := kg.GetAnalytics()
 fmt.Println(analytics.TotalDocuments, analytics.TotalChunks, analytics.TotalEntities)
 ```
+
+## Automatic Resource Indexing
+
+Applications can opt in to automatic KG indexing so normal Velocity writes become searchable without calling `Ingest` per record. This covers KV records, objects, secrets, SQL rows, envelopes, and entity records.
+
+Enable it at open time for background sync of existing data and automatic indexing of future writes:
+
+```go
+db, err := velocity.NewWithConfig(velocity.Config{
+	Path:                                "./velocity_data",
+	KnowledgeGraphAutoIndexEnabled:     true,
+	KnowledgeGraphAutoIndexResources:   []velocity.KGResourceType{velocity.KGResourceKV, velocity.KGResourceObject, velocity.KGResourceSecret},
+	KnowledgeGraphAutoIndexMaxValueBytes: 1 << 20,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer db.Close()
+```
+
+Or enable it on an already-open DB with explicit behavior:
+
+```go
+db.EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
+	Enabled:       true,
+	Resources:     []velocity.KGResourceType{velocity.KGResourceKV, velocity.KGResourceObject, velocity.KGResourceSecret, velocity.KGResourceSQLRow, velocity.KGResourceEnvelope, velocity.KGResourceEntity},
+	SecretValues:  true,
+	Existing:      true,
+	Async:         true,
+	MaxValueBytes: 1 << 20,
+})
+```
+
+After that, use ordinary APIs:
+
+```go
+_ = db.Put([]byte("customers/123"), []byte("Acme renewal notes mention HIPAA review."))
+
+_, _ = db.StoreObject("reports/q1.txt", "text/plain", "alice", []byte("Quarterly risk report for Acme."), nil)
+
+_, _ = db.CreateSecret(ctx, velocity.SecretRequest{
+	Name:  "acme-api-key",
+	Value: []byte("secret token used by Acme integration"),
+	Owner: "alice",
+})
+
+_, _ = db.CreateEnvelope(ctx, &velocity.EnvelopeRequest{
+	Label:     "Acme investigation",
+	Type:      velocity.EnvelopeTypeInvestigationRecord,
+	CreatedBy: "alice",
+	Payload: velocity.EnvelopePayload{
+		Kind:       "note",
+		InlineData: []byte("Envelope evidence mentions Acme risk review."),
+	},
+})
+```
+
+Search the KG normally:
+
+```go
+resp, err := db.KnowledgeGraph().Search(ctx, &velocity.KGSearchRequest{
+	Query: "Acme HIPAA risk",
+	Limit: 10,
+	Mode:  velocity.KGSearchModeKeyword,
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+for _, hit := range resp.Hits {
+	fmt.Println(hit.Source, hit.Metadata["resource_type"], hit.Metadata["key"], hit.Metadata["path"])
+}
+```
+
+Query the relationship graph between matching resources:
+
+```go
+graph, err := db.KnowledgeGraph().SearchResourceGraph(ctx, &velocity.KGResourceGraphRequest{
+	Query: "Acme HIPAA risk",
+	Limit: 10,
+	Mode:  velocity.KGSearchModeKeyword,
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+for _, node := range graph.Nodes {
+	fmt.Println("node", node.Source, node.ResourceType, node.ResourceID)
+}
+for _, edge := range graph.Edges {
+	fmt.Println("edge", edge.Source, "->", edge.Target, edge.RelationType, edge.Entity.Canonical)
+}
+```
+
+Resource graph behavior:
+
+- Nodes are query-matching Velocity resources.
+- Edges are inferred when resources share extracted entities such as organizations, emails, URLs, dates, money values, phone numbers, SSNs, or other configured NER rules.
+- The default inferred relation is `mentions_same_entity`.
+- Use this when the question is not only “what matched?” but “which matching resources are connected, and why?”.
+
+Typical sources and metadata:
+
+```text
+kv:customers/123        resource_type=kv      key=customers/123
+object:reports/q1.txt   resource_type=object  path=reports/q1.txt content_type=text/plain
+secret:acme-api-key:v1  resource_type=secret  name=acme-api-key version=v1
+envelope:env-...        resource_type=envelope envelope_id=env-...
+entity:ent-...          resource_type=entity  entity_id=ent-...
+sql:patients:patients:1 resource_type=sql_row table=patients row_key=patients:1
+```
+
+Manual sync is available when you want to scan existing resources on demand:
+
+```go
+if err := db.SyncKnowledgeGraph(ctx); err != nil {
+	log.Fatal(err)
+}
+status := db.KnowledgeGraphSyncStatus()
+fmt.Println(status.Running, status.Indexed, status.Skipped, status.LastError)
+```
+
+Important behavior:
+
+- Auto-indexing is opt-in.
+- Config-open auto-indexing starts a background scan of existing data.
+- Public `EnableKnowledgeGraphAutoIndex` can run sync synchronously by setting `Async: false`.
+- Stable source IDs make updates idempotent: the old KG document for a source is removed before the new representation is indexed.
+- Deletes remove the corresponding KG document where Velocity owns the delete path.
+- Large or binary content is indexed as metadata-only when it exceeds `MaxValueBytes` or is not text-like.
+- Secret values are indexed when `SecretValues: true`; disable this for deployments where KG search must not expose secret text.
 
 ## Batch Ingestion
 

@@ -128,7 +128,13 @@ type ObjectListOptions struct {
 
 // StoreObject stores an object with zero-trust security
 func (db *DB) StoreObject(path, contentType, user string, data []byte, opts *ObjectOptions) (*ObjectMetadata, error) {
-	return db.StoreObjectStream(path, contentType, user, bytes.NewReader(data), int64(len(data)), opts)
+	meta, err := db.StoreObjectStream(path, contentType, user, bytes.NewReader(data), int64(len(data)), opts)
+	if err == nil {
+		if rec, recErr := db.getObjectRecord(meta.Path); recErr == nil {
+			db.kgAutoIndexObjectRecord(rec, data)
+		}
+	}
+	return meta, err
 }
 
 // ObjectOptions for storing objects

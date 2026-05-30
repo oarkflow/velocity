@@ -585,6 +585,7 @@ func (db *DB) CreateEnvelope(ctx context.Context, req *EnvelopeRequest) (*Envelo
 	if err := db.saveEnvelope(env); err != nil {
 		return nil, err
 	}
+	db.kgAutoIndexEnvelope(env)
 	return env, nil
 }
 
@@ -597,6 +598,7 @@ func (db *DB) UpdateEnvelope(ctx context.Context, env *Envelope) error {
 	if err := db.saveEnvelope(env); err != nil {
 		return fmt.Errorf("failed to save envelope: %w", err)
 	}
+	db.kgAutoIndexEnvelope(env)
 	return nil
 }
 

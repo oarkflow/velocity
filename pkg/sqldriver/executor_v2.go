@@ -38,6 +38,22 @@ type putOperation struct {
 	value []byte
 }
 
+func entriesFromPutOperations(ops []putOperation, deleted bool) []velocity.Entry {
+	entries := make([]velocity.Entry, 0, len(ops))
+	for _, op := range ops {
+		entries = append(entries, velocity.Entry{Key: op.key, Value: op.value, Deleted: deleted})
+	}
+	return entries
+}
+
+func entriesFromKeys(keys [][]byte, deleted bool) []velocity.Entry {
+	entries := make([]velocity.Entry, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, velocity.Entry{Key: key, Deleted: deleted})
+	}
+	return entries
+}
+
 type tableSchemaMeta struct {
 	Columns      []string                 `json:"columns"`
 	ColumnTypes  map[string]sqlColumnType `json:"column_types,omitempty"`
@@ -319,6 +335,9 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 
 	if err := e.applyPutOperations(puts); err != nil {
 		return nil, err
+	}
+	if e.conn.tx == nil {
+		e.conn.applyKnowledgeGraphMutations(entriesFromPutOperations(puts, false))
 	}
 	return Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
 }
@@ -619,6 +638,9 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 	if err := e.applyPutOperations(puts); err != nil {
 		return nil, err
 	}
+	if e.conn.tx == nil {
+		e.conn.applyKnowledgeGraphMutations(entriesFromPutOperations(puts, false))
+	}
 	return Result{rowsAffected: updated}, nil
 }
 
@@ -745,6 +767,9 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 	if err := e.applyDeleteOperations(keys); err != nil {
 		return nil, err
 	}
+	if e.conn.tx == nil {
+		e.conn.applyKnowledgeGraphMutations(entriesFromKeys(keys, true))
+	}
 	return Result{rowsAffected: int64(len(keys))}, nil
 }
 
@@ -822,6 +847,9 @@ func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableS
 	}
 	if err := e.applyPutOperations(puts); err != nil {
 		return nil, err
+	}
+	if e.conn.tx == nil {
+		e.conn.applyKnowledgeGraphMutations(entriesFromPutOperations(puts, false))
 	}
 	return Result{rowsAffected: inserted}, nil
 }
@@ -903,6 +931,9 @@ func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, erro
 		if err := e.applyDeleteOperations(keys); err != nil {
 			return nil, err
 		}
+		if e.conn.tx == nil {
+			e.conn.applyKnowledgeGraphMutations(entriesFromKeys(keys, true))
+		}
 		e.conn.db.SetSearchSchemaForPrefix(tableName, nil)
 		e.conn.markSchemaChanged()
 		total += int64(len(rows))
@@ -921,6 +952,9 @@ func (e *ExecutorV2) executeTruncateTable(tableName string) (driver.Result, erro
 	}
 	if err := e.applyDeleteOperations(keys); err != nil {
 		return nil, err
+	}
+	if e.conn.tx == nil {
+		e.conn.applyKnowledgeGraphMutations(entriesFromKeys(keys, true))
 	}
 	return Result{rowsAffected: int64(len(keys))}, nil
 }

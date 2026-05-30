@@ -303,6 +303,7 @@ func (db *DB) PutObject(ctx context.Context, req PutObjectRequest) (*ObjectRecor
 	if err := db.saveObjectRecord(record); err != nil {
 		return nil, err
 	}
+	db.kgAutoIndexObjectRecord(record, nil)
 	return record, nil
 }
 
@@ -393,7 +394,11 @@ func (db *DB) DeleteObjectV2(ctx context.Context, req DeleteObjectRequest) error
 		}
 	}
 	if req.Hard {
-		return db.hardDeleteObjectUnlocked(path, meta)
+		err := db.hardDeleteObjectUnlocked(path, meta)
+		if err == nil {
+			db.kgAutoDeleteObject(path)
+		}
+		return err
 	}
 	versionID := generateVersionID()
 	version := &ObjectVersion{VersionID: versionID, ObjectID: meta.ObjectID, CreatedAt: time.Now().UTC(), CreatedBy: req.User, IsLatest: true, DeleteMarker: true}
@@ -413,6 +418,7 @@ func (db *DB) DeleteObjectV2(ctx context.Context, req DeleteObjectRequest) error
 		_ = db.saveObjectRecord(record)
 	}
 	_ = db.Delete([]byte(ObjectIndexPrefix + path))
+	db.kgAutoDeleteObject(path)
 	return nil
 }
 

@@ -118,6 +118,7 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 	if p.resolver != nil && len(entities) > 0 {
 		entities = p.resolver.Resolve(entities)
 	}
+	attachEntitiesToChunks(chunks, entities)
 
 	// Stage 5: Embed chunks (if embedder available)
 	if p.embedder != nil && len(chunks) > 0 {
@@ -216,6 +217,21 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 		EntityCount: len(entities),
 		DurationMs:  time.Since(start).Milliseconds(),
 	}, nil
+}
+
+func attachEntitiesToChunks(chunks []KGChunk, entities []KGEntity) {
+	if len(chunks) == 0 || len(entities) == 0 {
+		return
+	}
+	for i := range chunks {
+		chunk := &chunks[i]
+		for _, ent := range entities {
+			if ent.EndByte <= chunk.StartByte || ent.StartByte >= chunk.EndByte {
+				continue
+			}
+			chunk.Entities = append(chunk.Entities, ent)
+		}
+	}
 }
 
 // IngestBatch processes multiple documents concurrently.
@@ -331,7 +347,7 @@ func (p *KGIngestPipeline) DeleteDocument(docID string) error {
 			continue
 		}
 		chunkID := string(chunkIDData)
-		p.db.Delete([]byte(kgChunkPrefix + chunkID))
+		p.db.DeleteIndexed([]byte(kgChunkPrefix + chunkID))
 		p.db.Delete([]byte(kgChunkMetaPrefix + chunkID))
 		if p.hnsw != nil {
 			p.hnsw.Delete(chunkID)

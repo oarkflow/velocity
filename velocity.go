@@ -106,7 +106,8 @@ type DB struct {
 	skipCloseFlush bool // Skip clean-close memtable flush and rely on WAL replay
 
 	// Knowledge Graph engine
-	kg *KnowledgeGraphEngine
+	kg          *KnowledgeGraphEngine
+	kgAutoIndex *KGAutoIndexer
 }
 
 var defaultPath = "./data/velocity"
@@ -200,6 +201,13 @@ type Config struct {
 	SQLQueryCacheTTL            time.Duration
 	SQLQueryCacheMaxResultBytes int64
 	SQLQueryCacheMaxRows        int
+
+	KnowledgeGraphAutoIndexEnabled       bool
+	KnowledgeGraphAutoIndexResources     []KGResourceType
+	KnowledgeGraphAutoIndexSecretValues  bool
+	KnowledgeGraphAutoIndexExisting      bool
+	KnowledgeGraphAutoIndexAsync         bool
+	KnowledgeGraphAutoIndexMaxValueBytes int64
 }
 
 const (
@@ -424,6 +432,17 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		db.SetPerformanceMode(cfg.PerformanceMode)
 	}
 
+	if cfg.KnowledgeGraphAutoIndexEnabled {
+		db.EnableKnowledgeGraphAutoIndex(KnowledgeGraphAutoIndexConfig{
+			Enabled:       true,
+			Resources:     cfg.KnowledgeGraphAutoIndexResources,
+			SecretValues:  true,
+			Existing:      true,
+			Async:         true,
+			MaxValueBytes: cfg.KnowledgeGraphAutoIndexMaxValueBytes,
+		})
+	}
+
 	// Start background compaction
 	db.compactionWG.Add(1)
 	go func() {
@@ -576,23 +595,33 @@ func (db *DB) Put(key, value []byte) error {
 				go db.flushMemTable()
 			}
 		}
+		db.kgAutoIndexKV(key, value)
 		return nil
 	}
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	var err error
 	if db.searchIndexEnabled && !isIndexKey(key) {
 		_, schema := db.schemaForKeyLocked(key)
 		if schema != nil {
-			return db.putIndexedLocked(key, value, schema)
+			err = db.putIndexedLocked(key, value, schema)
+			db.mutex.Unlock()
+			if err == nil {
+				db.kgAutoIndexKV(key, value)
+			}
+			return err
 		}
 	}
-	return db.put(key, value)
+	err = db.put(key, value)
+	db.mutex.Unlock()
+	if err == nil {
+		db.kgAutoIndexKV(key, value)
+	}
+	return err
 }
 
 // PutWithTTL stores a key with a TTL. If ttl <= 0 the key will not expire.
 func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
 
 	// Build entry
 	e := entryPool.Get().(*Entry)
@@ -615,10 +644,12 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	if !db.disableWAL {
 		if db.wal == nil {
 			entryPool.Put(e)
+			db.mutex.Unlock()
 			return fmt.Errorf("WAL is not initialized")
 		}
 		if err := db.wal.Write(e); err != nil {
 			entryPool.Put(e)
+			db.mutex.Unlock()
 			return err
 		}
 	}
@@ -640,6 +671,8 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 		}
 	}
 
+	db.mutex.Unlock()
+	db.kgAutoIndexKV(key, value)
 	return nil
 }
 
@@ -771,11 +804,21 @@ func (db *DB) get(key []byte) ([]byte, error) {
 
 func (db *DB) Delete(key []byte) error {
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	var err error
 	if db.searchIndexEnabled && !isIndexKey(key) {
-		return db.deleteIndexedLocked(key)
+		err = db.deleteIndexedLocked(key)
+		db.mutex.Unlock()
+		if err == nil {
+			db.kgAutoDeleteKV(key)
+		}
+		return err
 	}
-	return db.deleteLocked(key)
+	err = db.deleteLocked(key)
+	db.mutex.Unlock()
+	if err == nil {
+		db.kgAutoDeleteKV(key)
+	}
+	return err
 }
 
 func (db *DB) flushMemTable() error {

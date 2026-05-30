@@ -115,6 +115,8 @@ Run only the knowledge graph walkthrough:
 ./scripts/velocity.sh demo kg
 ```
 
+The KG walkthrough covers explicit ingestion plus automatic indexing from ordinary KV, object, secret, SQL, envelope, and entity writes.
+
 Keep its temporary database and generated Go program:
 
 ```bash
