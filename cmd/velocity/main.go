@@ -53,6 +53,8 @@ func run() error {
 		return handleObject(db, args)
 	case "envelope":
 		return handleEnvelope(db, ctx, args)
+	case "compliance":
+		return handleCompliance(db, ctx, args)
 	case "help":
 		printUsage()
 	default:
@@ -82,6 +84,9 @@ Commands:
   envelope bundle create --label L --resource JSON  Create bundle
   envelope bundle list --id ID          List resources
   envelope bundle resolve --id ID        Resolve resources
+  compliance tag --type TYPE [resource flags] --framework GDPR --class restricted
+  compliance get --type TYPE [resource flags]
+  compliance check --type TYPE [resource flags] --operation read --actor alice
 
 Examples:
   velocity data put mykey myvalue
@@ -90,10 +95,163 @@ Examples:
   velocity object preview ./notes.md docs/notes.md
   velocity envelope create --label "Case 001" --type court_evidence
   velocity envelope bundle create --label "Evidence" --resource '[{"type":"file","name":"doc.pdf","path":"evidence/doc.pdf"}]'
+  velocity compliance tag --type sql_table --table patients --framework HIPAA --class restricted --encrypt
+  velocity compliance tag --type secret --name api-key --framework GDPR --class confidential
 
 Environment:
   VELOCITY_PATH   Database path (default: ./velocity_data)
 `)
+}
+
+func handleCompliance(db *velocity.DB, ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: velocity compliance <tag|get|check> --type TYPE [resource flags]")
+	}
+	subcmd := args[0]
+	flags, _ := parseFlags(args[1:])
+	ref, err := complianceRefFromFlags(flags)
+	if err != nil {
+		return err
+	}
+	ctm := db.ComplianceTagManager()
+	if ctm == nil {
+		ctm = velocity.NewComplianceTagManager(db)
+		db.SetComplianceTagManager(ctm)
+	}
+	switch subcmd {
+	case "tag":
+		frameworks, err := parseComplianceFrameworks(flags["framework"])
+		if err != nil {
+			return err
+		}
+		dataClass := velocity.DataClassification(flags["class"])
+		if dataClass == "" {
+			dataClass = velocity.DataClassInternal
+		}
+		tag := &velocity.ComplianceTag{
+			Frameworks:    frameworks,
+			DataClass:     dataClass,
+			Owner:         flags["owner"],
+			Custodian:     flags["custodian"],
+			EncryptionReq: flags["encrypt"] == "true",
+			AuditLevel:    flags["audit"],
+			AccessPolicy:  flags["access-policy"],
+			CreatedBy:     flagDefault(flags, "created-by", "cli"),
+		}
+		if err := ctm.TagResource(ctx, ref, tag); err != nil {
+			return err
+		}
+		fmt.Printf("Tagged %s\n", tag.ResourceID)
+	case "get":
+		tags := ctm.GetResourceTags(ref)
+		return printJSON(tags)
+	case "check":
+		req := &velocity.ComplianceOperationRequest{
+			Operation:       flagDefault(flags, "operation", "read"),
+			Actor:           flags["actor"],
+			Region:          flags["region"],
+			SubjectID:       flags["subject-id"],
+			Purpose:         flags["purpose"],
+			Encrypted:       flags["encrypted"] == "true" || flags["encrypt"] == "true",
+			MFAVerified:     flags["mfa"] == "true" || flags["mfa-verified"] == "true",
+			CryptoAlgorithm: flags["crypto-algorithm"],
+			Reason:          flags["reason"],
+		}
+		result, err := ctm.ValidateResourceOperation(ctx, ref, req)
+		if err != nil {
+			return err
+		}
+		return printJSON(result)
+	default:
+		return fmt.Errorf("unknown compliance command: %s", subcmd)
+	}
+	return nil
+}
+
+func complianceRefFromFlags(flags map[string]string) (velocity.ComplianceResourceRef, error) {
+	typ := velocity.ComplianceResourceType(flags["type"])
+	ref := velocity.ComplianceResourceRef{Type: typ}
+	switch typ {
+	case velocity.ComplianceResourceKV:
+		ref.Path = requiredFlag(flags, "path")
+	case velocity.ComplianceResourceObject:
+		ref.Path = requiredFlag(flags, "path")
+	case velocity.ComplianceResourceBucket:
+		ref.Bucket = requiredFlag(flags, "bucket")
+	case velocity.ComplianceResourceFolder:
+		ref.Path = requiredFlag(flags, "path")
+	case velocity.ComplianceResourceSecret:
+		ref.SecretName = requiredFlag(flags, "name")
+	case velocity.ComplianceResourceSecretVersion:
+		ref.SecretName = requiredFlag(flags, "name")
+		ref.SecretVersion = requiredFlag(flags, "version")
+	case velocity.ComplianceResourceSQLSchema:
+		ref.SQLSchema = flagDefault(flags, "schema", "main")
+	case velocity.ComplianceResourceSQLTable:
+		ref.SQLSchema = flagDefault(flags, "schema", "main")
+		ref.SQLTable = requiredFlag(flags, "table")
+	case velocity.ComplianceResourceSQLColumn:
+		ref.SQLSchema = flagDefault(flags, "schema", "main")
+		ref.SQLTable = requiredFlag(flags, "table")
+		ref.SQLColumn = requiredFlag(flags, "column")
+	case velocity.ComplianceResourceSQLRow:
+		ref.SQLSchema = flagDefault(flags, "schema", "main")
+		ref.SQLTable = requiredFlag(flags, "table")
+		ref.SQLRowKey = requiredFlag(flags, "row")
+	default:
+		return ref, fmt.Errorf("--type is required and must be one of kv, object, bucket, folder, secret, secret_version, sql_schema, sql_table, sql_column, sql_row")
+	}
+	if ref.CanonicalID() == "" {
+		return ref, fmt.Errorf("missing resource flags for type %s", typ)
+	}
+	return ref, nil
+}
+
+func parseComplianceFrameworks(raw string) ([]velocity.ComplianceFramework, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("--framework is required")
+	}
+	parts := strings.Split(raw, ",")
+	frameworks := make([]velocity.ComplianceFramework, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		switch strings.ToUpper(part) {
+		case "HIPAA":
+			frameworks = append(frameworks, velocity.FrameworkHIPAA)
+		case "GDPR":
+			frameworks = append(frameworks, velocity.FrameworkGDPR)
+		case "NIST", "NIST_800_53":
+			frameworks = append(frameworks, velocity.FrameworkNIST)
+		case "FIPS", "FIPS_140_2":
+			frameworks = append(frameworks, velocity.FrameworkFIPS)
+		case "PCI", "PCI_DSS":
+			frameworks = append(frameworks, velocity.FrameworkPCIDSS)
+		case "SOC2", "SOC2_TYPE2":
+			frameworks = append(frameworks, velocity.FrameworkSOC2)
+		case "ISO27001", "ISO_27001":
+			frameworks = append(frameworks, velocity.FrameworkISO27001)
+		default:
+			return nil, fmt.Errorf("unknown framework: %s", part)
+		}
+	}
+	return frameworks, nil
+}
+
+func requiredFlag(flags map[string]string, name string) string {
+	return strings.TrimSpace(flags[name])
+}
+
+func flagDefault(flags map[string]string, name, fallback string) string {
+	if value := strings.TrimSpace(flags[name]); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func printJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }
 
 func getDBPath() string {

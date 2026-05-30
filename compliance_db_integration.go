@@ -40,7 +40,8 @@ func (db *DB) PutWithCompliance(ctx context.Context, req *ComplianceOperationReq
 	}
 
 	if db.complianceTagManager != nil {
-		result, err := db.complianceTagManager.ValidateOperation(ctx, req)
+		ref := ComplianceResourceRef{Type: ComplianceResourceKV, Path: req.Path}
+		result, err := db.complianceTagManager.ValidateResourceOperation(ctx, ref, req)
 		if err != nil {
 			return err
 		}
@@ -67,7 +68,8 @@ func (db *DB) GetWithCompliance(ctx context.Context, req *ComplianceOperationReq
 	var result *ComplianceValidationResult
 	if db.complianceTagManager != nil {
 		var err error
-		result, err = db.complianceTagManager.ValidateOperation(ctx, req)
+		ref := ComplianceResourceRef{Type: ComplianceResourceKV, Path: req.Path}
+		result, err = db.complianceTagManager.ValidateResourceOperation(ctx, ref, req)
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +107,8 @@ func (db *DB) DeleteWithCompliance(ctx context.Context, req *ComplianceOperation
 	}
 
 	if db.complianceTagManager != nil {
-		result, err := db.complianceTagManager.ValidateOperation(ctx, req)
+		ref := ComplianceResourceRef{Type: ComplianceResourceKV, Path: req.Path}
+		result, err := db.complianceTagManager.ValidateResourceOperation(ctx, ref, req)
 		if err != nil {
 			return err
 		}

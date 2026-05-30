@@ -410,6 +410,12 @@ func NewWithConfig(cfg Config) (*DB, error) {
 			db.levels[level] = append(db.levels[level], sst)
 		}
 	}
+	if db.complianceTagManager != nil {
+		db.complianceTagManager.mu.Lock()
+		db.complianceTagManager.tags = make(map[string][]*ComplianceTag)
+		db.complianceTagManager.mu.Unlock()
+		_ = db.complianceTagManager.loadTags()
+	}
 
 	// Register DB for graceful shutdown on signals
 	registerDB(db)

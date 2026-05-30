@@ -25,6 +25,27 @@ case "$cmd" in
     subcmd="$1"; shift
     "$VELOCITY_BIN" envelope "$subcmd" "$@"
     ;;
+  compliance)
+    subcmd="$1"; shift
+    "$VELOCITY_BIN" compliance "$subcmd" "$@"
+    ;;
+  demo)
+    subcmd="${1:-full}"
+    shift || true
+    case "$subcmd" in
+      full|features)
+        ./scripts/feature_full_flow.sh "$@"
+        ;;
+      compliance)
+        ./scripts/compliance_full_flow.sh "$@"
+        ;;
+      *)
+        echo "Unknown demo command: $subcmd"
+        echo "Use 'velocity demo full' or 'velocity demo compliance'"
+        exit 1
+        ;;
+    esac
+    ;;
   help|--help|-h)
     cat <<EOF
 Velocity CLI Wrapper
@@ -45,6 +66,11 @@ Commands:
   envelope bundle create --label L --resource JSON  Create bundle
   envelope bundle list --id ID          List resources
   envelope bundle resolve --id ID        Resolve resources
+  compliance tag --type TYPE [resource flags] --framework GDPR --class restricted
+  compliance get --type TYPE [resource flags]
+  compliance check --type TYPE [resource flags] --operation read --actor alice
+  demo full                    Run the complete feature flow script
+  demo compliance              Run the compliance feature flow script
 
 Environment:
   VELOCITY_PATH   Database path (default: ./velocity_data)
@@ -56,6 +82,9 @@ Examples:
   velocity secret set api_key sk_12345
   velocity envelope create --label "Case 001" --type court_evidence
   velocity envelope bundle create --label "Evidence" --resource '[{"type":"file","name":"doc.pdf"}]'
+  velocity compliance tag --type secret --name api-key --framework GDPR --class confidential --encrypt
+  velocity compliance check --type secret --name api-key --operation read --actor alice --encrypted
+  velocity demo full
 EOF
     ;;
   *)

@@ -1,244 +1,398 @@
-# COMPLIANCE Command Deep-Dive
+# Compliance
 
-This document is implementation-oriented guidance for the `secretr compliance` command group.
+Velocity includes compliance primitives and workflow managers. These are building blocks; deployments still need policy review, operational controls, and external validation.
 
-It is generated from the live CLI/authz surface and intended for parity review, security review, and implementation planning.
+For a cross-subsystem copy-paste set, see [Code And Command Cookbook](COOKBOOK.md). This page focuses on compliance-specific code and commands.
 
-## 1. Command Surface
-
-| Subcommand | Purpose |
-|---|---|
-| `secretr compliance` | Compliance reporting and policy enforcement |
-| `secretr compliance frameworks` | List available compliance frameworks |
-| `secretr compliance list-reports` | List generated compliance reports |
-| `secretr compliance policy` | Manage compliance policies |
-| `secretr compliance policy create` | Create policy |
-| `secretr compliance policy list` | List policies |
-| `secretr compliance policy update` | Update policy |
-| `secretr compliance report` | Generate compliance report |
-| `secretr compliance score` | Get compliance score |
-
-## 2. RBAC + Entitlement Scope Requirements
-
-Entitlement scope slugs are expected to match RBAC scope literals exactly.
-
-| Subcommand | Required Scopes |
-|---|---|
-| `secretr compliance` | `compliance:report` |
-| `secretr compliance frameworks` | `compliance:report` |
-| `secretr compliance list-reports` | `compliance:report` |
-| `secretr compliance policy` | `compliance:policy` |
-| `secretr compliance policy create` | `compliance:policy` |
-| `secretr compliance policy list` | `compliance:policy` |
-| `secretr compliance policy update` | `compliance:policy` |
-| `secretr compliance report` | `compliance:report` |
-| `secretr compliance score` | `compliance:report` |
-
-## 3. ACL / Resource Model
-
-| Subcommand | Resource Type | ACL Required |
-|---|---|---|
-| `secretr compliance` | `compliance` | yes |
-| `secretr compliance frameworks` | `compliance` | yes |
-| `secretr compliance list-reports` | `compliance` | yes |
-| `secretr compliance policy` | `compliance` | yes |
-| `secretr compliance policy create` | `compliance` | yes |
-| `secretr compliance policy list` | `compliance` | yes |
-| `secretr compliance policy update` | `compliance` | yes |
-| `secretr compliance report` | `compliance` | yes |
-| `secretr compliance score` | `compliance` | yes |
-
-## 4. Flags and Positional Arguments
-
-### `secretr compliance`
-
-Flags:
-
-- none
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance frameworks`
-
-Flags:
-
-- none
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance list-reports`
-
-Flags:
-
-| Flag | Aliases | Type | Required | Auth Class | ACL Required | Description |
-|---|---|---|---|---|---|---|
-| `--org-id` | - | `string` | no | `resource_selector` | yes | Organization ID |
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance policy`
-
-Flags:
-
-- none
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance policy create`
-
-Flags:
-
-- none
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance policy list`
-
-Flags:
-
-- none
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance policy update`
-
-Flags:
-
-- none
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance report`
-
-Flags:
-
-| Flag | Aliases | Type | Required | Auth Class | ACL Required | Description |
-|---|---|---|---|---|---|---|
-| `--output` | `-o` | `string` | yes | `control` | no | Output file |
-| `--standard` | - | `string` | yes | `control` | no | Compliance standard (e.g., SOC2, GDPR) |
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-### `secretr compliance score`
-
-Flags:
-
-| Flag | Aliases | Type | Required | Auth Class | ACL Required | Description |
-|---|---|---|---|---|---|---|
-| `--org-id` | - | `string` | no | `resource_selector` | yes | Organization ID |
-| `--standard` | - | `string` | yes | `control` | no | Compliance standard |
-
-Positional arguments:
-
-| Required Positional Args | Optional Positional Args | ArgsUsage Source |
-|---|---|---|
-| - | - | `-` |
-
-## 5. Copy-Paste Examples
-
-### `secretr compliance`
+For an executable shell walkthrough that tags every supported resource type and verifies KV, object, secret, SQL, and CLI behavior, run:
 
 ```bash
-secretr compliance
+./scripts/compliance_full_flow.sh
 ```
 
-### `secretr compliance frameworks`
+## Frameworks And Classification
+
+Source types include:
+
+- `ComplianceFramework`
+- `DataClassification`
+- GDPR controller
+- HIPAA controller
+- NIST controller
+- FIPS-related crypto helpers
+- PCI-style compliance tag validation
+
+Compliance tags can be attached to paths, inherited, updated, removed, listed by framework, and validated for read/write/delete/export-style operations.
+
+Velocity now also supports typed compliance resources for KV records, objects, buckets, folders, secrets, secret versions, SQL schemas, SQL tables, SQL columns, and SQL rows. Path tags still work, but typed references are preferred when the resource is not naturally a file-like path.
+
+Typed Go:
+
+```go
+err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{
+	Type:     velocity.ComplianceResourceSQLColumn,
+	SQLTable: "patients",
+	SQLColumn: "ssn",
+}, &velocity.ComplianceTag{
+	Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
+	DataClass:     velocity.DataClassRestricted,
+	EncryptionReq: true,
+	CreatedBy:     "admin",
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+result, err := ctm.ValidateResourceOperation(ctx, velocity.ComplianceResourceRef{
+	Type:     velocity.ComplianceResourceSQLRow,
+	SQLTable: "patients",
+	SQLRowKey: "123",
+}, &velocity.ComplianceOperationRequest{
+	Operation: "read",
+	Actor:     "auditor",
+	Encrypted: true,
+})
+```
+
+CLI:
 
 ```bash
-secretr compliance frameworks
+./velocity compliance tag --type sql_table --table patients --framework HIPAA --class restricted --encrypt
+./velocity compliance tag --type sql_column --table patients --column ssn --framework HIPAA --class restricted --encrypt
+./velocity compliance tag --type secret --name api-key --framework GDPR --class confidential --encrypt
+./velocity compliance tag --type object --path reports/q1.pdf --framework SOC2 --class internal
+./velocity compliance get --type sql_column --table patients --column ssn
+./velocity compliance check --type sql_table --table patients --operation read --actor alice --encrypted
 ```
 
-### `secretr compliance list-reports`
+Inheritance is restrictive: schema tags apply to tables, rows, and columns; table tags apply to rows and columns; bucket/folder tags apply to objects; secret tags apply to versions; KV prefix tags apply to child keys.
+
+Go:
+
+```go
+ctx := context.Background()
+
+db, err := velocity.New("./compliance_data")
+if err != nil {
+	log.Fatal(err)
+}
+defer db.Close()
+
+ctm := velocity.NewComplianceTagManager(db)
+db.SetComplianceTagManager(ctm)
+
+err = ctm.TagPath(ctx, &velocity.ComplianceTag{
+	Path:          "/patients",
+	Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA, velocity.FrameworkGDPR},
+	DataClass:     velocity.DataClassRestricted,
+	Owner:         "privacy",
+	Custodian:     "platform",
+	RetentionDays: 2555,
+	EncryptionReq: true,
+	AuditLevel:    "high",
+	CreatedBy:     "admin",
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+tag := ctm.GetTag("/patients/123")
+fmt.Println(tag.Path, tag.Frameworks, tag.DataClass)
+```
+
+Command:
 
 ```bash
-secretr compliance list-reports
+go run ./examples/compliance_demo
+go test -run 'TestComplianceTagManager_TagPath|TestComplianceTagManager_Inheritance|TestComplianceTagManager_MultiFramework' .
 ```
 
-### `secretr compliance policy`
+## Compliance-Aware Operations
+
+The DB exposes:
+
+- `PutWithCompliance`
+- `GetWithCompliance`
+- `DeleteWithCompliance`
+- `SetComplianceTagManager`
+- `ComplianceTagManager`
+- `TagResource`
+- `GetResourceTag`
+- `GetResourceTags`
+- `RemoveResourceTag`
+- `ValidateResourceOperation`
+
+These route operations through compliance validation and classification behavior.
+
+Go:
+
+```go
+writeReq := &velocity.ComplianceOperationRequest{
+	Path:            "/patients/123",
+	Operation:       "write",
+	Actor:           "nurse.alice",
+	IPAddress:       "10.0.0.10",
+	Region:          "US",
+	SubjectID:       "patient-123",
+	Purpose:         "treatment",
+	Encrypted:       true,
+	MFAVerified:     true,
+	CryptoAlgorithm: "AES-256-GCM",
+}
+
+result, err := ctm.ValidateOperation(ctx, writeReq)
+if err != nil {
+	log.Fatal(err)
+}
+if !result.Allowed {
+	log.Fatalf("blocked: %v", result.ViolatedRules)
+}
+
+err = db.PutWithCompliance(ctx, writeReq, []byte("MRN: 123456 diagnosis note"))
+if err != nil {
+	log.Fatal(err)
+}
+
+readReq := &velocity.ComplianceOperationRequest{
+	Path:      "/patients/123",
+	Operation: "read",
+	Actor:     "nurse.alice",
+	Region:    "US",
+	SubjectID: "patient-123",
+	Purpose:   "treatment",
+}
+masked, err := db.GetWithCompliance(ctx, readReq)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(string(masked))
+```
+
+Command:
 
 ```bash
-secretr compliance policy
+go test -run 'TestCompliancePutGetWithConsentAndMasking|TestComplianceTagManager_ValidateOperation_GDPR|TestComplianceTagManager_ValidateOperation_HIPAA' .
 ```
 
-### `secretr compliance policy create`
+## GDPR-Oriented Features
+
+Available building blocks include:
+
+- Consent records and consent manager.
+- Data subject records and data subject requests.
+- Processing activities.
+- GDPR data export structures.
+- Retention and anonymization helpers.
+- Breach notification structures.
+
+Go:
+
+```go
+gdpr := velocity.NewGDPRController(db)
+
+consent := velocity.ConsentRecord{
+	ConsentID:       "consent-123",
+	Purpose:         "treatment",
+	GrantedAt:       time.Now(),
+	LegalBasis:      "consent",
+	ProcessingScope: []string{"patient_record"},
+	Version:          "v1",
+	Active:          true,
+}
+
+_ = gdpr.GrantConsent(ctx, "patient-123", consent)
+ok, activeConsent, err := gdpr.HasActiveConsent(ctx, "patient-123", "treatment")
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(ok, activeConsent.ConsentID)
+```
+
+Command:
 
 ```bash
-secretr compliance policy create
+go run ./examples/compliance_full_demo
+go run ./examples/compliance_governance_cookbook
 ```
 
-### `secretr compliance policy list`
+## HIPAA-Oriented Features
+
+Available building blocks include:
+
+- Business associate records.
+- PHI detector and PHI patterns.
+- Minimum necessary enforcement.
+- HIPAA audit controls.
+- Access limits.
+
+Go:
+
+```go
+hipaaReq := &velocity.ComplianceOperationRequest{
+	Path:            "/patients/123",
+	Operation:       "read",
+	Actor:           "nurse.alice",
+	Region:          "US",
+	SubjectID:       "patient-123",
+	Purpose:         "treatment",
+	Encrypted:       true,
+	MFAVerified:     true,
+	CryptoAlgorithm: "AES-256-GCM",
+}
+
+result, err := ctm.ValidateOperation(ctx, hipaaReq)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(result.Allowed, result.RequiredActions)
+```
+
+Command:
 
 ```bash
-secretr compliance policy list
+go test -run 'TestComplianceTagManager_ValidateOperation_HIPAA' .
 ```
 
-### `secretr compliance policy update`
+## Governance And Reporting
+
+Managers and structures cover:
+
+- Compliance reports and report periods.
+- Compliance summaries.
+- Audit statistics.
+- Data inventory summaries.
+- Path access and actor activity.
+- Retention alerts.
+- Violations and alert managers.
+- Webhook configs and rate limiting.
+- Policy packs.
+
+Go:
+
+```go
+audit := velocity.NewAuditLogManager(db)
+violations := velocity.NewViolationsManager(db)
+reports := velocity.NewReportingManager(db, audit, violations)
+
+report, err := reports.GenerateReport(ctx, "all", velocity.ReportPeriod{
+	StartDate: time.Now().Add(-30 * 24 * time.Hour),
+	EndDate:   time.Now(),
+	Duration:  "monthly",
+}, "auditor")
+if err != nil {
+	log.Fatal(err)
+}
+
+data, err := reports.ExportReport(ctx, report, "json")
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(string(data))
+```
+
+Command:
 
 ```bash
-secretr compliance policy update
+go test -run 'TestPolicyPacksInstall|TestBreachIncidentOnCriticalViolation' .
 ```
 
-### `secretr compliance report`
+## Data Controls
+
+Velocity includes managers for:
+
+- Data classification.
+- Data masking.
+- Data residency.
+- Data lineage.
+- Retention policies.
+- Legal holds.
+- Breach incidents.
+- Key rotation workflows.
+
+Retention Go:
+
+```go
+retention := velocity.NewRetentionManager(db)
+_ = retention.AddPolicy(ctx, velocity.RetentionPolicy{
+	PolicyID:        "restricted-7y",
+	DataType:        string(velocity.DataClassRestricted),
+	RetentionPeriod: 7 * 365 * 24 * time.Hour,
+	DeletionMethod:  "cryptographic_erase",
+	ReviewInterval:  90 * 24 * time.Hour,
+})
+
+expired, policy, err := retention.EvaluateRetention(ctx, string(velocity.DataClassRestricted), 8*365*24*time.Hour)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(expired, policy.PolicyID)
+```
+
+Residency Go:
+
+```go
+residency := velocity.NewDataResidencyManager(db)
+_ = residency.AddPolicy(ctx, &velocity.DataResidencyPolicy{
+	PathPrefix: "/patients",
+	Regions:    []string{"US"},
+	Framework:  string(velocity.FrameworkHIPAA),
+	Enabled:    true,
+})
+
+allowed, matched, err := residency.ValidateResidency(ctx, "/patients/123", "EU")
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(allowed, matched.PolicyID)
+```
+
+Masking and lineage Go:
+
+```go
+masking := velocity.NewDataMaskingEngine()
+masked := masking.MaskString("alice@example.test SSN 123-45-6789", velocity.DataClassRestricted)
+fmt.Println(masked)
+
+lineage := velocity.NewLineageManager(db)
+_ = lineage.RecordEvent(ctx, &velocity.LineageEvent{
+	Path:   "/patients/123",
+	Action: "read",
+	Actor:  "nurse.alice",
+})
+events, _ := lineage.GetLineage(ctx, "/patients/123")
+fmt.Println(len(events))
+```
+
+Command:
 
 ```bash
-secretr compliance report --output=/tmp/output.json --standard=demo
+go test -run 'TestRetentionAnonymizeObject|TestDataResidencyBlocksObjectWrite|TestKeyRotationWorkflow' .
 ```
 
-### `secretr compliance score`
+## Operational Guidance
+
+- Treat framework support as implementation support, not certification.
+- Document which managers are initialized by your app.
+- Keep audit exports and backup integrity outputs with incident records.
+- Validate compliance tags in tests for your path model.
+- Avoid benchmark-only durability/security flags in regulated workflows.
+
+## Command Availability
+
+The current shipped binary from `cmd/velocity` does not include a `compliance` command. Use these command forms today:
 
 ```bash
-secretr compliance score --standard=demo
+go run ./examples/compliance_demo
+go run ./examples/compliance_full_demo
+go run ./examples/compliance_governance_cookbook
+go run ./examples/enterprise_compliance_demo
+go test -run 'TestComplianceTagManager|TestCompliancePutGetWithConsentAndMasking|TestRetentionAnonymizeObject' .
 ```
 
-## 6. Audit and Observability
+For HTTP-accessible governance, the enterprise API exposes IAM, STS, metrics, lifecycle, notification, integrity, and cluster routes when `EnterpriseAPI.RegisterRoutes` is wired by the host app. Example IAM evaluation command shape:
 
-All commands in this group are currently observable through:
-- CLI command audit events (`type=cli`, `action=command_execute`)
-- centralized authz decision events (`type=authz`)
-- API request audit events when equivalent API routes are used (`type=api`, `action=request`)
-
-Command-specific domain events may also be emitted by the underlying managers. Validate this explicitly during parity testing.
-
-## 7. Review Checklist (Implementation + Security)
-
-Use this checklist to identify missing implementation pieces and hardening work:
-
-1. Verify every subcommand has expected domain-level audit events (not only CLI/authz wrappers).
-2. Validate flag-level ACL behavior for resource-selector flags (especially `--id`, `--name`, `--path`, `--resource`).
-3. Confirm positional arguments are explicitly modeled where needed (avoid implicit wildcard behavior).
-4. Confirm entitlement scope coverage for all subcommands and critical flags.
-5. Add API parity routes/tests for this group if missing.
-6. Ensure sensitive outputs are masked by default and require explicit reveal flags.
-7. Ensure destructive operations are audited with before/after context and denial reasons.
+```bash
+curl -X POST http://localhost:8081/api/v1/iam/evaluate \
+  -H 'Content-Type: application/json' \
+  -d '{"principal":"alice","action":"object:GetObject","resource":"patients/123"}'
+```

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -50,9 +51,11 @@ type EnvelopeValidationReport struct {
 }
 
 func (db *DB) CreateSecret(ctx context.Context, req SecretRequest) (*SecretRecord, error) {
-	_ = ctx
 	if req.Name == "" {
 		return nil, fmt.Errorf("secret name is required")
+	}
+	if err := db.validateSecretCompliance(ctx, "write", req.Name, "", req.Owner, true); err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC()
 	rec := &SecretRecord{
@@ -83,6 +86,9 @@ func (db *DB) RotateSecret(ctx context.Context, ref SecretRef) (*SecretRecord, e
 	if err != nil {
 		return nil, err
 	}
+	if err := db.validateSecretCompliance(ctx, "write", old.Name, old.Version, old.Owner, true); err != nil {
+		return nil, err
+	}
 	return db.CreateSecret(ctx, SecretRequest{
 		Name:      old.Name,
 		Value:     value,
@@ -93,7 +99,6 @@ func (db *DB) RotateSecret(ctx context.Context, ref SecretRef) (*SecretRecord, e
 }
 
 func (db *DB) GetSecretValue(ctx context.Context, ref SecretRef) ([]byte, *SecretRecord, error) {
-	_ = ctx
 	rec, err := db.GetSecretRecord(ref)
 	if err != nil {
 		legacyKey := "secret:" + ref.Name
@@ -106,6 +111,9 @@ func (db *DB) GetSecretValue(ctx context.Context, ref SecretRef) ([]byte, *Secre
 	}
 	if rec.ExpiresAt != nil && time.Now().After(*rec.ExpiresAt) {
 		return nil, nil, fmt.Errorf("secret expired")
+	}
+	if err := db.validateSecretCompliance(ctx, "read", rec.Name, rec.Version, rec.Owner, true); err != nil {
+		return nil, nil, err
 	}
 	value, err := db.openSecretRecord(rec)
 	if err != nil {
@@ -138,7 +146,33 @@ func (db *DB) GetSecretRecord(ref SecretRef) (*SecretRecord, error) {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, err
 	}
+	if err := db.validateSecretCompliance(context.Background(), "read", rec.Name, rec.Version, rec.Owner, true); err != nil {
+		return nil, err
+	}
 	return &rec, nil
+}
+
+func (db *DB) validateSecretCompliance(ctx context.Context, operation, name, version, actor string, encrypted bool) error {
+	if db.complianceTagManager == nil || name == "" {
+		return nil
+	}
+	ref := ComplianceResourceRef{Type: ComplianceResourceSecret, SecretName: name}
+	if version != "" {
+		ref = ComplianceResourceRef{Type: ComplianceResourceSecretVersion, SecretName: name, SecretVersion: version}
+	}
+	result, err := db.complianceTagManager.ValidateResourceOperation(ctx, ref, &ComplianceOperationRequest{
+		Operation: operation,
+		Actor:     actor,
+		Encrypted: encrypted,
+		Timestamp: time.Now(),
+	})
+	if err != nil {
+		return err
+	}
+	if !result.Allowed {
+		return fmt.Errorf("compliance violation: %s", strings.Join(result.ViolatedRules, "; "))
+	}
+	return nil
 }
 
 func (db *DB) ValidateEnvelopeReferences(ctx context.Context, envelopeID string) (*EnvelopeValidationReport, error) {

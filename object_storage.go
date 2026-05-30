@@ -268,7 +268,9 @@ func (db *DB) validateObjectCompliance(operation, path, user string, encrypted b
 		}
 	}
 
-	result, err := db.complianceTagManager.ValidateOperation(context.Background(), req)
+	bucket, key := objectSplitBucketKey(path)
+	ref := ComplianceResourceRef{Type: ComplianceResourceObject, Path: path, Bucket: bucket, Key: key}
+	result, err := db.complianceTagManager.ValidateResourceOperation(context.Background(), ref, req)
 	if err != nil {
 		return nil, err
 	}

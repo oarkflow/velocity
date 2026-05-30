@@ -14,26 +14,57 @@ import (
 
 // ComplianceTag represents compliance requirements applied to a resource
 type ComplianceTag struct {
-	TagID          string                 `json:"tag_id"`          // Unique identifier for this specific tag
-	Path           string                 `json:"path"`            // Folder, file, or key path
-	Frameworks     []ComplianceFramework  `json:"frameworks"`      // Applied frameworks
-	DataClass      DataClassification     `json:"data_class"`      // Data classification level
-	Owner          string                 `json:"owner"`           // Data owner
-	Custodian      string                 `json:"custodian"`       // Data custodian
-	RetentionDays  int                    `json:"retention_days"`  // Retention period
-	EncryptionReq  bool                   `json:"encryption_req"`  // Encryption required
-	AuditLevel     string                 `json:"audit_level"`     // high, medium, low
-	AccessPolicy   string                 `json:"access_policy"`   // RBAC policy name
-	CreatedAt      time.Time              `json:"created_at"`
-	CreatedBy      string                 `json:"created_by"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	TagID         string                 `json:"tag_id"` // Unique identifier for this specific tag
+	Path          string                 `json:"path"`   // Folder, file, or key path
+	ResourceType  ComplianceResourceType `json:"resource_type,omitempty"`
+	ResourceID    string                 `json:"resource_id,omitempty"`
+	ResourceRef   *ComplianceResourceRef `json:"resource_ref,omitempty"`
+	Frameworks    []ComplianceFramework  `json:"frameworks"`     // Applied frameworks
+	DataClass     DataClassification     `json:"data_class"`     // Data classification level
+	Owner         string                 `json:"owner"`          // Data owner
+	Custodian     string                 `json:"custodian"`      // Data custodian
+	RetentionDays int                    `json:"retention_days"` // Retention period
+	EncryptionReq bool                   `json:"encryption_req"` // Encryption required
+	AuditLevel    string                 `json:"audit_level"`    // high, medium, low
+	AccessPolicy  string                 `json:"access_policy"`  // RBAC policy name
+	CreatedAt     time.Time              `json:"created_at"`
+	CreatedBy     string                 `json:"created_by"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+}
+
+type ComplianceResourceType string
+
+const (
+	ComplianceResourceKV            ComplianceResourceType = "kv"
+	ComplianceResourceObject        ComplianceResourceType = "object"
+	ComplianceResourceBucket        ComplianceResourceType = "bucket"
+	ComplianceResourceFolder        ComplianceResourceType = "folder"
+	ComplianceResourceSecret        ComplianceResourceType = "secret"
+	ComplianceResourceSecretVersion ComplianceResourceType = "secret_version"
+	ComplianceResourceSQLSchema     ComplianceResourceType = "sql_schema"
+	ComplianceResourceSQLTable      ComplianceResourceType = "sql_table"
+	ComplianceResourceSQLColumn     ComplianceResourceType = "sql_column"
+	ComplianceResourceSQLRow        ComplianceResourceType = "sql_row"
+)
+
+type ComplianceResourceRef struct {
+	Type          ComplianceResourceType `json:"type"`
+	Path          string                 `json:"path,omitempty"`
+	Bucket        string                 `json:"bucket,omitempty"`
+	Key           string                 `json:"key,omitempty"`
+	SecretName    string                 `json:"secret_name,omitempty"`
+	SecretVersion string                 `json:"secret_version,omitempty"`
+	SQLSchema     string                 `json:"sql_schema,omitempty"`
+	SQLTable      string                 `json:"sql_table,omitempty"`
+	SQLColumn     string                 `json:"sql_column,omitempty"`
+	SQLRowKey     string                 `json:"sql_row_key,omitempty"`
 }
 
 // ComplianceTagManager manages compliance tags for paths
 type ComplianceTagManager struct {
-	db    *DB
-	tags  map[string][]*ComplianceTag // path -> multiple tags
-	mu    sync.RWMutex
+	db   *DB
+	tags map[string][]*ComplianceTag // path -> multiple tags
+	mu   sync.RWMutex
 
 	consentMgr    *ConsentManager
 	retentionMgr  *RetentionManager
@@ -150,6 +181,14 @@ func (ctm *ComplianceTagManager) SetPolicyEngine(pe *PolicyEngine) {
 
 // TagPath applies compliance frameworks to a path (folder, file, or key)
 func (ctm *ComplianceTagManager) TagPath(ctx context.Context, tag *ComplianceTag) error {
+	if tag != nil && tag.ResourceRef == nil && tag.ResourceType != "" {
+		ref := ComplianceResourceRef{Type: tag.ResourceType, Path: tag.Path}
+		tag.ResourceRef = &ref
+		return ctm.TagResource(ctx, ref, tag)
+	}
+	if tag != nil && tag.ResourceRef != nil {
+		return ctm.TagResource(ctx, *tag.ResourceRef, tag)
+	}
 	ctm.mu.Lock()
 	defer ctm.mu.Unlock()
 
@@ -160,6 +199,9 @@ func (ctm *ComplianceTagManager) TagPath(ctx context.Context, tag *ComplianceTag
 
 	// Normalize path
 	tag.Path = normalizeCompliancePath(tag.Path)
+	tag.ResourceType = ComplianceResourceKV
+	tag.ResourceRef = &ComplianceResourceRef{Type: ComplianceResourceKV, Path: tag.Path}
+	tag.ResourceID = tag.ResourceRef.CanonicalID()
 
 	// Generate TagID if not provided
 	if tag.TagID == "" {
@@ -176,6 +218,7 @@ func (ctm *ComplianceTagManager) TagPath(ctx context.Context, tag *ComplianceTag
 
 	// Store in memory - append to support multiple tags per path
 	ctm.tags[tag.Path] = append(ctm.tags[tag.Path], tag)
+	ctm.tags[tag.ResourceID] = append(ctm.tags[tag.ResourceID], tag)
 
 	// Persist to database with TagID as unique key
 	data, err := json.Marshal(tag)
@@ -188,6 +231,52 @@ func (ctm *ComplianceTagManager) TagPath(ctx context.Context, tag *ComplianceTag
 		return fmt.Errorf("failed to persist tag: %w", err)
 	}
 
+	return nil
+}
+
+func (ctm *ComplianceTagManager) TagResource(ctx context.Context, ref ComplianceResourceRef, tag *ComplianceTag) error {
+	ctm.mu.Lock()
+	defer ctm.mu.Unlock()
+	if tag == nil {
+		return fmt.Errorf("compliance tag required")
+	}
+	if len(tag.Frameworks) == 0 {
+		return fmt.Errorf("at least one compliance framework required")
+	}
+	ref = ref.Normalized()
+	resourceID := ref.CanonicalID()
+	if resourceID == "" {
+		return fmt.Errorf("resource reference is required")
+	}
+	tag.ResourceType = ref.Type
+	tag.ResourceID = resourceID
+	tag.ResourceRef = &ref
+	if tag.Path == "" {
+		tag.Path = ref.PathForCompatibility()
+	}
+	if tag.Path != "" {
+		tag.Path = normalizeCompliancePath(tag.Path)
+	}
+	if tag.TagID == "" {
+		tag.TagID = fmt.Sprintf("%s:%d", resourceID, time.Now().UnixNano())
+	}
+	if tag.CreatedAt.IsZero() {
+		tag.CreatedAt = time.Now()
+	}
+	if tag.AuditLevel == "" {
+		tag.AuditLevel = "high"
+	}
+	ctm.tags[resourceID] = append(ctm.tags[resourceID], tag)
+	if tag.Path != "" {
+		ctm.tags[tag.Path] = append(ctm.tags[tag.Path], tag)
+	}
+	data, err := json.Marshal(tag)
+	if err != nil {
+		return fmt.Errorf("failed to marshal tag: %w", err)
+	}
+	if err := ctm.db.Put([]byte("compliance:tag:"+tag.TagID), data); err != nil {
+		return fmt.Errorf("failed to persist tag: %w", err)
+	}
 	return nil
 }
 
@@ -227,6 +316,48 @@ func (ctm *ComplianceTagManager) GetTag(path string) *ComplianceTag {
 	}
 
 	return nil
+}
+
+func (ctm *ComplianceTagManager) GetResourceTag(ref ComplianceResourceRef) *ComplianceTag {
+	tags := ctm.GetResourceTags(ref)
+	if len(tags) == 0 {
+		return nil
+	}
+	return mergeTags(tags, ref.Normalized().PathForCompatibility())
+}
+
+func (ctm *ComplianceTagManager) GetResourceTags(ref ComplianceResourceRef) []*ComplianceTag {
+	ctm.mu.RLock()
+	defer ctm.mu.RUnlock()
+	ref = ref.Normalized()
+	keys := ref.InheritanceIDs()
+	if path := ref.PathForCompatibility(); path != "" {
+		path = normalizeCompliancePath(path)
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		for i := range parts {
+			keys = append(keys, "/"+strings.Join(parts[:i+1], "/"))
+		}
+	}
+	result := make([]*ComplianceTag, 0)
+	seen := make(map[string]struct{})
+	for _, key := range keys {
+		for _, tag := range ctm.tags[key] {
+			if tag == nil {
+				continue
+			}
+			id := tag.TagID
+			if id == "" {
+				id = fmt.Sprintf("%p", tag)
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			copy := *tag
+			result = append(result, &copy)
+		}
+	}
+	return result
 }
 
 // GetTags retrieves all compliance tags for a specific path (with inheritance)
@@ -272,10 +403,28 @@ func (ctm *ComplianceTagManager) GetAllTags() []*ComplianceTag {
 	defer ctm.mu.RUnlock()
 
 	var allTags []*ComplianceTag
+	seen := make(map[string]struct{})
 	for _, tagList := range ctm.tags {
-		allTags = append(allTags, tagList...)
+		for _, tag := range tagList {
+			if tag == nil {
+				continue
+			}
+			id := tag.TagID
+			if id == "" {
+				id = fmt.Sprintf("%p", tag)
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			allTags = append(allTags, tag)
+		}
 	}
 	return allTags
+}
+
+func (ctm *ComplianceTagManager) HasAnyTags() bool {
+	return len(ctm.GetAllTags()) > 0
 }
 
 // mergeTags merges multiple tags into a single tag with combined frameworks
@@ -356,6 +505,40 @@ func (ctm *ComplianceTagManager) RemoveTag(ctx context.Context, path string) err
 	return nil
 }
 
+func (ctm *ComplianceTagManager) RemoveResourceTag(ctx context.Context, ref ComplianceResourceRef) error {
+	ref = ref.Normalized()
+	resourceID := ref.CanonicalID()
+	if resourceID == "" {
+		return fmt.Errorf("resource reference is required")
+	}
+	ctm.mu.Lock()
+	defer ctm.mu.Unlock()
+	delete(ctm.tags, resourceID)
+	allKeys, err := ctm.db.Keys("*")
+	if err != nil {
+		return err
+	}
+	for _, key := range allKeys {
+		if !strings.HasPrefix(key, "compliance:tag:") {
+			continue
+		}
+		data, err := ctm.db.Get([]byte(key))
+		if err != nil {
+			continue
+		}
+		var tag ComplianceTag
+		if err := json.Unmarshal(data, &tag); err != nil {
+			continue
+		}
+		if tag.ResourceID == resourceID {
+			if err := ctm.db.Delete([]byte(key)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ValidateOperation checks if an operation complies with tagged requirements
 func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *ComplianceOperationRequest) (*ComplianceValidationResult, error) {
 	// System operations bypass all compliance checks
@@ -366,7 +549,18 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 		}, nil
 	}
 
-	tag := ctm.GetTag(req.Path)
+	var tag *ComplianceTag
+	if req.ResourceRef != nil || req.ResourceID != "" {
+		ref := ComplianceResourceRef{}
+		if req.ResourceRef != nil {
+			ref = *req.ResourceRef
+		} else {
+			ref = ComplianceResourceRef{Type: req.ResourceType, Path: req.Path}
+		}
+		tag = ctm.GetResourceTag(ref)
+	} else {
+		tag = ctm.GetTag(req.Path)
+	}
 	if tag == nil {
 		// No compliance requirements - allow
 		return &ComplianceValidationResult{
@@ -376,9 +570,9 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 	}
 
 	result := &ComplianceValidationResult{
-		Allowed:        true,
-		AppliedTag:     tag,
-		ViolatedRules:  make([]string, 0),
+		Allowed:         true,
+		AppliedTag:      tag,
+		ViolatedRules:   make([]string, 0),
 		RequiredActions: make([]string, 0),
 	}
 
@@ -547,6 +741,20 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 	return result, nil
 }
 
+func (ctm *ComplianceTagManager) ValidateResourceOperation(ctx context.Context, ref ComplianceResourceRef, req *ComplianceOperationRequest) (*ComplianceValidationResult, error) {
+	if req == nil {
+		req = &ComplianceOperationRequest{}
+	}
+	ref = ref.Normalized()
+	req.ResourceType = ref.Type
+	req.ResourceID = ref.CanonicalID()
+	req.ResourceRef = &ref
+	if req.Path == "" {
+		req.Path = ref.PathForCompatibility()
+	}
+	return ctm.ValidateOperation(ctx, req)
+}
+
 // validateGDPR checks GDPR compliance requirements
 func (ctm *ComplianceTagManager) validateGDPR(req *ComplianceOperationRequest, tag *ComplianceTag, result *ComplianceValidationResult) {
 	// GDPR Article 17: Right to erasure
@@ -681,21 +889,24 @@ func (ctm *ComplianceTagManager) validateFIPS(req *ComplianceOperationRequest, t
 
 // ComplianceOperationRequest represents a request to validate an operation
 type ComplianceOperationRequest struct {
-	Path            string    `json:"path"`
-	Operation       string    `json:"operation"` // read, write, delete
-	Actor           string    `json:"actor"`
-	IPAddress       string    `json:"ip_address"`
-	Region          string    `json:"region"`
-	SubjectID       string    `json:"subject_id"`
-	Purpose         string    `json:"purpose"`
-	BreakGlassRequestID string `json:"break_glass_request_id"`
-	Encrypted       bool      `json:"encrypted"`
-	SystemOperation bool      `json:"system_operation"`
-	MFAVerified     bool      `json:"mfa_verified"`
-	CryptoAlgorithm string    `json:"crypto_algorithm"`
-	Reason          string    `json:"reason"`
-	DataAge         int       `json:"data_age"` // days
-	Timestamp       time.Time `json:"timestamp"`
+	Path                string                 `json:"path"`
+	ResourceType        ComplianceResourceType `json:"resource_type,omitempty"`
+	ResourceID          string                 `json:"resource_id,omitempty"`
+	ResourceRef         *ComplianceResourceRef `json:"resource_ref,omitempty"`
+	Operation           string                 `json:"operation"` // read, write, delete
+	Actor               string                 `json:"actor"`
+	IPAddress           string                 `json:"ip_address"`
+	Region              string                 `json:"region"`
+	SubjectID           string                 `json:"subject_id"`
+	Purpose             string                 `json:"purpose"`
+	BreakGlassRequestID string                 `json:"break_glass_request_id"`
+	Encrypted           bool                   `json:"encrypted"`
+	SystemOperation     bool                   `json:"system_operation"`
+	MFAVerified         bool                   `json:"mfa_verified"`
+	CryptoAlgorithm     string                 `json:"crypto_algorithm"`
+	Reason              string                 `json:"reason"`
+	DataAge             int                    `json:"data_age"` // days
+	Timestamp           time.Time              `json:"timestamp"`
 }
 
 func containsFramework(frameworks []ComplianceFramework, target ComplianceFramework) bool {
@@ -709,11 +920,11 @@ func containsFramework(frameworks []ComplianceFramework, target ComplianceFramew
 
 // ComplianceValidationResult represents the result of compliance validation
 type ComplianceValidationResult struct {
-	Allowed         bool               `json:"allowed"`
-	Reason          string             `json:"reason"`
-	AppliedTag      *ComplianceTag     `json:"applied_tag,omitempty"`
-	ViolatedRules   []string           `json:"violated_rules"`
-	RequiredActions []string           `json:"required_actions"`
+	Allowed         bool           `json:"allowed"`
+	Reason          string         `json:"reason"`
+	AppliedTag      *ComplianceTag `json:"applied_tag,omitempty"`
+	ViolatedRules   []string       `json:"violated_rules"`
+	RequiredActions []string       `json:"required_actions"`
 }
 
 // loadTags loads compliance tags from database
@@ -742,7 +953,17 @@ func (ctm *ComplianceTagManager) loadTags() error {
 			continue // Skip invalid tags
 		}
 
-		ctm.tags[tag.Path] = append(ctm.tags[tag.Path], &tag)
+		if tag.Path != "" {
+			ctm.tags[tag.Path] = append(ctm.tags[tag.Path], &tag)
+		}
+		if tag.ResourceID != "" {
+			ctm.tags[tag.ResourceID] = append(ctm.tags[tag.ResourceID], &tag)
+		} else if tag.ResourceRef != nil {
+			tag.ResourceID = tag.ResourceRef.CanonicalID()
+			if tag.ResourceID != "" {
+				ctm.tags[tag.ResourceID] = append(ctm.tags[tag.ResourceID], &tag)
+			}
+		}
 	}
 
 	return nil
@@ -754,10 +975,22 @@ func (ctm *ComplianceTagManager) ListTagsByFramework(framework ComplianceFramewo
 	defer ctm.mu.RUnlock()
 
 	var result []*ComplianceTag
+	seen := make(map[string]struct{})
 	for _, tagList := range ctm.tags {
 		for _, tag := range tagList {
+			if tag == nil {
+				continue
+			}
+			id := tag.TagID
+			if id == "" {
+				id = fmt.Sprintf("%p", tag)
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
 			for _, f := range tag.Frameworks {
 				if f == framework {
+					seen[id] = struct{}{}
 					result = append(result, tag)
 					break
 				}
@@ -918,6 +1151,172 @@ func normalizeCompliancePath(path string) string {
 	return path
 }
 
+func (ref ComplianceResourceRef) Normalized() ComplianceResourceRef {
+	if ref.SQLSchema == "" {
+		ref.SQLSchema = "main"
+	}
+	ref.Type = ComplianceResourceType(strings.TrimSpace(string(ref.Type)))
+	ref.Path = strings.TrimSpace(ref.Path)
+	ref.Bucket = strings.Trim(ref.Bucket, "/")
+	ref.Key = strings.Trim(ref.Key, "/")
+	ref.SecretName = strings.TrimSpace(ref.SecretName)
+	ref.SecretVersion = strings.TrimSpace(ref.SecretVersion)
+	ref.SQLTable = strings.TrimSpace(ref.SQLTable)
+	ref.SQLColumn = strings.TrimSpace(ref.SQLColumn)
+	ref.SQLRowKey = strings.TrimSpace(ref.SQLRowKey)
+	switch ref.Type {
+	case ComplianceResourceKV, ComplianceResourceObject, ComplianceResourceFolder:
+		if ref.Path != "" {
+			ref.Path = normalizeCompliancePath(ref.Path)
+		}
+	case ComplianceResourceBucket:
+		if ref.Path == "" && ref.Bucket != "" {
+			ref.Path = normalizeCompliancePath(ref.Bucket)
+		}
+	case ComplianceResourceSecretVersion:
+		if ref.SecretVersion == "" {
+			ref.Type = ComplianceResourceSecret
+		}
+	case ComplianceResourceSQLColumn, ComplianceResourceSQLRow, ComplianceResourceSQLTable:
+		if ref.SQLSchema == "" {
+			ref.SQLSchema = "main"
+		}
+	}
+	return ref
+}
+
+func (ref ComplianceResourceRef) CanonicalID() string {
+	ref = ref.Normalized()
+	switch ref.Type {
+	case ComplianceResourceKV:
+		return "kv:" + ref.Path
+	case ComplianceResourceObject:
+		path := ref.Path
+		if path == "" && ref.Bucket != "" {
+			path = normalizeCompliancePath(ref.Bucket + "/" + ref.Key)
+		}
+		return "object:" + path
+	case ComplianceResourceBucket:
+		if ref.Bucket == "" {
+			ref.Bucket = strings.Trim(ref.Path, "/")
+		}
+		if ref.Bucket == "" {
+			return ""
+		}
+		return "bucket:" + ref.Bucket
+	case ComplianceResourceFolder:
+		return "folder:" + strings.TrimRight(ref.Path, "/")
+	case ComplianceResourceSecret:
+		if ref.SecretName == "" {
+			return ""
+		}
+		return "secret:" + ref.SecretName
+	case ComplianceResourceSecretVersion:
+		if ref.SecretName == "" || ref.SecretVersion == "" {
+			return ""
+		}
+		return "secret_version:" + ref.SecretName + ":" + ref.SecretVersion
+	case ComplianceResourceSQLSchema:
+		if ref.SQLSchema == "" {
+			return ""
+		}
+		return "sql:schema:" + ref.SQLSchema
+	case ComplianceResourceSQLTable:
+		if ref.SQLTable == "" {
+			return ""
+		}
+		return "sql:table:" + ref.SQLSchema + "." + ref.SQLTable
+	case ComplianceResourceSQLColumn:
+		if ref.SQLTable == "" || ref.SQLColumn == "" {
+			return ""
+		}
+		return "sql:column:" + ref.SQLSchema + "." + ref.SQLTable + "." + ref.SQLColumn
+	case ComplianceResourceSQLRow:
+		if ref.SQLTable == "" || ref.SQLRowKey == "" {
+			return ""
+		}
+		rowKey := strings.TrimPrefix(ref.SQLRowKey, ref.SQLTable+":")
+		return "sql:row:" + ref.SQLSchema + "." + ref.SQLTable + "/" + rowKey
+	default:
+		if ref.Path != "" {
+			return string(ref.Type) + ":" + ref.Path
+		}
+	}
+	return ""
+}
+
+func (ref ComplianceResourceRef) PathForCompatibility() string {
+	ref = ref.Normalized()
+	switch ref.Type {
+	case ComplianceResourceKV, ComplianceResourceObject, ComplianceResourceFolder:
+		return ref.Path
+	case ComplianceResourceBucket:
+		return normalizeCompliancePath(ref.Bucket)
+	case ComplianceResourceSecret, ComplianceResourceSecretVersion:
+		return normalizeCompliancePath("secrets/" + ref.SecretName)
+	case ComplianceResourceSQLSchema:
+		return normalizeCompliancePath("sql/" + ref.SQLSchema)
+	case ComplianceResourceSQLTable:
+		return normalizeCompliancePath("sql/" + ref.SQLSchema + "/" + ref.SQLTable)
+	case ComplianceResourceSQLColumn:
+		return normalizeCompliancePath("sql/" + ref.SQLSchema + "/" + ref.SQLTable + "/columns/" + ref.SQLColumn)
+	case ComplianceResourceSQLRow:
+		return normalizeCompliancePath("sql/" + ref.SQLSchema + "/" + ref.SQLTable + "/rows/" + ref.SQLRowKey)
+	}
+	return ref.Path
+}
+
+func (ref ComplianceResourceRef) InheritanceIDs() []string {
+	ref = ref.Normalized()
+	ids := make([]string, 0, 8)
+	add := func(id string) {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	switch ref.Type {
+	case ComplianceResourceSQLTable:
+		add((ComplianceResourceRef{Type: ComplianceResourceSQLSchema, SQLSchema: ref.SQLSchema}).CanonicalID())
+		add(ref.CanonicalID())
+	case ComplianceResourceSQLColumn:
+		add((ComplianceResourceRef{Type: ComplianceResourceSQLSchema, SQLSchema: ref.SQLSchema}).CanonicalID())
+		add((ComplianceResourceRef{Type: ComplianceResourceSQLTable, SQLSchema: ref.SQLSchema, SQLTable: ref.SQLTable}).CanonicalID())
+		add(ref.CanonicalID())
+	case ComplianceResourceSQLRow:
+		add((ComplianceResourceRef{Type: ComplianceResourceSQLSchema, SQLSchema: ref.SQLSchema}).CanonicalID())
+		add((ComplianceResourceRef{Type: ComplianceResourceSQLTable, SQLSchema: ref.SQLSchema, SQLTable: ref.SQLTable}).CanonicalID())
+		add(ref.CanonicalID())
+	case ComplianceResourceSecretVersion:
+		add((ComplianceResourceRef{Type: ComplianceResourceSecret, SecretName: ref.SecretName}).CanonicalID())
+		add(ref.CanonicalID())
+	case ComplianceResourceObject:
+		if ref.Bucket != "" {
+			add((ComplianceResourceRef{Type: ComplianceResourceBucket, Bucket: ref.Bucket}).CanonicalID())
+		} else {
+			parts := strings.Split(strings.Trim(ref.Path, "/"), "/")
+			if len(parts) > 0 && parts[0] != "" {
+				add((ComplianceResourceRef{Type: ComplianceResourceBucket, Bucket: parts[0]}).CanonicalID())
+			}
+		}
+		dir := filepath.Dir(ref.Path)
+		if dir != "." && dir != "/" {
+			parts := strings.Split(strings.Trim(dir, "/"), "/")
+			for i := range parts {
+				add((ComplianceResourceRef{Type: ComplianceResourceFolder, Path: "/" + strings.Join(parts[:i+1], "/")}).CanonicalID())
+			}
+		}
+		add(ref.CanonicalID())
+	case ComplianceResourceKV:
+		parts := strings.Split(strings.Trim(ref.Path, "/"), "/")
+		for i := range parts {
+			add((ComplianceResourceRef{Type: ComplianceResourceKV, Path: "/" + strings.Join(parts[:i+1], "/")}).CanonicalID())
+		}
+	default:
+		add(ref.CanonicalID())
+	}
+	return ids
+}
+
 // GetEffectiveFrameworks returns all frameworks applicable to a path (including inherited)
 func (ctm *ComplianceTagManager) GetEffectiveFrameworks(path string) []ComplianceFramework {
 	tag := ctm.GetTag(path)
@@ -943,4 +1342,32 @@ func (ctm *ComplianceTagManager) CheckCompliance(ctx context.Context, path, oper
 	}
 
 	return result.Allowed, nil
+}
+
+func (ctm *ComplianceTagManager) MaskStringForClass(data string, class DataClassification) string {
+	if ctm == nil || ctm.maskingEngine == nil || !DataClassAtLeast(class, DataClassConfidential) {
+		return data
+	}
+	return ctm.maskingEngine.MaskString(data, class)
+}
+
+func DataClassRank(class DataClassification) int {
+	switch class {
+	case DataClassPublic:
+		return 0
+	case DataClassInternal:
+		return 1
+	case DataClassConfidential:
+		return 2
+	case DataClassRestricted:
+		return 3
+	case DataClassTopSecret:
+		return 4
+	default:
+		return -1
+	}
+}
+
+func DataClassAtLeast(class, threshold DataClassification) bool {
+	return DataClassRank(class) >= DataClassRank(threshold)
 }

@@ -1,530 +1,200 @@
-# Secretr API Reference
+# API Reference
 
-This file is auto-generated from live route registration.
-Do not edit manually. Regenerate with:
+This reference summarizes the API surfaces visible in the current source tree.
 
-```bash
-go run ./internal/secretr/cmd/genapidocs
+## Go Embedded API
+
+Open a database:
+
+```go
+db, err := velocity.New("./data")
+db, err := velocity.NewWithConfig(velocity.Config{Path: "./data"})
 ```
 
-## Common Notes
-- Base URL: `http://127.0.0.1:9090`
-- Auth header: `Authorization: Bearer <session_id>`
-- Routes with `AllowUnauth=true` do not require a session token.
-- Command dispatch endpoint: `POST /api/v1/commands/<cli path as slashes>`
+Core methods:
 
-## GET /api/v1/alerts
+- `Put`, `PutWithTTL`, `Get`, `Delete`, `Has`, `HasString`
+- `Incr`, `Decr`, `TTL`
+- `Keys`, `KeysPage`, `Scan`
+- `Close`, `GetWAL`, `MasterKey`, `NodeID`, `JWTSecret`
+- `EnableCache`, `SetCacheMode`, `SetPerformanceMode`
+- `NewBatchWriter`
 
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
+Search:
 
-Copy-paste example:
+- `PutIndexed`
+- `PutWithIndexFieldPairs`
+- `SetSearchSchema`
+- `SetSearchSchemaForPrefix`
+- `EnableSearchIndex`
+- `RebuildIndex`
+- `ClearIndexForPrefix`
+- `DeleteIndexed`
+- `Search`
+- `SearchCount`
 
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/alerts \
-  -H 'Authorization: Bearer <session_id>'
+Objects:
+
+- `StoreObject`, `StoreObjectStream`
+- `GetObject`, `GetObjectStream`
+- `DeleteObject`, `HardDeleteObject`
+- `ListObjects`
+- `CreateFolder`, `CreateFolders`, `DeleteFolder`, `DeleteFolderRecursive`, `ListFolders`
+- `GetObjectMetadata`, `GetObjectACL`, `GetObjectVersion`
+- `PutObject`, `GetObjectStreamV2`, `DeleteObjectV2`, `RepairObjectStorage`
+
+Security, compliance, and governance APIs are exposed through manager constructors and DB convenience methods documented in the subsystem guides.
+
+Compliance resources:
+
+- `ComplianceResourceType`
+- `ComplianceResourceRef`
+- `ComplianceTag.ResourceType`
+- `ComplianceTag.ResourceID`
+- `ComplianceTag.ResourceRef`
+- `ComplianceOperationRequest.ResourceType`
+- `ComplianceOperationRequest.ResourceID`
+- `ComplianceOperationRequest.ResourceRef`
+
+Compliance tag manager APIs:
+
+- `TagResource(ctx, ref, tag)`
+- `GetResourceTag(ref)`
+- `GetResourceTags(ref)`
+- `RemoveResourceTag(ctx, ref)`
+- `ValidateResourceOperation(ctx, ref, req)`
+- Compatibility wrappers: `TagPath`, `GetTag`, `GetTags`, `RemoveTag`, `ValidateOperation`
+
+Canonical resource examples:
+
+- `kv:/users/1`
+- `object:/reports/q1.pdf`
+- `bucket:archive`
+- `secret:api-key`
+- `secret_version:api-key:v1`
+- `sql:schema:main`
+- `sql:table:main.patients`
+- `sql:column:main.patients.ssn`
+- `sql:row:main.patients/123`
+
+## HTTP Auth
+
+Public route:
+
+- `POST /auth/login`: accepts `username` and `password`, returns a JWT.
+
+Most `/api`, `/api/objects`, `/api/folders`, `/api/versions`, and `/admin` routes require:
+
+```http
+Authorization: Bearer <token>
 ```
 
-## GET /api/v1/alerts/id
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/alerts/id \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## POST /api/v1/alerts/id/acknowledge
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/alerts/id/acknowledge \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## GET /api/v1/alerts/notifiers
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/alerts/notifiers \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/alerts/rules
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/alerts/rules \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## POST /api/v1/alerts/rules
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/alerts/rules \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## GET /api/v1/audit
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:query` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/audit \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/audit/export
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:export` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/audit/export \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## POST /api/v1/auth/login
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `true` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `-` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## POST /api/v1/auth/logout
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `auth:logout` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/auth/logout \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## POST /api/v1/auth/refresh
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `auth:login` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/auth/refresh \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## POST /api/v1/cicd/auth
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `true` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `pipeline:auth` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/cicd/auth \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## POST /api/v1/commands/auth/login
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `true` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `-` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/commands/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## POST /api/v1/commands/secret/list
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `admin:*` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/commands/secret/list \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## GET /api/v1/files
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `file` |
-| RequiredScopes | `file:list` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/files \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## POST /api/v1/files
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `file` |
-| RequiredScopes | `file:upload` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/files \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## DELETE /api/v1/files/name
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `file` |
-| RequiredScopes | `file:delete` |
-
-Copy-paste example:
-
-```bash
-curl -i -X DELETE http://127.0.0.1:9090/api/v1/files/name \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/files/name
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `file` |
-| RequiredScopes | `file:download` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/files/name \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/identities
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `identity` |
-| RequiredScopes | `identity:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/identities \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/identities/id
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `identity` |
-| RequiredScopes | `identity:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/identities/id \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/monitoring/dashboard
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/monitoring/dashboard \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## POST /api/v1/monitoring/dashboard
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/monitoring/dashboard \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## GET /api/v1/monitoring/events
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/monitoring/events \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/monitoring/stream
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `audit` |
-| RequiredScopes | `audit:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/monitoring/stream \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/secrets
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `secret` |
-| RequiredScopes | `secret:list` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/secrets \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## POST /api/v1/secrets
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `secret` |
-| RequiredScopes | `secret:create` |
-
-Copy-paste example:
-
-```bash
-curl -i -X POST http://127.0.0.1:9090/api/v1/secrets \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## DELETE /api/v1/secrets/name
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `secret` |
-| RequiredScopes | `secret:delete` |
-
-Copy-paste example:
-
-```bash
-curl -i -X DELETE http://127.0.0.1:9090/api/v1/secrets/name \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## GET /api/v1/secrets/name
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `secret` |
-| RequiredScopes | `secret:read` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/api/v1/secrets/name \
-  -H 'Authorization: Bearer <session_id>'
-```
-
-## PUT /api/v1/secrets/name
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `false` |
-| RequireACL | `true` |
-| ResourceType | `secret` |
-| RequiredScopes | `secret:update` |
-
-Copy-paste example:
-
-```bash
-curl -i -X PUT http://127.0.0.1:9090/api/v1/secrets/name \
-  -H 'Authorization: Bearer <session_id>' \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-## GET /health
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `true` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `-` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/health
-```
-
-## GET /ready
-
-| Property | Value |
-|---|---|
-| AllowUnauth | `true` |
-| RequireACL | `false` |
-| ResourceType | `-` |
-| RequiredScopes | `-` |
-
-Copy-paste example:
-
-```bash
-curl -i -X GET http://127.0.0.1:9090/ready
-```
+JWT claims must include a non-empty `username`. `role` must be `user` or `admin`; admin routes require `admin`.
 
+## HTTP KV And File API
+
+Protected `/api` routes:
+
+- `POST /api/put`: store key/value data.
+- `GET /api/get/:key`: retrieve a value.
+- `DELETE /api/delete/:key`: delete a key.
+- `POST /api/indexed`: store indexed JSON/data.
+- `POST /api/search`: search indexed data.
+- `GET /api/keys`: list keys with pagination.
+- `POST /api/files`: upload a file.
+- `GET /api/files`: list files.
+- `GET /api/files/:key/meta`: file metadata.
+- `GET /api/files/:key`: download a file.
+- `GET /api/files/:key/thumbnail`: get a thumbnail.
+- `DELETE /api/files/:key`: delete a file.
+
+The current route setup registers `POST /api/put`, `GET /api/get/:key`, and `DELETE /api/delete/:key` twice; behavior is effectively duplicate registration in source.
+
+## Native Object HTTP API
+
+Protected `/api/objects` routes:
+
+- `GET /api/objects/`: list objects.
+- `POST /api/objects/*`: upload multipart file data to an object path.
+- `GET /api/objects/*`: download object data.
+- `DELETE /api/objects/*`: delete object data.
+- `HEAD /api/objects/*`: object headers.
+- `GET /api/objects/meta/*`: object metadata.
+- `PUT /api/objects/acl/*`: update ACL.
+- `GET /api/objects/acl/*`: read ACL.
+
+Protected folder routes:
+
+- `POST /api/folders/*`: create folder.
+- `DELETE /api/folders/*`: delete folder.
+
+Protected version routes:
+
+- `GET /api/versions/*`: list versions for an object path.
+- `GET /api/versions/:versionId/*`: get a specific version.
+
+## Admin API
+
+Protected admin-only routes:
+
+- `GET /admin/wal`
+- `POST /admin/wal/rotate`
+- `GET /admin/wal/archives`
+- `POST /admin/sstable/repair`
+- `GET /admin/masterkey/config`
+- `POST /admin/masterkey/config`
+- `POST /admin/masterkey/refresh`
+- `DELETE /admin/masterkey/cache`
+- `GET /admin/masterkey/cache/info`
+- `POST /admin/thumbnails/regenerate`
+- `POST /admin/thumbnails/:key/regenerate`
+- `DELETE /admin/thumbnails/:key`
+
+Static UI:
+
+- `GET /admin`
+- `GET /admin-ui*`
+- `GET /static*`
+
+## Knowledge Graph API
+
+Routes under `/api/v1/kg`:
+
+- `POST /ingest`
+- `POST /ingest/batch`
+- `POST /search`
+- `GET /documents/:id`
+- `DELETE /documents/:id`
+- `GET /graph/:entity_id?depth=1`
+- `GET /analytics`
+
+## Enterprise API
+
+Routes under `/api/v1`:
+
+- IAM: `POST /iam/policies`, `GET /iam/policies`, `GET /iam/policies/:name`, `DELETE /iam/policies/:name`, `POST /iam/attach`, `POST /iam/detach`, `POST /iam/evaluate`.
+- OIDC: `GET /auth/oidc/login`, `GET /auth/oidc/callback`.
+- LDAP: `POST /auth/ldap/login`.
+- STS: `POST /sts/assume-role`, `POST /sts/web-identity`.
+- Metrics: `GET /metrics`.
+- Notifications: `PUT`, `GET`, `DELETE /buckets/:bucket/notifications`.
+- Lifecycle: `PUT`, `GET`, `DELETE /buckets/:bucket/lifecycle`.
+- Integrity: `GET /integrity/status`, `GET /integrity/object`.
+- Cluster: `GET /cluster/status`, `GET /cluster/nodes`.
+
+Enterprise routes are registered only when `EnterpriseAPI.RegisterRoutes` is called by the hosting program.
+
+## S3-Compatible API
+
+Routes under `/s3`, protected by SigV4 auth middleware:
+
+- `GET /s3/`: list buckets.
+- `PUT /s3/:bucket`: create bucket.
+- `DELETE /s3/:bucket`: delete bucket.
+- `HEAD /s3/:bucket`: bucket existence.
+- `GET /s3/:bucket`: bucket operations selected by query parameters.
+- `HEAD /s3/:bucket/*`: object metadata.
+- `GET /s3/:bucket/*`: get object with range and conditional header support.
+- `PUT /s3/:bucket/*`: put object, copy object, or upload multipart part depending on headers/query.
+- `DELETE /s3/:bucket/*`: delete object.
+- `POST /s3/:bucket/*`: multipart completion and related object operations.

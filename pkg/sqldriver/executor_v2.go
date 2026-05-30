@@ -191,6 +191,15 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 		if err := e.checkInsertConstraints(tableName, meta, data, key, batchConstraintKeys); err != nil {
 			return err
 		}
+		if err := e.validateSQLTableCompliance(ctx, tableName, "write", false); err != nil {
+			return err
+		}
+		if err := e.validateSQLRowCompliance(ctx, tableName, key, "write", false); err != nil {
+			return err
+		}
+		if err := e.validateSQLColumnsCompliance(ctx, tableName, mapKeys(data), "write", false); err != nil {
+			return err
+		}
 
 		if needsExistingRow {
 			if existing, err := e.conn.Get([]byte(key)); err == nil {
@@ -274,6 +283,15 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 					return nil, err
 				}
 				if err := e.checkInsertConstraints(tableName, meta, data, key, batchConstraintKeys); err != nil {
+					return nil, err
+				}
+				if err := e.validateSQLTableCompliance(ctx, tableName, "write", false); err != nil {
+					return nil, err
+				}
+				if err := e.validateSQLRowCompliance(ctx, tableName, key, "write", false); err != nil {
+					return nil, err
+				}
+				if err := e.validateSQLColumnsCompliance(ctx, tableName, mapKeys(data), "write", false); err != nil {
 					return nil, err
 				}
 				puts = append(puts, putOperation{key: []byte(key), value: payload})
@@ -539,6 +557,12 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 		} else if found {
 			meta = loaded
 		}
+		if err := e.validateSQLTableCompliance(ctx, tableName, "write", false); err != nil {
+			return nil, err
+		}
+		if err := e.validateSQLColumnsCompliance(ctx, tableName, columnsFromAssignments(n.Set), "write", false); err != nil {
+			return nil, err
+		}
 	}
 
 	eval := e.newEvaluator(ctx, args)
@@ -572,6 +596,9 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 			row[name] = val
 		}
 		if hasSingleTable {
+			if err := e.validateSQLRowCompliance(ctx, tableName, key, "write", false); err != nil {
+				return nil, err
+			}
 			var err error
 			doc, err = coerceRowTypes(tableName, meta, doc)
 			if err != nil {
@@ -697,10 +724,21 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 	defer unlock()
 
 	keys := make([][]byte, 0, len(rows))
+	tableName := deleteTargetTableName(n)
+	if tableName != "" {
+		if err := e.validateSQLTableCompliance(ctx, tableName, "delete", false); err != nil {
+			return nil, err
+		}
+	}
 	for _, row := range rows {
 		key, ok := row["_key"].(string)
 		if !ok || key == "" {
 			continue
+		}
+		if tableName != "" {
+			if err := e.validateSQLRowCompliance(ctx, tableName, key, "delete", false); err != nil {
+				return nil, err
+			}
 		}
 		keys = append(keys, []byte(key))
 	}
@@ -708,6 +746,17 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 		return nil, err
 	}
 	return Result{rowsAffected: int64(len(keys))}, nil
+}
+
+func deleteTargetTableName(n *ast.DeleteStmt) string {
+	if n == nil || len(n.From) != 1 || hasJoinRef(n.From) {
+		return ""
+	}
+	table, ok := n.From[0].(*ast.SimpleTable)
+	if !ok {
+		return ""
+	}
+	return qualifiedIdentToString(table.Name)
 }
 
 func mutationRowKeys(rows []Row) []string {
@@ -939,19 +988,34 @@ func (e *ExecutorV2) withMaterializedCTEs(ctx context.Context, with *ast.WithCla
 }
 
 func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, error) {
-	if rows, ok, err := e.tryFastPrimaryKeySelect(sel, args); ok {
-		return rows, err
-	}
-	if rows, ok, err := e.tryFastCountSelect(sel, args); ok {
-		return rows, err
-	}
-	if rows, ok, err := e.tryFastPrimaryKeyJoinSelect(ctx, sel, args); ok {
-		return rows, err
+	if !e.sqlSelectHasComplianceTags(sel) {
+		if rows, ok, err := e.tryFastPrimaryKeySelect(sel, args); ok {
+			return rows, err
+		}
+		if rows, ok, err := e.tryFastCountSelect(sel, args); ok {
+			return rows, err
+		}
+		if rows, ok, err := e.tryFastPrimaryKeyJoinSelect(ctx, sel, args); ok {
+			return rows, err
+		}
 	}
 
 	sourceRows, schemaCols, err := e.collectSourceRows(ctx, sel, args)
 	if err != nil {
 		return nil, err
+	}
+	tableName := singleSelectTable(sel)
+	if tableName != "" {
+		if err := e.validateSQLTableCompliance(ctx, tableName, "read", false); err != nil {
+			return nil, err
+		}
+		for _, row := range sourceRows {
+			if key, _ := row["_key"].(string); key != "" {
+				if err := e.validateSQLRowCompliance(ctx, tableName, key, "read", false); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 
 	isAggregate := len(sel.GroupBy) > 0 || selectHasAggregate(sel)
@@ -964,6 +1028,14 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStm
 	}
 	if err != nil {
 		return nil, err
+	}
+	if tableName != "" && len(columns) > 0 {
+		if err := e.validateSQLColumnsCompliance(ctx, tableName, columns, "read", false); err != nil {
+			return nil, err
+		}
+		for i := range projected {
+			projected[i].values = e.maskSQLRowForCompliance(tableName, projected[i].values, projected[i].context, columns)
+		}
 	}
 
 	if sel.Distinct {

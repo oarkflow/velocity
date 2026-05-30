@@ -124,6 +124,16 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 	if err := conn.checkInsertConstraintsForData(p.table, constraints.meta, data, string(key), nil); err != nil {
 		return nil, err
 	}
+	executor := &ExecutorV2{conn: conn}
+	if err := executor.validateSQLTableCompliance(ctx, p.table, "write", false); err != nil {
+		return nil, err
+	}
+	if err := executor.validateSQLRowCompliance(ctx, p.table, string(key), "write", false); err != nil {
+		return nil, err
+	}
+	if err := executor.validateSQLColumnsCompliance(ctx, p.table, mapKeys(data), "write", false); err != nil {
+		return nil, err
+	}
 	if ownedKeyString != "" {
 		err = conn.PutNewOwnedTableRowWithIndexFieldPairsKeyString(p.table, ownedKey, ownedKeyString, ownedPayload, fields)
 	} else {
