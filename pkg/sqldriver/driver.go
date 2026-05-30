@@ -6,9 +6,12 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/oarkflow/velocity"
 )
@@ -22,6 +25,8 @@ type engineState struct {
 	db       *velocity.DB
 	refs     int
 	rowLocks *rowLockManager
+	cache    *SQLQueryCache
+	cacheCfg queryCacheConfig
 }
 
 // DSNConfigs allows injecting pre-configured velocity.Config setups for a given DSN.
@@ -64,12 +69,13 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("velocity driver: failed to load table schemas: %w", err)
 		}
-		state = &engineState{db: db, rowLocks: newRowLockManager()}
+		cacheCfg := newQueryCacheConfig(config)
+		state = &engineState{db: db, rowLocks: newRowLockManager(), cache: newSQLQueryCache(cacheCfg), cacheCfg: cacheCfg}
 		engines[path] = state
 	}
 	state.refs++
 
-	return &Conn{db: state.db, path: path, rowLocks: state.rowLocks}, nil
+	return &Conn{db: state.db, path: path, rowLocks: state.rowLocks, queryCache: state.cache, queryCacheCfg: state.cacheCfg}, nil
 }
 
 // OpenConnector must optionally be implemented by a Driver in order to
@@ -116,7 +122,45 @@ func parseDSN(dsn string) (*velocity.Config, string, error) {
 	config.Path = path
 
 	if len(parts) > 1 {
-		// Future expansion for DSN parameters (e.g., query := parts[1])
+		values, err := url.ParseQuery(parts[1])
+		if err != nil {
+			return nil, "", err
+		}
+		if raw := values.Get("query_cache"); raw != "" {
+			enabled, err := strconv.ParseBool(raw)
+			if err != nil {
+				return nil, "", err
+			}
+			config.SQLQueryCacheDisabled = !enabled
+		}
+		if raw := values.Get("query_cache_max_bytes"); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return nil, "", err
+			}
+			config.SQLQueryCacheMaxBytes = value
+		}
+		if raw := values.Get("query_cache_ttl"); raw != "" {
+			value, err := time.ParseDuration(raw)
+			if err != nil {
+				return nil, "", err
+			}
+			config.SQLQueryCacheTTL = value
+		}
+		if raw := values.Get("query_cache_max_result_bytes"); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				return nil, "", err
+			}
+			config.SQLQueryCacheMaxResultBytes = value
+		}
+		if raw := values.Get("query_cache_max_rows"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return nil, "", err
+			}
+			config.SQLQueryCacheMaxRows = value
+		}
 	}
 	return &config, path, nil
 }

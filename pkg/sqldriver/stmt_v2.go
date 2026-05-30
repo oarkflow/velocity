@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sort"
 
@@ -16,6 +17,7 @@ import (
 type StmtV2 struct {
 	conn       *Conn
 	query      string
+	cacheSQL   string
 	stmt       sqlparser.Statement
 	parser     *sqlparser.Parser
 	paramOrder map[int32]int
@@ -60,12 +62,12 @@ func (s *StmtV2) ExecContext(ctx context.Context, args []driver.NamedValue) (dri
 	if s.fastInsert != nil {
 		return s.fastInsert.Exec(s.conn, args)
 	}
-	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL}
 	return executor.Execute(ctx, s.stmt, args)
 }
 
 func (s *StmtV2) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL}
 	return executor.ExecuteSelect(ctx, s.stmt, args)
 }
 
@@ -90,6 +92,77 @@ type Rows struct {
 	results    []velocity.SearchResult
 	rowMaps    []Row
 	cursor     int
+}
+
+func (r *Rows) Clone() *Rows {
+	if r == nil {
+		return nil
+	}
+	out := &Rows{
+		columns:    append([]string(nil), r.columns...),
+		schemaCols: append([]string(nil), r.schemaCols...),
+		results:    make([]velocity.SearchResult, 0, len(r.results)),
+		rowMaps:    make([]Row, 0, len(r.rowMaps)),
+	}
+	for _, res := range r.results {
+		out.results = append(out.results, velocity.SearchResult{
+			Key:   append([]byte(nil), res.Key...),
+			Value: append([]byte(nil), res.Value...),
+		})
+	}
+	for _, row := range r.rowMaps {
+		next := make(Row, len(row))
+		for k, v := range row {
+			next[k] = v
+		}
+		out.rowMaps = append(out.rowMaps, next)
+	}
+	return out
+}
+
+func (r *Rows) CacheView() *Rows {
+	if r == nil {
+		return nil
+	}
+	return &Rows{
+		columns:    r.columns,
+		schemaCols: r.schemaCols,
+		results:    r.results,
+		rowMaps:    r.rowMaps,
+	}
+}
+
+func (r *Rows) RowCount() int {
+	if r == nil {
+		return 0
+	}
+	if len(r.rowMaps) > 0 {
+		return len(r.rowMaps)
+	}
+	return len(r.results)
+}
+
+func (r *Rows) EstimatedSize() int64 {
+	if r == nil {
+		return 0
+	}
+	size := int64(64 + len(r.columns)*16 + len(r.schemaCols)*16)
+	for _, col := range r.columns {
+		size += int64(len(col))
+	}
+	for _, col := range r.schemaCols {
+		size += int64(len(col))
+	}
+	for _, res := range r.results {
+		size += int64(len(res.Key) + len(res.Value) + 32)
+	}
+	for _, row := range r.rowMaps {
+		size += int64(32 + len(row)*24)
+		for k, v := range row {
+			size += int64(len(k) + len(fmt.Sprint(v)))
+		}
+	}
+	return size
 }
 
 func (r *Rows) Columns() []string {

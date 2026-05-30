@@ -1085,10 +1085,14 @@ func (db *DB) rangeValueIndexCandidatesLocked(prefix string, f SearchFilter) ([]
 func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 	results := make([]SearchResult, 0, min(q.Limit, 100))
 
-	seen := make(map[string]struct{})
+	trackSeen := db.hasOlderTablesLocked()
+	var seen map[string]struct{}
+	if trackSeen {
+		seen = make(map[string]struct{})
+	}
 	now := time.Now().UnixNano()
 
-	processEntry := func(entry *Entry) bool {
+	processEntry := func(entry *Entry, keyStr string) bool {
 		if entry == nil {
 			return false
 		}
@@ -1096,14 +1100,18 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 		if bytes.HasPrefix(key, []byte(indexPrefix)) {
 			return false
 		}
-		keyStr := string(key)
+		if keyStr == "" {
+			keyStr = string(key)
+		}
 		if q.Prefix != "" && !prefixMatch(keyStr, q.Prefix) {
 			return false
 		}
-		if _, exists := seen[keyStr]; exists {
-			return false
+		if trackSeen {
+			if _, exists := seen[keyStr]; exists {
+				return false
+			}
+			seen[keyStr] = struct{}{}
 		}
-		seen[keyStr] = struct{}{}
 		if entry.Deleted {
 			return false
 		}
@@ -1123,12 +1131,11 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 
 	// Scan memtable first: most recent values take precedence.
 	db.memTable.entries.Range(func(k, v any) bool {
-		e := v.(*Entry)
-		return !processEntry(e)
+		return !processEntry(v.(*Entry), k.(string))
 	})
 	for i := len(db.flushingMemTables) - 1; i >= 0 && len(results) < q.Limit; i-- {
 		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
-			return !processEntry(v.(*Entry))
+			return !processEntry(v.(*Entry), k.(string))
 		})
 	}
 	if len(results) >= q.Limit {
@@ -1148,14 +1155,15 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 				idxEntrySize := 4 + len(indexEntry.Key) + 8 + 4
 				idxPos += uint32(idxEntrySize)
 
-				if _, exists := seen[string(indexEntry.Key)]; exists {
+				keyStr := string(indexEntry.Key)
+				if _, exists := seen[keyStr]; exists {
 					continue
 				}
 				entry, err := sst.readEntryAt(indexEntry.Offset, indexEntry.Size)
 				if err != nil {
 					continue
 				}
-				if processEntry(entry) {
+				if processEntry(entry, keyStr) {
 					return results, nil
 				}
 			}
@@ -1165,11 +1173,15 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 }
 
 func (db *DB) scanSearchCountLocked(q SearchQuery) (int, error) {
-	seen := make(map[string]struct{})
+	trackSeen := db.hasOlderTablesLocked()
+	var seen map[string]struct{}
+	if trackSeen {
+		seen = make(map[string]struct{})
+	}
 	now := time.Now().UnixNano()
 	count := 0
 
-	processEntry := func(entry *Entry) bool {
+	processEntry := func(entry *Entry, keyStr string) bool {
 		if entry == nil {
 			return false
 		}
@@ -1177,14 +1189,18 @@ func (db *DB) scanSearchCountLocked(q SearchQuery) (int, error) {
 		if bytes.HasPrefix(key, []byte(indexPrefix)) {
 			return false
 		}
-		keyStr := string(key)
+		if keyStr == "" {
+			keyStr = string(key)
+		}
 		if q.Prefix != "" && !prefixMatch(keyStr, q.Prefix) {
 			return false
 		}
-		if _, exists := seen[keyStr]; exists {
-			return false
+		if trackSeen {
+			if _, exists := seen[keyStr]; exists {
+				return false
+			}
+			seen[keyStr] = struct{}{}
 		}
-		seen[keyStr] = struct{}{}
 		if entry.Deleted {
 			return false
 		}
@@ -1199,11 +1215,11 @@ func (db *DB) scanSearchCountLocked(q SearchQuery) (int, error) {
 	}
 
 	db.memTable.entries.Range(func(k, v any) bool {
-		return !processEntry(v.(*Entry))
+		return !processEntry(v.(*Entry), k.(string))
 	})
 	for i := len(db.flushingMemTables) - 1; i >= 0 && count < q.Limit; i-- {
 		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
-			return !processEntry(v.(*Entry))
+			return !processEntry(v.(*Entry), k.(string))
 		})
 	}
 	if count >= q.Limit {
@@ -1221,20 +1237,33 @@ func (db *DB) scanSearchCountLocked(q SearchQuery) (int, error) {
 				}
 				idxEntrySize := 4 + len(indexEntry.Key) + 8 + 4
 				idxPos += uint32(idxEntrySize)
-				if _, exists := seen[string(indexEntry.Key)]; exists {
+				keyStr := string(indexEntry.Key)
+				if _, exists := seen[keyStr]; exists {
 					continue
 				}
 				entry, err := sst.readEntryAt(indexEntry.Offset, indexEntry.Size)
 				if err != nil {
 					continue
 				}
-				if processEntry(entry) {
+				if processEntry(entry, keyStr) {
 					return count, nil
 				}
 			}
 		}
 	}
 	return count, nil
+}
+
+func (db *DB) hasOlderTablesLocked() bool {
+	if len(db.flushingMemTables) > 0 {
+		return true
+	}
+	for _, level := range db.levels {
+		if len(level) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesQuery(value []byte, q SearchQuery) bool {
@@ -1253,13 +1282,8 @@ func matchesQuery(value []byte, q SearchQuery) bool {
 		return true
 	}
 
-	var doc map[string]any
-	if needsJSONForFilters(q.Filters) {
-		_ = json.Unmarshal(value, &doc)
-	}
-
 	for _, f := range q.Filters {
-		if !evaluateFilter(doc, value, f) {
+		if !evaluateFilter(value, f) {
 			return false
 		}
 	}
@@ -1280,27 +1304,100 @@ func exactIDFilterValue(filters []SearchFilter) (string, bool) {
 	return "", false
 }
 
-func needsJSONForFilters(filters []SearchFilter) bool {
-	for _, f := range filters {
-		if f.Field != "" && f.Field != "$value" {
-			return true
-		}
-	}
-	return false
-}
-
-func evaluateFilter(doc map[string]any, raw []byte, f SearchFilter) bool {
+func evaluateFilter(raw []byte, f SearchFilter) bool {
 	var val any
 	if f.Field == "" || f.Field == "$value" {
 		val = string(raw)
-	} else if doc != nil {
-		val = doc[f.Field]
+	} else {
+		var ok bool
+		val, ok = fastJSONScalarField(raw, f.Field)
+		if !ok {
+			return false
+		}
 	}
 	if val == nil {
 		return false
 	}
 
 	return compareValues(val, f.Value, f.Op)
+}
+
+func fastJSONScalarField(raw []byte, field string) (any, bool) {
+	if len(raw) == 0 || field == "" {
+		return nil, false
+	}
+	pattern := []byte(strconv.Quote(field))
+	for searchFrom := 0; searchFrom < len(raw); {
+		idx := bytes.Index(raw[searchFrom:], pattern)
+		if idx < 0 {
+			return nil, false
+		}
+		i := searchFrom + idx + len(pattern)
+		for i < len(raw) && isJSONSpace(raw[i]) {
+			i++
+		}
+		if i >= len(raw) || raw[i] != ':' {
+			searchFrom = searchFrom + idx + 1
+			continue
+		}
+		i++
+		for i < len(raw) && isJSONSpace(raw[i]) {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, false
+		}
+		switch raw[i] {
+		case '"':
+			j := i + 1
+			escaped := false
+			for j < len(raw) {
+				if raw[j] == '\\' {
+					escaped = true
+					j += 2
+					continue
+				}
+				if raw[j] == '"' {
+					if !escaped {
+						return string(raw[i+1 : j]), true
+					}
+					var s string
+					if err := json.Unmarshal(raw[i:j+1], &s); err != nil {
+						return nil, false
+					}
+					return s, true
+				}
+				j++
+			}
+			return nil, false
+		case 't':
+			if i+4 <= len(raw) && string(raw[i:i+4]) == "true" {
+				return true, true
+			}
+		case 'f':
+			if i+5 <= len(raw) && string(raw[i:i+5]) == "false" {
+				return false, true
+			}
+		case 'n':
+			if i+4 <= len(raw) && string(raw[i:i+4]) == "null" {
+				return nil, true
+			}
+		default:
+			j := i
+			for j < len(raw) && raw[j] != ',' && raw[j] != '}' && !isJSONSpace(raw[j]) {
+				j++
+			}
+			if j == i {
+				return nil, false
+			}
+			if n, err := strconv.ParseFloat(string(raw[i:j]), 64); err == nil {
+				return n, true
+			}
+			return string(raw[i:j]), true
+		}
+		searchFrom = searchFrom + idx + 1
+	}
+	return nil, false
 }
 
 func compareValues(a, b any, op string) bool {

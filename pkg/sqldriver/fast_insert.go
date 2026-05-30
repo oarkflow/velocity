@@ -1,6 +1,7 @@
 package sqldriver
 
 import (
+	"context"
 	"database/sql/driver"
 	"fmt"
 	"strconv"
@@ -100,9 +101,15 @@ func (p *simpleInsertPlan) Exec(conn *Conn, args []driver.NamedValue) (driver.Re
 	if err := conn.checkRawInsertConstraints(p.table, p.columns, values, key); err != nil {
 		return nil, err
 	}
+	unlock, err := conn.lockRows(context.Background(), []string{string(key)})
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := conn.PutWithIndexFieldPairs(key, payload, fields); err != nil {
 		return nil, err
 	}
+	conn.markRowsChanged([][]byte{key})
 	return &Result{lastInsertId: lastInsertID, rowsAffected: 1}, nil
 }
 

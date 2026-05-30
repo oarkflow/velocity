@@ -132,6 +132,101 @@ func BenchmarkVelocityNativeVsSQL(b *testing.B) {
 	})
 }
 
+func BenchmarkSQLQueryCache(b *testing.B) {
+	ctx := context.Background()
+	for _, scenario := range []struct {
+		name         string
+		cacheDisable bool
+	}{
+		{name: "Cached", cacheDisable: false},
+		{name: "NoCache", cacheDisable: true},
+	} {
+		b.Run(scenario.name, func(b *testing.B) {
+			path := filepath.Join(b.TempDir(), "sql_query_cache_"+scenario.name)
+			db := openSQLBenchDBWithConfig(b, path, func(cfg *velocity.Config) {
+				cfg.SQLQueryCacheDisabled = scenario.cacheDisable
+			})
+			seedSQLBenchUsers(b, db, 5000)
+			seedSQLBenchOrders(b, db, 1000)
+
+			b.Run("PointLookupRepeated", func(b *testing.B) {
+				const query = `SELECT name, age FROM users WHERE id = ?`
+				var name string
+				var age int
+				if err := db.QueryRowContext(ctx, query, 100).Scan(&name, &age); err != nil {
+					b.Fatal(err)
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := db.QueryRowContext(ctx, query, 100).Scan(&name, &age); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+
+			b.Run("CountRepeated", func(b *testing.B) {
+				const query = `SELECT count(*) FROM users WHERE age >= ?`
+				var count int
+				if err := db.QueryRowContext(ctx, query, 40).Scan(&count); err != nil {
+					b.Fatal(err)
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := db.QueryRowContext(ctx, query, 40).Scan(&count); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+
+			b.Run("FilteredScanRepeated", func(b *testing.B) {
+				const query = `SELECT id, name, age FROM users WHERE age = ? ORDER BY id LIMIT 20`
+				warmRows, err := db.QueryContext(ctx, query, 40)
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = warmRows.Close()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					rows, err := db.QueryContext(ctx, query, 40)
+					if err != nil {
+						b.Fatal(err)
+					}
+					for rows.Next() {
+						var id int
+						var name string
+						var age int
+						if err := rows.Scan(&id, &name, &age); err != nil {
+							b.Fatal(err)
+						}
+					}
+					if err := rows.Err(); err != nil {
+						b.Fatal(err)
+					}
+					_ = rows.Close()
+				}
+			})
+
+			b.Run("JoinRepeated", func(b *testing.B) {
+				const query = `SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id WHERE orders.id = ?`
+				var name string
+				var total int
+				if err := db.QueryRowContext(ctx, query, 500).Scan(&name, &total); err != nil {
+					b.Fatal(err)
+				}
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if err := db.QueryRowContext(ctx, query, 500).Scan(&name, &total); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+
+			b.StopTimer()
+			_ = db.Close()
+		})
+	}
+}
+
 func benchSchema() map[string]*velocity.SearchSchema {
 	return map[string]*velocity.SearchSchema{
 		"users": {
@@ -139,6 +234,13 @@ func benchSchema() map[string]*velocity.SearchSchema {
 				{Name: "id", Searchable: true, HashSearch: true},
 				{Name: "name", Searchable: true},
 				{Name: "age", Searchable: true, HashSearch: true},
+			},
+		},
+		"orders": {
+			Fields: []velocity.SearchSchemaField{
+				{Name: "id", Searchable: true, HashSearch: true},
+				{Name: "user_id", Searchable: true, HashSearch: true},
+				{Name: "total", Searchable: true},
 			},
 		},
 	}
@@ -165,9 +267,17 @@ func openNativeBenchDB(b *testing.B, path string) *velocity.DB {
 }
 
 func openSQLBenchDB(b *testing.B, path string) *sql.DB {
+	return openSQLBenchDBWithConfig(b, path, nil)
+}
+
+func openSQLBenchDBWithConfig(b *testing.B, path string, mutate func(*velocity.Config)) *sql.DB {
 	b.Helper()
 	_ = os.RemoveAll(path)
-	DSNConfigs[path] = benchConfig(path)
+	cfg := benchConfig(path)
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	DSNConfigs[path] = cfg
 	b.Cleanup(func() {
 		delete(DSNConfigs, path)
 	})
@@ -177,6 +287,33 @@ func openSQLBenchDB(b *testing.B, path string) *sql.DB {
 		b.Fatal(err)
 	}
 	return db
+}
+
+func seedSQLBenchOrders(b *testing.B, db *sql.DB, count int) {
+	b.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE orders (id BIGINT PRIMARY KEY, user_id BIGINT, total BIGINT)`); err != nil {
+		b.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO orders (id, user_id, total) VALUES (?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := 1; i <= count; i++ {
+		if _, err := stmt.ExecContext(ctx, i, (i%5000)+1, i%100); err != nil {
+			_ = tx.Rollback()
+			b.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
 }
 
 func seedNativeBenchUsers(b *testing.B, db *velocity.DB, count int) {

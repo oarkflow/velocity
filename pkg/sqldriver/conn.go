@@ -20,10 +20,17 @@ type Conn struct {
 	db               *velocity.DB
 	path             string
 	rowLocks         *rowLockManager
+	queryCache       *SQLQueryCache
+	queryCacheCfg    queryCacheConfig
 	tx               *velocity.BatchWriter
 	txConstraintKeys map[string]struct{}
 	txRowUnlocks     []func()
 	txLockedRows     map[string]struct{}
+	txQueryCache     *SQLQueryCache
+	txHasWrites      bool
+	txChangedRows    map[string]struct{}
+	txChangedTables  map[string]struct{}
+	txSchemaChanged  bool
 
 	stmtMu    sync.RWMutex
 	stmtCache map[string]*parsedStatement
@@ -31,8 +38,9 @@ type Conn struct {
 }
 
 type parsedStatement struct {
-	stmt   sqlparser.Statement
-	parser *sqlparser.Parser
+	stmt          sqlparser.Statement
+	parser        *sqlparser.Parser
+	normalizedSQL string
 }
 
 type bulkInsertPlan struct {
@@ -71,6 +79,7 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 		stmt:       parsed.stmt,
 		parser:     parsed.parser,
 		paramOrder: paramOrder,
+		cacheSQL:   parsed.normalizedSQL,
 		fastInsert: newSimpleInsertPlan(parsed.stmt, paramOrder),
 	}, nil
 }
@@ -90,7 +99,7 @@ func (c *Conn) getOrParseStatement(query string) (*parsedStatement, error) {
 	if err != nil {
 		return nil, err
 	}
-	parsed := &parsedStatement{stmt: stmt, parser: parser}
+	parsed := &parsedStatement{stmt: stmt, parser: parser, normalizedSQL: normalizeSQLForCache(query)}
 
 	c.stmtMu.Lock()
 	if c.stmtCache == nil {
@@ -127,6 +136,7 @@ func (c *Conn) Close() error {
 		c.tx.Cancel()
 		c.tx = nil
 		c.txConstraintKeys = nil
+		c.clearTxQueryState()
 		c.releaseTxRowLocks()
 	}
 	if c.db != nil && c.path != "" {
@@ -146,6 +156,7 @@ func (c *Conn) Close() error {
 	c.db = nil
 	c.path = ""
 	c.rowLocks = nil
+	c.queryCache = nil
 	c.stmtMu.Lock()
 	c.stmtCache = nil
 	c.stmtMu.Unlock()
@@ -167,6 +178,9 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 	c.tx = c.db.NewBatchWriter(65536)
 	c.txConstraintKeys = make(map[string]struct{})
 	c.txLockedRows = make(map[string]struct{})
+	c.txChangedRows = make(map[string]struct{})
+	c.txChangedTables = make(map[string]struct{})
+	c.txQueryCache = newTxSQLQueryCache(c.queryCacheCfg)
 	return &Tx{conn: c}, nil
 }
 
@@ -177,8 +191,12 @@ type Tx struct {
 
 func (tx *Tx) Commit() error {
 	err := tx.conn.tx.Flush()
+	if err == nil {
+		tx.conn.flushTxInvalidations()
+	}
 	tx.conn.tx = nil
 	tx.conn.txConstraintKeys = nil
+	tx.conn.clearTxQueryState()
 	tx.conn.releaseTxRowLocks()
 	return err
 }
@@ -187,8 +205,104 @@ func (tx *Tx) Rollback() error {
 	tx.conn.tx.Cancel()
 	tx.conn.tx = nil
 	tx.conn.txConstraintKeys = nil
+	tx.conn.clearTxQueryState()
 	tx.conn.releaseTxRowLocks()
 	return nil
+}
+
+func (c *Conn) markRowsChanged(keys [][]byte) {
+	stringKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		keyStr := string(key)
+		if keyStr == "" {
+			continue
+		}
+		stringKeys = append(stringKeys, keyStr)
+		if c.tx != nil {
+			c.txHasWrites = true
+			if c.txChangedRows == nil {
+				c.txChangedRows = make(map[string]struct{})
+			}
+			c.txChangedRows[keyStr] = struct{}{}
+			if table := tableNameFromStorageKey(keyStr); table != "" {
+				if c.txChangedTables == nil {
+					c.txChangedTables = make(map[string]struct{})
+				}
+				c.txChangedTables[table] = struct{}{}
+			}
+		}
+	}
+	if c.tx != nil {
+		if c.txQueryCache != nil {
+			c.txQueryCache.Clear()
+		}
+		return
+	}
+	if c.queryCache != nil {
+		c.queryCache.BumpRows(stringKeys)
+	}
+}
+
+func (c *Conn) markTablesChanged(tables []string) {
+	if c.tx != nil {
+		c.txHasWrites = true
+		if c.txChangedTables == nil {
+			c.txChangedTables = make(map[string]struct{})
+		}
+		for _, table := range tables {
+			if table != "" {
+				c.txChangedTables[table] = struct{}{}
+			}
+		}
+		if c.txQueryCache != nil {
+			c.txQueryCache.Clear()
+		}
+		return
+	}
+	if c.queryCache != nil {
+		c.queryCache.BumpTables(tables)
+	}
+}
+
+func (c *Conn) markSchemaChanged() {
+	if c.tx != nil {
+		c.txHasWrites = true
+		c.txSchemaChanged = true
+		if c.txQueryCache != nil {
+			c.txQueryCache.Clear()
+		}
+		return
+	}
+	if c.queryCache != nil {
+		c.queryCache.BumpSchema()
+	}
+}
+
+func (c *Conn) flushTxInvalidations() {
+	if c.queryCache == nil {
+		return
+	}
+	if c.txSchemaChanged {
+		c.queryCache.BumpSchema()
+	}
+	rows := make([]string, 0, len(c.txChangedRows))
+	for key := range c.txChangedRows {
+		rows = append(rows, key)
+	}
+	c.queryCache.BumpRows(rows)
+	tables := make([]string, 0, len(c.txChangedTables))
+	for table := range c.txChangedTables {
+		tables = append(tables, table)
+	}
+	c.queryCache.BumpTables(tables)
+}
+
+func (c *Conn) clearTxQueryState() {
+	c.txQueryCache = nil
+	c.txHasWrites = false
+	c.txChangedRows = nil
+	c.txChangedTables = nil
+	c.txSchemaChanged = false
 }
 
 func (c *Conn) lockRows(ctx context.Context, keys []string) (func(), error) {
@@ -326,6 +440,9 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 
 	if c.tx != nil {
 		err := write(c.tx.PutWithIndexFieldPairsUnsafe)
+		if err == nil {
+			c.markTablesChanged([]string{table})
+		}
 		return inserted, err
 	}
 	deferIndex := count >= 10_000
@@ -355,6 +472,7 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 			return inserted, err
 		}
 	}
+	c.markTablesChanged([]string{table})
 	return inserted, nil
 }
 

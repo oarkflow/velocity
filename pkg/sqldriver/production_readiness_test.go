@@ -3,6 +3,7 @@ package sqldriver
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -449,6 +450,223 @@ func TestSQLDriver_ProductionConcurrentRowUpdatesSerialize(t *testing.T) {
 	}
 	if balance != workers*updatesPerWorker {
 		t.Fatalf("balance = %d, want %d", balance, workers*updatesPerWorker)
+	}
+}
+
+func TestSQLDriver_ProductionQueryCacheInvalidation(t *testing.T) {
+	db, _ := openProductionTestDB(t, "query_cache")
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT, age BIGINT)`); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30), (2, 'Bob', 40)`); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	const pointSQL = `SELECT name FROM users WHERE id = ?`
+	var name string
+	if err := db.QueryRow(pointSQL, 1).Scan(&name); err != nil {
+		t.Fatalf("point query failed: %v", err)
+	}
+	if name != "Alice" {
+		t.Fatalf("name = %q, want Alice", name)
+	}
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn failed: %v", err)
+	}
+	pointKey := queryCacheKey(pointSQL, []driver.NamedValue{{Ordinal: 1, Value: 1}}, false)
+	if err := conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		if _, ok := c.queryCache.Get(pointKey); !ok {
+			return fmt.Errorf("point query was not cached")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	if _, err := db.Exec(`UPDATE users SET age = age + 1 WHERE id = ?`, 2); err != nil {
+		t.Fatalf("unrelated update failed: %v", err)
+	}
+	conn, err = db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn after unrelated update failed: %v", err)
+	}
+	if err := conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		if _, ok := c.queryCache.Get(pointKey); !ok {
+			return fmt.Errorf("point query cache was invalidated by unrelated row")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	if _, err := db.Exec(`UPDATE users SET name = 'Alicia' WHERE id = ?`, 1); err != nil {
+		t.Fatalf("related update failed: %v", err)
+	}
+	conn, err = db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn after related update failed: %v", err)
+	}
+	if err := conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		if _, ok := c.queryCache.Get(pointKey); ok {
+			return fmt.Errorf("point query cache survived related row update")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	const countSQL = `SELECT count(*) FROM users`
+	var count int
+	if err := db.QueryRow(countSQL).Scan(&count); err != nil {
+		t.Fatalf("count failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	countKey := queryCacheKey(countSQL, nil, false)
+	conn, err = db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn after count failed: %v", err)
+	}
+	if err := conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		if _, ok := c.queryCache.Get(countKey); !ok {
+			return fmt.Errorf("count query was not cached")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	if _, err := db.Exec(`INSERT INTO users (id, name, age) VALUES (3, 'Cara', 20)`); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	conn, err = db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn after insert failed: %v", err)
+	}
+	if err := conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		if _, ok := c.queryCache.Get(countKey); ok {
+			return fmt.Errorf("count query cache survived table insert")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+}
+
+func TestSQLDriver_ProductionQueryCacheTransactionSemantics(t *testing.T) {
+	db, _ := openProductionTestDB(t, "query_cache_tx")
+	db.SetMaxOpenConns(2)
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE accounts (id BIGINT PRIMARY KEY, balance BIGINT)`); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO accounts (id, balance) VALUES (1, 10)`); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	var balance int
+	if err := db.QueryRow(`SELECT balance FROM accounts WHERE id = ?`, 1).Scan(&balance); err != nil {
+		t.Fatalf("seed select failed: %v", err)
+	}
+	if balance != 10 {
+		t.Fatalf("balance = %d, want 10", balance)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin failed: %v", err)
+	}
+	if err := tx.QueryRow(`SELECT balance FROM accounts WHERE id = ?`, 1).Scan(&balance); err != nil {
+		t.Fatalf("read-only tx select failed: %v", err)
+	}
+	if balance != 10 {
+		t.Fatalf("read-only tx balance = %d, want 10", balance)
+	}
+	if _, err := tx.Exec(`UPDATE accounts SET balance = balance + 5 WHERE id = ?`, 1); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("tx update failed: %v", err)
+	}
+	if err := tx.QueryRow(`SELECT balance FROM accounts WHERE id = ?`, 1).Scan(&balance); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("tx read-your-write select failed: %v", err)
+	}
+	if balance != 15 {
+		_ = tx.Rollback()
+		t.Fatalf("tx balance = %d, want 15", balance)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit failed: %v", err)
+	}
+	if err := db.QueryRow(`SELECT balance FROM accounts WHERE id = ?`, 1).Scan(&balance); err != nil {
+		t.Fatalf("post-commit select failed: %v", err)
+	}
+	if balance != 15 {
+		t.Fatalf("post-commit balance = %d, want 15", balance)
+	}
+}
+
+func TestSQLDriver_ProductionQueryCacheJoinHit(t *testing.T) {
+	db, _ := openProductionTestDB(t, "query_cache_join")
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatalf("create users failed: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE orders (id BIGINT PRIMARY KEY, user_id BIGINT, total BIGINT)`); err != nil {
+		t.Fatalf("create orders failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')`); err != nil {
+		t.Fatalf("insert users failed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO orders (id, user_id, total) VALUES (10, 1, 50), (11, 2, 75)`); err != nil {
+		t.Fatalf("insert orders failed: %v", err)
+	}
+
+	const query = `SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id WHERE orders.id = ?`
+	rows, err := db.Query(query, 10)
+	if err != nil {
+		t.Fatalf("join query failed: %v", err)
+	}
+	joined := 0
+	for rows.Next() {
+		joined++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("join rows failed: %v", err)
+	}
+	_ = rows.Close()
+	if joined != 1 {
+		t.Fatalf("join rows = %d, want 1", joined)
+	}
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("conn failed: %v", err)
+	}
+	defer conn.Close()
+	key := queryCacheKey(query, []driver.NamedValue{{Ordinal: 1, Value: 10}}, false)
+	if err := conn.Raw(func(raw any) error {
+		c := raw.(*Conn)
+		if _, ok := c.queryCache.Get(key); !ok {
+			return fmt.Errorf("join query was not cached")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

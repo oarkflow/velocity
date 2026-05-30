@@ -194,6 +194,12 @@ type Config struct {
 	DisableFsync            bool // Skip fsync on WAL writes (data loss risk on crash)
 	DisableIndexPersistence bool // Keep derived search indexes in memory only (benchmarks only)
 	SkipCloseFlush          bool // Skip clean-close memtable flush and rely on WAL replay (benchmarks only)
+
+	SQLQueryCacheDisabled       bool
+	SQLQueryCacheMaxBytes       int64
+	SQLQueryCacheTTL            time.Duration
+	SQLQueryCacheMaxResultBytes int64
+	SQLQueryCacheMaxRows        int
 }
 
 const (

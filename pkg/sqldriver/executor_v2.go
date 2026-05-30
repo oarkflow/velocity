@@ -29,6 +29,7 @@ type ExecutorV2 struct {
 	ctes       map[string]*Rows
 	outerRow   Row
 	rawSQL     string
+	cacheSQL   string
 }
 
 type putOperation struct {
@@ -60,6 +61,8 @@ type searchPlan struct {
 	fullText string
 }
 
+type tableSearchPlans map[string]searchPlan
+
 func (e *ExecutorV2) Execute(ctx context.Context, stmt sqlparser.Statement, args []driver.NamedValue) (driver.Result, error) {
 	switch n := stmt.(type) {
 	case *ast.InsertStmt:
@@ -86,7 +89,34 @@ func (e *ExecutorV2) ExecuteSelect(ctx context.Context, stmt sqlparser.Statement
 	if !ok {
 		return nil, fmt.Errorf("velocity driver: expected SELECT statement, got %T", stmt)
 	}
-	return e.executeSelectStatement(ctx, sel, args)
+	var cache *SQLQueryCache
+	var key string
+	txLocal := false
+	if e.conn.tx != nil && e.conn.txHasWrites {
+		cache = e.conn.txQueryCache
+		txLocal = true
+	} else {
+		cache = e.conn.queryCache
+	}
+	if cache != nil && cache.enabled {
+		cacheSQL := e.cacheSQL
+		if cacheSQL == "" {
+			cacheSQL = normalizeSQLForCache(e.rawSQL)
+		}
+		key = queryCacheKeyFromNormalized(cacheSQL, args, txLocal)
+		if rows, ok := cache.Get(key); ok {
+			return rows, nil
+		}
+	}
+	rows, err := e.executeSelectStatement(ctx, sel, args)
+	if err != nil {
+		return nil, err
+	}
+	if cache != nil && cache.enabled {
+		deps := queryDependenciesForSelect(e, sel, args)
+		cache.Put(key, rows, deps, e.conn.queryCacheCfg.maxRows, e.conn.queryCacheCfg.maxResultBytes)
+	}
+	return rows, nil
 }
 
 func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args []driver.NamedValue) (driver.Result, error) {
@@ -781,6 +811,7 @@ func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, erro
 				if err := e.conn.Delete(viewStorageKey(tableName)); err != nil {
 					return nil, err
 				}
+				e.conn.markSchemaChanged()
 				continue
 			}
 			return nil, fmt.Errorf("velocity driver: table %s does not exist", tableName)
@@ -791,6 +822,7 @@ func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, erro
 				if err := e.conn.Delete(viewStorageKey(tableName)); err != nil {
 					return nil, err
 				}
+				e.conn.markSchemaChanged()
 			}
 			continue
 		}
@@ -808,6 +840,7 @@ func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, erro
 			return nil, err
 		}
 		e.conn.db.SetSearchSchemaForPrefix(tableName, nil)
+		e.conn.markSchemaChanged()
 		total += int64(len(rows))
 	}
 	return &Result{rowsAffected: total}, nil
@@ -870,6 +903,7 @@ func (e *ExecutorV2) withMaterializedCTEs(ctx context.Context, with *ast.WithCla
 		ctes:       make(map[string]*Rows, len(e.ctes)+len(with.CTEs)),
 		outerRow:   e.outerRow,
 		rawSQL:     e.rawSQL,
+		cacheSQL:   e.cacheSQL,
 	}
 	for name, rows := range e.ctes {
 		child.ctes[name] = rows
@@ -894,6 +928,9 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStm
 		return rows, err
 	}
 	if rows, ok, err := e.tryFastCountSelect(sel, args); ok {
+		return rows, err
+	}
+	if rows, ok, err := e.tryFastPrimaryKeyJoinSelect(ctx, sel, args); ok {
 		return rows, err
 	}
 
@@ -993,6 +1030,207 @@ func (e *ExecutorV2) tryFastPrimaryKeySelect(sel *ast.SelectStmt, args []driver.
 	return &Rows{columns: columns, rowMaps: []Row{row}}, true, nil
 }
 
+func (e *ExecutorV2) tryFastPrimaryKeyJoinSelect(ctx context.Context, sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, bool, error) {
+	if sel == nil || sel.Where == nil || sel.Distinct || len(sel.GroupBy) > 0 || len(sel.OrderBy) > 0 || sel.Having != nil || sel.Limit != nil || sel.SetOp != nil {
+		return nil, false, nil
+	}
+	if len(sel.From) != 1 {
+		return nil, false, nil
+	}
+	join, ok := sel.From[0].(*ast.JoinTable)
+	if !ok || join.Kind != ast.InnerJoin || join.On == nil {
+		return nil, false, nil
+	}
+	leftTable, leftAlias, ok := simpleTableNameAndAlias(join.Left)
+	if !ok {
+		return nil, false, nil
+	}
+	rightTable, rightAlias, ok := simpleTableNameAndAlias(join.Right)
+	if !ok {
+		return nil, false, nil
+	}
+	whereTable, whereField, whereValue, ok := e.exactQualifiedFilter(sel.Where, args)
+	if !ok || whereField != "id" {
+		return nil, false, nil
+	}
+	on, ok := join.On.(*ast.BinaryExpr)
+	if !ok || on.Op != lexer.EQ {
+		return nil, false, nil
+	}
+	leftRefTable, leftRefField := qualifiedExprColumn(on.Left)
+	rightRefTable, rightRefField := qualifiedExprColumn(on.Right)
+	if leftRefTable == "" || rightRefTable == "" {
+		return nil, false, nil
+	}
+
+	leftRaw, rightRaw, supported, err := e.fastJoinRowsByPrimaryKeys(leftTable, leftAlias, rightTable, rightAlias, whereTable, whereValue, leftRefTable, leftRefField, rightRefTable, rightRefField)
+	if err != nil {
+		return nil, true, err
+	}
+	if !supported {
+		return nil, false, nil
+	}
+	if leftRaw == nil || rightRaw == nil {
+		return &Rows{columns: explicitColumnNames(sel.Columns)}, true, nil
+	}
+	leftRow, err := rowFromRawTable(leftRaw.key, leftRaw.value, leftAlias)
+	if err != nil {
+		return nil, true, err
+	}
+	rightRow, err := rowFromRawTable(rightRaw.key, rightRaw.value, rightAlias)
+	if err != nil {
+		return nil, true, err
+	}
+	merged := mergeRows(leftRow, rightRow)
+	eval := e.newEvaluator(ctx, args)
+	ok, err = eval.evalBool(sel.Where, merged)
+	if err != nil || !ok {
+		return &Rows{columns: explicitColumnNames(sel.Columns)}, true, err
+	}
+	ok, err = eval.evalBool(join.On, merged)
+	if err != nil || !ok {
+		return &Rows{columns: explicitColumnNames(sel.Columns)}, true, err
+	}
+	columns, projected, err := e.projectRows(ctx, sel, []Row{merged}, args)
+	if err != nil {
+		return nil, true, err
+	}
+	rowMaps := make([]Row, 0, len(projected))
+	for _, row := range projected {
+		rowMaps = append(rowMaps, row.values)
+	}
+	return &Rows{columns: columns, rowMaps: rowMaps}, true, nil
+}
+
+type rawJoinRow struct {
+	key   []byte
+	value []byte
+}
+
+func (e *ExecutorV2) fastJoinRowsByPrimaryKeys(leftTable, leftAlias, rightTable, rightAlias, whereTable string, whereValue any, leftRefTable, leftRefField, rightRefTable, rightRefField string) (*rawJoinRow, *rawJoinRow, bool, error) {
+	var leftRaw, rightRaw *rawJoinRow
+	readByID := func(table string, id any) (*rawJoinRow, error) {
+		key := appendTableKey(nil, table, id)
+		raw, err := e.conn.Get(key)
+		if err != nil {
+			return nil, nil
+		}
+		return &rawJoinRow{key: key, value: raw}, nil
+	}
+	matches := func(ref, table, alias string) bool {
+		return ref == table || ref == alias
+	}
+	if matches(whereTable, leftTable, leftAlias) {
+		var err error
+		leftRaw, err = readByID(leftTable, whereValue)
+		if err != nil || leftRaw == nil {
+			return nil, nil, true, err
+		}
+		if matches(leftRefTable, leftTable, leftAlias) && leftRefField != "id" && rightRefField == "id" {
+			joinValue, ok := fastJSONFieldValue(leftRaw.value, leftRefField)
+			if !ok {
+				return leftRaw, nil, true, nil
+			}
+			rightRaw, err = readByID(rightTable, joinValue)
+			return leftRaw, rightRaw, true, err
+		}
+		if matches(rightRefTable, leftTable, leftAlias) && rightRefField != "id" && leftRefField == "id" {
+			joinValue, ok := fastJSONFieldValue(leftRaw.value, rightRefField)
+			if !ok {
+				return leftRaw, nil, true, nil
+			}
+			rightRaw, err = readByID(rightTable, joinValue)
+			return leftRaw, rightRaw, true, err
+		}
+		return nil, nil, false, nil
+	}
+	if matches(whereTable, rightTable, rightAlias) {
+		var err error
+		rightRaw, err = readByID(rightTable, whereValue)
+		if err != nil || rightRaw == nil {
+			return nil, nil, true, err
+		}
+		if matches(rightRefTable, rightTable, rightAlias) && rightRefField != "id" && leftRefField == "id" {
+			joinValue, ok := fastJSONFieldValue(rightRaw.value, rightRefField)
+			if !ok {
+				return nil, rightRaw, true, nil
+			}
+			leftRaw, err = readByID(leftTable, joinValue)
+			return leftRaw, rightRaw, true, err
+		}
+		if matches(leftRefTable, rightTable, rightAlias) && leftRefField != "id" && rightRefField == "id" {
+			joinValue, ok := fastJSONFieldValue(rightRaw.value, leftRefField)
+			if !ok {
+				return nil, rightRaw, true, nil
+			}
+			leftRaw, err = readByID(leftTable, joinValue)
+			return leftRaw, rightRaw, true, err
+		}
+		return nil, nil, false, nil
+	}
+	return nil, nil, false, nil
+}
+
+func simpleTableNameAndAlias(ref ast.TableRef) (string, string, bool) {
+	table, ok := ref.(*ast.SimpleTable)
+	if !ok {
+		return "", "", false
+	}
+	name := qualifiedIdentToString(table.Name)
+	if name == "" {
+		return "", "", false
+	}
+	alias := name
+	if table.Alias != nil {
+		alias = identToString(table.Alias)
+	}
+	return name, alias, true
+}
+
+func (e *ExecutorV2) exactQualifiedFilter(expr ast.Expr, args []driver.NamedValue) (string, string, any, bool) {
+	eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
+	var walk func(ast.Expr) (string, string, any, bool)
+	walk = func(node ast.Expr) (string, string, any, bool) {
+		switch v := node.(type) {
+		case *ast.BinaryExpr:
+			if v.Op == lexer.AND {
+				if table, field, value, ok := walk(v.Left); ok {
+					return table, field, value, true
+				}
+				return walk(v.Right)
+			}
+			if v.Op != lexer.EQ {
+				return "", "", nil, false
+			}
+			table, field := qualifiedExprColumn(v.Left)
+			if table == "" || field == "" {
+				return "", "", nil, false
+			}
+			value, err := eval.Eval(v.Right, nil)
+			if err != nil || value == nil {
+				return "", "", nil, false
+			}
+			return table, field, value, true
+		}
+		return "", "", nil, false
+	}
+	return walk(expr)
+}
+
+func rowFromRawTable(key, value []byte, alias string) (Row, error) {
+	var data map[string]interface{}
+	if err := json.Unmarshal(value, &data); err != nil {
+		return nil, err
+	}
+	data["_key"] = string(key)
+	row := make(Row, len(data)*2)
+	for k, v := range data {
+		row[alias+"."+k] = v
+		row[k] = v
+	}
+	return row, nil
+}
+
 func fastJSONFieldValue(raw []byte, field string) (any, bool) {
 	if field == "" {
 		return nil, false
@@ -1076,10 +1314,13 @@ func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt,
 	}
 
 	var plan searchPlan
+	var tablePlans tableSearchPlans
 	queryLimit := maxSearchLimit
 	if len(sel.From) == 1 && !hasJoinRef(sel.From) {
 		plan = e.extractSearchPlan(sel.Where, args)
 		queryLimit = e.scanQueryLimit(sel, plan, args)
+	} else if sel.Where != nil {
+		tablePlans = e.extractTableSearchPlans(sel.Where, args)
 	}
 
 	var root Iterator
@@ -1087,7 +1328,7 @@ func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt,
 		if ref == nil {
 			continue
 		}
-		iter, err := e.buildTableRefIterator(ctx, ref, args, plan, queryLimit)
+		iter, err := e.buildTableRefIterator(ctx, ref, args, plan, tablePlans, queryLimit)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1145,7 +1386,7 @@ func (e *ExecutorV2) collectSourceRowsWithPlan(ctx context.Context, sel *ast.Sel
 		if ref == nil {
 			continue
 		}
-		iter, err := e.buildTableRefIterator(ctx, ref, args, plan, queryLimit)
+		iter, err := e.buildTableRefIterator(ctx, ref, args, plan, nil, queryLimit)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1192,13 +1433,24 @@ func (e *ExecutorV2) collectSourceRowsWithPlan(ctx context.Context, sel *ast.Sel
 	return rows, schemaCols, nil
 }
 
-func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef, args []driver.NamedValue, plan searchPlan, queryLimit int) (Iterator, error) {
+func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef, args []driver.NamedValue, plan searchPlan, tablePlans tableSearchPlans, queryLimit int) (Iterator, error) {
 	switch t := ref.(type) {
 	case *ast.SimpleTable:
 		tableName := qualifiedIdentToString(t.Name)
 		alias := tableName
 		if t.Alias != nil {
 			alias = identToString(t.Alias)
+		}
+		tablePlan := plan
+		if tablePlans != nil {
+			if p, ok := tablePlans[alias]; ok {
+				tablePlan = mergeSearchPlans(tablePlan, p)
+			}
+			if alias != tableName {
+				if p, ok := tablePlans[tableName]; ok {
+					tablePlan = mergeSearchPlans(tablePlan, p)
+				}
+			}
 		}
 		if rows, ok := e.ctes[tableName]; ok {
 			return &MemoryIterator{
@@ -1225,8 +1477,8 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 		}
 		return NewConnTableScanIterator(e.conn, alias, velocity.SearchQuery{
 			Prefix:   tableName,
-			FullText: plan.fullText,
-			Filters:  plan.filters,
+			FullText: tablePlan.fullText,
+			Filters:  tablePlan.filters,
 			Limit:    queryLimit,
 		})
 
@@ -1246,11 +1498,11 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 		}, nil
 
 	case *ast.JoinTable:
-		left, err := e.buildTableRefIterator(ctx, t.Left, args, searchPlan{}, maxSearchLimit)
+		left, err := e.buildTableRefIterator(ctx, t.Left, args, searchPlan{}, tablePlans, maxSearchLimit)
 		if err != nil {
 			return nil, err
 		}
-		right, err := e.buildTableRefIterator(ctx, t.Right, args, searchPlan{}, maxSearchLimit)
+		right, err := e.buildTableRefIterator(ctx, t.Right, args, searchPlan{}, tablePlans, maxSearchLimit)
 		if err != nil {
 			return nil, err
 		}
@@ -1342,6 +1594,86 @@ func (e *ExecutorV2) extractSearchPlan(expr ast.Expr, args []driver.NamedValue) 
 	return searchPlan{
 		filters:  e.extractFilters(expr, args),
 		fullText: e.extractFullText(expr, args),
+	}
+}
+
+func mergeSearchPlans(a, b searchPlan) searchPlan {
+	if len(b.filters) > 0 {
+		a.filters = append(a.filters, b.filters...)
+	}
+	if a.fullText == "" {
+		a.fullText = b.fullText
+	}
+	return a
+}
+
+func (e *ExecutorV2) extractTableSearchPlans(expr ast.Expr, args []driver.NamedValue) tableSearchPlans {
+	plans := make(tableSearchPlans)
+	e.extractTableSearchPlansInto(expr, args, plans)
+	if len(plans) == 0 {
+		return nil
+	}
+	return plans
+}
+
+func (e *ExecutorV2) extractTableSearchPlansInto(expr ast.Expr, args []driver.NamedValue, plans tableSearchPlans) {
+	if expr == nil {
+		return
+	}
+	eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
+	switch v := expr.(type) {
+	case *ast.BinaryExpr:
+		if v.Op == lexer.AND {
+			e.extractTableSearchPlansInto(v.Left, args, plans)
+			e.extractTableSearchPlansInto(v.Right, args, plans)
+			return
+		}
+		switch v.Op {
+		case lexer.EQ, lexer.NEQ, lexer.GT, lexer.GTE, lexer.LT, lexer.LTE:
+			table, field := qualifiedExprColumn(v.Left)
+			if table == "" || field == "" {
+				return
+			}
+			value, err := eval.Eval(v.Right, nil)
+			if err != nil || value == nil {
+				return
+			}
+			op := tokenToFilterOp(v.Op)
+			if op == "" {
+				return
+			}
+			p := plans[table]
+			p.filters = append(p.filters, velocity.SearchFilter{
+				Field:    field,
+				Op:       op,
+				Value:    value,
+				HashOnly: v.Op == lexer.EQ,
+			})
+			plans[table] = p
+		}
+	case *ast.LikeExpr:
+		if v.Not || v.Escape != nil {
+			return
+		}
+		table, field := qualifiedExprColumn(v.Expr)
+		if table == "" || field == "" {
+			return
+		}
+		raw, err := eval.Eval(v.Pattern, nil)
+		if err != nil {
+			return
+		}
+		pattern, ok := raw.(string)
+		if !ok {
+			return
+		}
+		term, ok := likePatternToFullText(pattern)
+		if !ok {
+			return
+		}
+		p := plans[table]
+		p.fullText = strings.TrimSpace(strings.Join([]string{p.fullText, term}, " "))
+		plans[table] = p
 	}
 }
 
@@ -1998,6 +2330,7 @@ func (e *ExecutorV2) saveTableSchemaMeta(tableName string, meta tableSchemaMeta)
 		return err
 	}
 	e.conn.db.SetSearchSchemaForPrefix(tableName, meta.SearchSchema)
+	e.conn.markSchemaChanged()
 	return nil
 }
 
@@ -2018,7 +2351,11 @@ func (e *ExecutorV2) saveViewMeta(viewName string, meta viewMeta) error {
 	if err != nil {
 		return err
 	}
-	return e.conn.Put(viewStorageKey(viewName), data)
+	if err := e.conn.Put(viewStorageKey(viewName), data); err != nil {
+		return err
+	}
+	e.conn.markSchemaChanged()
+	return nil
 }
 
 func (e *ExecutorV2) loadViewMeta(viewName string) (viewMeta, bool, error) {
@@ -2088,6 +2425,9 @@ func (e *ExecutorV2) applyPutOperations(ops []putOperation) error {
 				return err
 			}
 		}
+		for _, op := range ops {
+			e.conn.markRowsChanged([][]byte{op.key})
+		}
 		return nil
 	}
 	bw := e.conn.db.NewBatchWriter(len(ops))
@@ -2096,7 +2436,15 @@ func (e *ExecutorV2) applyPutOperations(ops []putOperation) error {
 			return err
 		}
 	}
-	return bw.Flush()
+	if err := bw.Flush(); err != nil {
+		return err
+	}
+	keys := make([][]byte, 0, len(ops))
+	for _, op := range ops {
+		keys = append(keys, op.key)
+	}
+	e.conn.markRowsChanged(keys)
+	return nil
 }
 
 func (e *ExecutorV2) applyDeleteOperations(keys [][]byte) error {
@@ -2109,6 +2457,7 @@ func (e *ExecutorV2) applyDeleteOperations(keys [][]byte) error {
 				return err
 			}
 		}
+		e.conn.markRowsChanged(keys)
 		return nil
 	}
 	bw := e.conn.db.NewBatchWriter(len(keys))
@@ -2117,7 +2466,11 @@ func (e *ExecutorV2) applyDeleteOperations(keys [][]byte) error {
 			return err
 		}
 	}
-	return bw.Flush()
+	if err := bw.Flush(); err != nil {
+		return err
+	}
+	e.conn.markRowsChanged(keys)
+	return nil
 }
 
 func applySetOperation(left, right *Rows, op *ast.SetOperation) *Rows {
@@ -2522,6 +2875,16 @@ func exprColumnName(expr ast.Expr) string {
 		}
 	}
 	return ""
+}
+
+func qualifiedExprColumn(expr ast.Expr) (string, string) {
+	v, ok := expr.(*ast.QualifiedIdent)
+	if !ok || len(v.Parts) < 2 {
+		return "", ""
+	}
+	table := v.Parts[len(v.Parts)-2].Unquoted
+	field := v.Parts[len(v.Parts)-1].Unquoted
+	return table, field
 }
 
 func hasJoinRef(refs []ast.TableRef) bool {
