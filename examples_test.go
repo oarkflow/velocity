@@ -32,13 +32,12 @@ func Example_putWithTTL() {
 	db, _ := NewWithConfig(exampleConfig(tmpdir))
 	defer db.Close()
 
-	_ = db.PutWithTTL([]byte("temp"), []byte("value"), 2*time.Second)
+	_ = db.PutWithTTL([]byte("temp"), []byte("value"), 10*time.Millisecond)
 	ttl, _ := db.TTL([]byte("temp"))
 	if ttl > 0 {
 		fmt.Println("ttl>0")
 	}
-	// Wait until expired
-	time.Sleep(3 * time.Second)
+	time.Sleep(25 * time.Millisecond)
 	_, err := db.Get([]byte("temp"))
 	fmt.Println(err != nil)
 	// Output:

@@ -17,24 +17,36 @@ import (
 // Conn is a connection to a Velocity database using database/sql/driver.
 // It is not used concurrently by multiple goroutines.
 type Conn struct {
-	db               *velocity.DB
-	path             string
-	rowLocks         *rowLockManager
-	queryCache       *SQLQueryCache
-	queryCacheCfg    queryCacheConfig
-	tx               *velocity.BatchWriter
-	txConstraintKeys map[string]struct{}
-	txRowUnlocks     []func()
-	txLockedRows     map[string]struct{}
-	txQueryCache     *SQLQueryCache
-	txHasWrites      bool
-	txChangedRows    map[string]struct{}
-	txChangedTables  map[string]struct{}
-	txSchemaChanged  bool
+	db                      *velocity.DB
+	path                    string
+	rowLocks                *rowLockManager
+	queryCache              *SQLQueryCache
+	queryCacheCfg           queryCacheConfig
+	configuredSearchSchemas map[string]*velocity.SearchSchema
+	tx                      *velocity.BatchWriter
+	txConstraintKeys        map[string]struct{}
+	txRowUnlocks            []func()
+	txLockedRows            map[string]struct{}
+	txDeferredNewRows       map[string]struct{}
+	txQueryCache            *SQLQueryCache
+	txHasWrites             bool
+	txChangedRows           map[string]struct{}
+	txChangedTables         map[string]struct{}
+	txSchemaChanged         bool
+	txClearQueryCache       bool
+	txIndexTables           map[string]struct{}
+	schemaVersion           uint64
 
 	stmtMu    sync.RWMutex
 	stmtCache map[string]*parsedStatement
 	bulkPlans map[string]*bulkInsertPlan
+	schemaMu  sync.RWMutex
+	schemas   map[string]cachedTableSchema
+}
+
+type cachedTableSchema struct {
+	meta  tableSchemaMeta
+	found bool
 }
 
 type parsedStatement struct {
@@ -57,12 +69,18 @@ type rawInsertConstraintPlan struct {
 	meta                  tableSchemaMeta
 	found                 bool
 	columnIndexes         map[string]int
+	primaryKeyIndex       int
+	fastPrimaryKeyOnly    bool
 	skipPrimaryKeyStorage bool
 }
 
 // Prepare returns a prepared statement, bound to this connection.
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 	return c.PrepareContext(context.Background(), query)
+}
+
+func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
+	return checkCommonNamedValue(nv.Value)
 }
 
 // PrepareContext returns a prepared statement, bound to this connection.
@@ -160,6 +178,7 @@ func (c *Conn) Close() error {
 	c.stmtMu.Lock()
 	c.stmtCache = nil
 	c.stmtMu.Unlock()
+	c.clearSchemaCache()
 	return err
 }
 
@@ -175,11 +194,10 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 		return nil, driver.ErrBadConn
 	}
 	// Keep ordinary SQL transactions in one storage batch for common bulk loads.
-	c.tx = c.db.NewBatchWriter(65536)
+	c.tx = c.db.NewBatchWriter(65536).DisableAutoFlush().Reserve(1024, 4096)
 	c.txConstraintKeys = make(map[string]struct{})
 	c.txLockedRows = make(map[string]struct{})
-	c.txChangedRows = make(map[string]struct{})
-	c.txChangedTables = make(map[string]struct{})
+	c.txDeferredNewRows = make(map[string]struct{}, 1024)
 	c.txQueryCache = newTxSQLQueryCache(c.queryCacheCfg)
 	return &Tx{conn: c}, nil
 }
@@ -190,27 +208,59 @@ type Tx struct {
 }
 
 func (tx *Tx) Commit() error {
-	err := tx.conn.tx.Flush()
-	if err == nil {
-		tx.conn.flushTxInvalidations()
+	conn := tx.conn
+	if conn == nil || conn.tx == nil {
+		return driver.ErrBadConn
 	}
-	tx.conn.tx = nil
-	tx.conn.txConstraintKeys = nil
-	tx.conn.clearTxQueryState()
-	tx.conn.releaseTxRowLocks()
+	defer func() {
+		conn.tx = nil
+		conn.txConstraintKeys = nil
+		conn.txDeferredNewRows = nil
+		conn.clearTxQueryState()
+		conn.releaseTxRowLocks()
+	}()
+
+	if err := conn.lockAndValidateDeferredNewRows(context.Background()); err != nil {
+		return err
+	}
+	deferIndexes := conn.shouldDeferTxIndexMaintenance()
+	if deferIndexes {
+		conn.tx.DisableIndexMaintenance()
+	}
+	err := conn.tx.Flush()
+	if err == nil && deferIndexes {
+		err = conn.rebuildDeferredTxIndexes()
+	}
+	if err == nil {
+		conn.flushTxInvalidations()
+	}
 	return err
 }
 
 func (tx *Tx) Rollback() error {
+	if tx.conn == nil || tx.conn.tx == nil {
+		return driver.ErrBadConn
+	}
 	tx.conn.tx.Cancel()
 	tx.conn.tx = nil
 	tx.conn.txConstraintKeys = nil
+	tx.conn.txDeferredNewRows = nil
 	tx.conn.clearTxQueryState()
 	tx.conn.releaseTxRowLocks()
 	return nil
 }
 
 func (c *Conn) markRowsChanged(keys [][]byte) {
+	if c.tx != nil {
+		c.rememberTxIndexTables(keys)
+	}
+	if c.tx != nil && (c.queryCache == nil || !c.queryCache.enabled) {
+		c.txHasWrites = true
+		if c.txQueryCache != nil && c.txQueryCache.enabled {
+			c.txQueryCache.Clear()
+		}
+		return
+	}
 	stringKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
 		keyStr := string(key)
@@ -220,11 +270,19 @@ func (c *Conn) markRowsChanged(keys [][]byte) {
 		stringKeys = append(stringKeys, keyStr)
 		if c.tx != nil {
 			c.txHasWrites = true
-			if c.txChangedRows == nil {
-				c.txChangedRows = make(map[string]struct{})
+			if c.queryCache != nil && c.queryCache.enabled {
+				if !c.txClearQueryCache {
+					if c.txChangedRows == nil {
+						c.txChangedRows = make(map[string]struct{})
+					}
+					c.txChangedRows[keyStr] = struct{}{}
+					if len(c.txChangedRows) > 512 {
+						c.txClearQueryCache = true
+						c.txChangedRows = nil
+					}
+				}
 			}
-			c.txChangedRows[keyStr] = struct{}{}
-			if table := tableNameFromStorageKey(keyStr); table != "" {
+			if table := tableNameFromStorageKey(keyStr); table != "" && c.queryCache != nil && c.queryCache.enabled {
 				if c.txChangedTables == nil {
 					c.txChangedTables = make(map[string]struct{})
 				}
@@ -233,12 +291,16 @@ func (c *Conn) markRowsChanged(keys [][]byte) {
 		}
 	}
 	if c.tx != nil {
-		if c.txQueryCache != nil {
+		if c.txQueryCache != nil && c.txQueryCache.enabled {
 			c.txQueryCache.Clear()
 		}
 		return
 	}
-	if c.queryCache != nil {
+	if c.queryCache != nil && c.queryCache.enabled {
+		if len(stringKeys) > 32 {
+			c.queryCache.Clear()
+			return
+		}
 		c.queryCache.BumpRows(stringKeys)
 	}
 }
@@ -246,15 +308,17 @@ func (c *Conn) markRowsChanged(keys [][]byte) {
 func (c *Conn) markTablesChanged(tables []string) {
 	if c.tx != nil {
 		c.txHasWrites = true
-		if c.txChangedTables == nil {
-			c.txChangedTables = make(map[string]struct{})
-		}
-		for _, table := range tables {
-			if table != "" {
-				c.txChangedTables[table] = struct{}{}
+		if c.queryCache != nil && c.queryCache.enabled {
+			if c.txChangedTables == nil {
+				c.txChangedTables = make(map[string]struct{})
+			}
+			for _, table := range tables {
+				if table != "" {
+					c.txChangedTables[table] = struct{}{}
+				}
 			}
 		}
-		if c.txQueryCache != nil {
+		if c.txQueryCache != nil && c.txQueryCache.enabled {
 			c.txQueryCache.Clear()
 		}
 		return
@@ -265,10 +329,14 @@ func (c *Conn) markTablesChanged(tables []string) {
 }
 
 func (c *Conn) markSchemaChanged() {
+	c.clearSchemaCache()
+	c.schemaVersion++
 	if c.tx != nil {
 		c.txHasWrites = true
-		c.txSchemaChanged = true
-		if c.txQueryCache != nil {
+		if c.queryCache != nil && c.queryCache.enabled {
+			c.txSchemaChanged = true
+		}
+		if c.txQueryCache != nil && c.txQueryCache.enabled {
 			c.txQueryCache.Clear()
 		}
 		return
@@ -279,7 +347,11 @@ func (c *Conn) markSchemaChanged() {
 }
 
 func (c *Conn) flushTxInvalidations() {
-	if c.queryCache == nil {
+	if c.queryCache == nil || !c.queryCache.enabled {
+		return
+	}
+	if c.txClearQueryCache {
+		c.queryCache.Clear()
 		return
 	}
 	if c.txSchemaChanged {
@@ -303,6 +375,60 @@ func (c *Conn) clearTxQueryState() {
 	c.txChangedRows = nil
 	c.txChangedTables = nil
 	c.txSchemaChanged = false
+	c.txClearQueryCache = false
+	c.txIndexTables = nil
+}
+
+func (c *Conn) markTableRowChanged(table string, key []byte) {
+	if c.tx != nil && table != "" {
+		c.rememberTxIndexTable(table)
+		if c.queryCache == nil || !c.queryCache.enabled {
+			c.txHasWrites = true
+			if c.txQueryCache != nil && c.txQueryCache.enabled {
+				c.txQueryCache.Clear()
+			}
+			return
+		}
+	}
+	c.markRowsChanged([][]byte{key})
+}
+
+func (c *Conn) rememberTxIndexTable(table string) {
+	if table == "" {
+		return
+	}
+	if c.txIndexTables == nil {
+		c.txIndexTables = make(map[string]struct{})
+	}
+	c.txIndexTables[table] = struct{}{}
+}
+
+func (c *Conn) rememberTxIndexTables(keys [][]byte) {
+	for _, key := range keys {
+		table := tableNameFromStorageKey(string(key))
+		if table == "" {
+			continue
+		}
+		c.rememberTxIndexTable(table)
+	}
+}
+
+func (c *Conn) shouldDeferTxIndexMaintenance() bool {
+	return c.tx != nil && c.tx.Len() >= 10_000 && len(c.txIndexTables) > 0
+}
+
+func (c *Conn) rebuildDeferredTxIndexes() error {
+	for table := range c.txIndexTables {
+		err := c.db.RebuildIndex(table, nil, &velocity.RebuildOptions{
+			BatchSize:    50_000,
+			NoWAL:        true,
+			InMemoryOnly: true,
+		})
+		if err != nil && !strings.Contains(err.Error(), "search schema not found") {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Conn) lockRows(ctx context.Context, keys []string) (func(), error) {
@@ -345,20 +471,126 @@ func (c *Conn) releaseTxRowLocks() {
 	c.txLockedRows = nil
 }
 
+func (c *Conn) deferTxNewRowLock(key []byte) {
+	if c.tx == nil || len(key) == 0 {
+		return
+	}
+	c.deferTxNewRowKeyString(string(key))
+}
+
+func (c *Conn) deferTxNewRowKeyString(key string) {
+	if c.tx == nil || key == "" {
+		return
+	}
+	if c.txDeferredNewRows == nil {
+		c.txDeferredNewRows = make(map[string]struct{})
+	}
+	c.txDeferredNewRows[key] = struct{}{}
+}
+
+func (c *Conn) lockAndValidateDeferredNewRows(ctx context.Context) error {
+	if c.tx == nil || len(c.txDeferredNewRows) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(c.txDeferredNewRows))
+	for key := range c.txDeferredNewRows {
+		keys = append(keys, key)
+	}
+	var unlock func()
+	var err error
+	if c.rowLocks != nil {
+		unlock, err = c.rowLocks.acquireUnique(ctx, keys)
+		if err != nil {
+			return err
+		}
+		c.txRowUnlocks = append(c.txRowUnlocks, unlock)
+	}
+	for _, key := range keys {
+		if c.db.HasString(key) {
+			return fmt.Errorf("velocity driver: duplicate primary key for %s", key)
+		}
+	}
+	return nil
+}
+
 // Put writes data contextually within a transaction if one is active.
 func (c *Conn) Put(key []byte, value []byte) error {
 	if c.tx != nil {
-		return c.tx.PutUnsafe(key, value)
+		if err := c.tx.PutUnsafe(key, value); err != nil {
+			return err
+		}
+		c.markRowsChanged([][]byte{key})
+		return nil
 	}
-	return c.db.Put(key, value)
+	if err := c.db.Put(key, value); err != nil {
+		return err
+	}
+	c.markRowsChanged([][]byte{key})
+	return nil
 }
 
 func (c *Conn) PutWithIndexFieldPairs(key []byte, value []byte, fields []velocity.IndexFieldValue) error {
+	return c.PutTableRowWithIndexFieldPairs("", key, value, fields)
+}
+
+func (c *Conn) PutTableRowWithIndexFieldPairs(table string, key []byte, value []byte, fields []velocity.IndexFieldValue) error {
+	return c.putTableRowWithIndexFieldPairs(table, key, value, fields, false)
+}
+
+func (c *Conn) PutNewTableRowWithIndexFieldPairs(table string, key []byte, value []byte, fields []velocity.IndexFieldValue) error {
+	return c.putTableRowWithIndexFieldPairs(table, key, value, fields, true)
+}
+
+func (c *Conn) PutNewTableRowWithIndexFieldPairsKeyString(table string, key []byte, keyString string, value []byte, fields []velocity.IndexFieldValue) error {
+	return c.putTableRowWithIndexFieldPairsKeyString(table, key, keyString, value, fields, true)
+}
+
+func (c *Conn) PutNewOwnedTableRowWithIndexFieldPairsKeyString(table string, key []byte, keyString string, value []byte, fields []velocity.IndexFieldValue) error {
 	bw := c.tx
 	if bw == nil {
-		return c.db.PutWithIndexFieldPairs(key, value, fields)
+		return c.PutNewTableRowWithIndexFieldPairsKeyString(table, key, keyString, value, fields)
 	}
-	return bw.PutWithIndexFieldPairsUnsafe(key, value, fields)
+	if err := bw.PutNewOwnedWithIndexFieldPairsKeyStringUnsafe(key, keyString, value, fields); err != nil {
+		return err
+	}
+	if table != "" {
+		c.markTableRowChanged(table, key)
+	} else {
+		c.markRowsChanged([][]byte{key})
+	}
+	return nil
+}
+
+func (c *Conn) putTableRowWithIndexFieldPairs(table string, key []byte, value []byte, fields []velocity.IndexFieldValue, assumeNew bool) error {
+	return c.putTableRowWithIndexFieldPairsKeyString(table, key, "", value, fields, assumeNew)
+}
+
+func (c *Conn) putTableRowWithIndexFieldPairsKeyString(table string, key []byte, keyString string, value []byte, fields []velocity.IndexFieldValue, assumeNew bool) error {
+	bw := c.tx
+	if bw == nil {
+		if err := c.db.PutWithIndexFieldPairs(key, value, fields); err != nil {
+			return err
+		}
+		c.markRowsChanged([][]byte{key})
+		return nil
+	}
+	var err error
+	if assumeNew && keyString != "" {
+		err = bw.PutNewWithIndexFieldPairsKeyStringUnsafe(key, keyString, value, fields)
+	} else if assumeNew {
+		err = bw.PutNewWithIndexFieldPairsUnsafe(key, value, fields)
+	} else {
+		err = bw.PutWithIndexFieldPairsUnsafe(key, value, fields)
+	}
+	if err != nil {
+		return err
+	}
+	if table != "" {
+		c.markTableRowChanged(table, key)
+	} else {
+		c.markRowsChanged([][]byte{key})
+	}
+	return nil
 }
 
 // Get reads through the transaction write set before falling back to committed
@@ -385,9 +617,17 @@ func (c *Conn) PendingTableEntries(table string) []velocity.Entry {
 // Delete removes data contextually within a transaction if one is active.
 func (c *Conn) Delete(key []byte) error {
 	if c.tx != nil {
-		return c.tx.DeleteUnsafe(key)
+		if err := c.tx.DeleteUnsafe(key); err != nil {
+			return err
+		}
+		c.markRowsChanged([][]byte{key})
+		return nil
 	}
-	return c.db.Delete(key)
+	if err := c.db.Delete(key); err != nil {
+		return err
+	}
+	c.markRowsChanged([][]byte{key})
+	return nil
 }
 
 // BulkInsert inserts many rows through the SQL driver's storage mapping without
@@ -441,6 +681,7 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 	if c.tx != nil {
 		err := write(c.tx.PutWithIndexFieldPairsUnsafe)
 		if err == nil {
+			c.rememberTxIndexTable(table)
 			c.markTablesChanged([]string{table})
 		}
 		return inserted, err
@@ -463,10 +704,9 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 	}
 	if deferIndex {
 		err := c.db.RebuildIndex(table, nil, &velocity.RebuildOptions{
-			BatchSize:           batchSize,
-			NoWAL:               true,
-			SkipHighCardinality: true,
-			InMemoryOnly:        true,
+			BatchSize:    batchSize,
+			NoWAL:        true,
+			InMemoryOnly: true,
 		})
 		if err != nil && !strings.Contains(err.Error(), "search schema not found") {
 			return inserted, err
@@ -485,10 +725,7 @@ func (c *Conn) InsertRow(table string, columns []string, values []any) error {
 	if err := c.checkRawInsertConstraints(table, columns, values, key); err != nil {
 		return err
 	}
-	if c.tx != nil {
-		return c.tx.PutWithIndexFieldPairsUnsafe(key, payload, fields)
-	}
-	return c.db.PutWithIndexFieldPairs(key, payload, fields)
+	return c.PutTableRowWithIndexFieldPairs(table, key, payload, fields)
 }
 
 func (c *Conn) InsertRowFunc(table string, columns []string, fill func(dst []any)) error {
@@ -501,10 +738,7 @@ func (c *Conn) InsertRowFunc(table string, columns []string, fill func(dst []any
 	if err := c.checkRawInsertConstraints(table, columns, plan.rowScratch, key); err != nil {
 		return err
 	}
-	if c.tx != nil {
-		return c.tx.PutWithIndexFieldPairsUnsafe(key, payload, fields)
-	}
-	return c.db.PutWithIndexFieldPairs(key, payload, fields)
+	return c.PutTableRowWithIndexFieldPairs(table, key, payload, fields)
 }
 
 func (c *Conn) bulkInsertPlan(table string, columns []string) *bulkInsertPlan {
@@ -572,14 +806,16 @@ func (c *Conn) checkRawInsertConstraintsWithSeen(table string, columns []string,
 		return err
 	}
 	plan := rawInsertConstraintPlan{
-		table:         table,
-		meta:          meta,
-		found:         true,
-		columnIndexes: make(map[string]int, len(columns)),
+		table:           table,
+		meta:            meta,
+		found:           true,
+		columnIndexes:   make(map[string]int, len(columns)),
+		primaryKeyIndex: -1,
 	}
 	for i, col := range columns {
 		plan.columnIndexes[col] = i
 	}
+	plan.finish()
 	return c.checkRawInsertConstraintPlan(plan, values, key, seen)
 }
 
@@ -589,14 +825,16 @@ func (c *Conn) rawInsertConstraintPlan(table string, columns []string) (rawInser
 		return rawInsertConstraintPlan{}, err
 	}
 	plan := rawInsertConstraintPlan{
-		table:         table,
-		meta:          meta,
-		found:         true,
-		columnIndexes: make(map[string]int, len(columns)),
+		table:           table,
+		meta:            meta,
+		found:           true,
+		columnIndexes:   make(map[string]int, len(columns)),
+		primaryKeyIndex: -1,
 	}
 	for i, col := range columns {
 		plan.columnIndexes[col] = i
 	}
+	plan.finish()
 	if meta.PrimaryKey != "" && c.tx == nil {
 		count, err := c.db.SearchCount(velocity.SearchQuery{Prefix: table, Limit: 1})
 		if err != nil {
@@ -608,11 +846,61 @@ func (c *Conn) rawInsertConstraintPlan(table string, columns []string) (rawInser
 }
 
 func (c *Conn) checkRawInsertConstraintPlan(plan rawInsertConstraintPlan, values []any, key []byte, seen map[string]struct{}) error {
+	return c.checkRawInsertConstraintPlanKeyString(plan, values, key, "", seen)
+}
+
+func (c *Conn) checkRawInsertConstraintPlanKeyString(plan rawInsertConstraintPlan, values []any, key []byte, keyString string, seen map[string]struct{}) error {
 	if !plan.found {
 		return nil
 	}
 	table := plan.table
 	meta := plan.meta
+	if plan.fastPrimaryKeyOnly {
+		value := values[plan.primaryKeyIndex]
+		if value == nil {
+			return fmt.Errorf("velocity driver: primary key %s.%s cannot be NULL", table, meta.PrimaryKey)
+		}
+		if c.tx != nil && seen == nil {
+			keyStr := keyString
+			if keyStr == "" {
+				keyStr = string(key)
+			}
+			if _, exists := c.txDeferredNewRows[keyStr]; exists {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+			}
+			c.deferTxNewRowKeyString(keyStr)
+			return nil
+		}
+		if c.tx == nil && seen == nil {
+			if !plan.skipPrimaryKeyStorage && c.db.Has(key) {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+			}
+			return nil
+		}
+		txKey := "pk\x00" + string(key)
+		if seen != nil {
+			if _, exists := seen[txKey]; exists {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+			}
+		}
+		if c.txConstraintKeys != nil {
+			if _, exists := c.txConstraintKeys[txKey]; exists {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+			}
+		}
+		if !plan.skipPrimaryKeyStorage {
+			if c.db.Has(key) {
+				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+			}
+		}
+		if seen != nil {
+			seen[txKey] = struct{}{}
+		}
+		if c.tx != nil {
+			c.txConstraintKeys[txKey] = struct{}{}
+		}
+		return nil
+	}
 	hasSeen := func(key string) bool {
 		if seen != nil {
 			if _, exists := seen[key]; exists {
@@ -657,7 +945,7 @@ func (c *Conn) checkRawInsertConstraintPlan(plan rawInsertConstraintPlan, values
 				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
 			}
 			if !plan.skipPrimaryKeyStorage {
-				if _, err := c.db.Get(key); err == nil {
+				if c.db.Has(key) {
 					return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
 				}
 			}
@@ -700,16 +988,63 @@ func (c *Conn) checkRawInsertConstraintPlan(plan rawInsertConstraintPlan, values
 	return nil
 }
 
+func (p *rawInsertConstraintPlan) finish() {
+	p.primaryKeyIndex = -1
+	if !p.found || p.meta.PrimaryKey == "" {
+		return
+	}
+	idx, ok := p.columnIndexes[p.meta.PrimaryKey]
+	if !ok {
+		return
+	}
+	p.primaryKeyIndex = idx
+	if len(p.meta.NotNull) != 1 || p.meta.NotNull[0] != p.meta.PrimaryKey {
+		return
+	}
+	for _, col := range p.meta.Unique {
+		if col != p.meta.PrimaryKey {
+			return
+		}
+	}
+	p.fastPrimaryKeyOnly = true
+}
+
 func (c *Conn) loadSchemaMeta(table string) (tableSchemaMeta, bool, error) {
+	c.schemaMu.RLock()
+	if c.schemas != nil {
+		if cached, ok := c.schemas[table]; ok {
+			c.schemaMu.RUnlock()
+			return cached.meta, cached.found, nil
+		}
+	}
+	c.schemaMu.RUnlock()
+
 	raw, err := c.db.Get(schemaStorageKey(table))
 	if err != nil {
+		c.storeSchemaCache(table, tableSchemaMeta{}, false)
 		return tableSchemaMeta{}, false, nil
 	}
 	var meta tableSchemaMeta
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return tableSchemaMeta{}, false, err
 	}
+	c.storeSchemaCache(table, meta, true)
 	return meta, true, nil
+}
+
+func (c *Conn) storeSchemaCache(table string, meta tableSchemaMeta, found bool) {
+	c.schemaMu.Lock()
+	if c.schemas == nil {
+		c.schemas = make(map[string]cachedTableSchema)
+	}
+	c.schemas[table] = cachedTableSchema{meta: meta, found: found}
+	c.schemaMu.Unlock()
+}
+
+func (c *Conn) clearSchemaCache() {
+	c.schemaMu.Lock()
+	c.schemas = nil
+	c.schemaMu.Unlock()
 }
 
 func (c *Conn) ReadByID(table string, id any, columns []string) ([]any, error) {

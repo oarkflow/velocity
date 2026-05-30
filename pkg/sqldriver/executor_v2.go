@@ -291,7 +291,7 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	if err := e.applyPutOperations(puts); err != nil {
 		return nil, err
 	}
-	return &Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
+	return Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
 }
 
 func (e *ExecutorV2) tryFastBulkInsert(ctx context.Context, tableName string, columns []string, n *ast.InsertStmt, args []driver.NamedValue) (driver.Result, bool, error) {
@@ -392,7 +392,7 @@ func (e *ExecutorV2) tryFastBulkInsert(ctx context.Context, tableName string, co
 			}
 			inserted++
 		}
-		return &Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
+		return Result{lastInsertId: lastInsertID, rowsAffected: inserted}, nil
 	}
 
 	if e.conn.tx != nil {
@@ -463,13 +463,16 @@ func (e *ExecutorV2) checkInsertConstraints(tableName string, meta tableSchemaMe
 			if hasSeen(txKey) {
 				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", tableName, meta.PrimaryKey)
 			}
-			if _, err := e.conn.Get([]byte(primaryKey)); err == nil {
+			if e.conn.db.Has([]byte(primaryKey)) {
 				return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", tableName, meta.PrimaryKey)
 			}
 			markSeen(txKey)
 		}
 	}
 	for _, col := range meta.Unique {
+		if col == meta.PrimaryKey {
+			continue
+		}
 		value, ok := data[col]
 		if !ok {
 			continue
@@ -582,7 +585,7 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 	if err := e.applyPutOperations(puts); err != nil {
 		return nil, err
 	}
-	return &Result{rowsAffected: updated}, nil
+	return Result{rowsAffected: updated}, nil
 }
 
 func updateTargetTableName(n *ast.UpdateStmt) (string, bool) {
@@ -697,7 +700,7 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 	if err := e.applyDeleteOperations(keys); err != nil {
 		return nil, err
 	}
-	return &Result{rowsAffected: int64(len(keys))}, nil
+	return Result{rowsAffected: int64(len(keys))}, nil
 }
 
 func mutationRowKeys(rows []Row) []string {
@@ -722,7 +725,7 @@ func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableS
 		return nil, err
 	} else if found {
 		if n.IfNotExists {
-			return &Result{}, nil
+			return Result{}, nil
 		}
 		return nil, fmt.Errorf("velocity driver: table %s already exists", tableName)
 	}
@@ -736,7 +739,7 @@ func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableS
 	}
 
 	if n.Select == nil {
-		return &Result{}, nil
+		return Result{}, nil
 	}
 
 	rows, err := e.executeSelectStatement(ctx, n.Select, args)
@@ -759,7 +762,7 @@ func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableS
 	if err := e.applyPutOperations(puts); err != nil {
 		return nil, err
 	}
-	return &Result{rowsAffected: inserted}, nil
+	return Result{rowsAffected: inserted}, nil
 }
 
 func (e *ExecutorV2) executeCreateView(ctx context.Context, n *ast.CreateViewStmt) (driver.Result, error) {
@@ -792,7 +795,7 @@ func (e *ExecutorV2) executeCreateView(ctx context.Context, n *ast.CreateViewStm
 	if err := e.saveViewMeta(viewName, meta); err != nil {
 		return nil, err
 	}
-	return &Result{}, nil
+	return Result{}, nil
 }
 
 func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, error) {
@@ -843,7 +846,7 @@ func (e *ExecutorV2) executeDropTable(n *ast.DropTableStmt) (driver.Result, erro
 		e.conn.markSchemaChanged()
 		total += int64(len(rows))
 	}
-	return &Result{rowsAffected: total}, nil
+	return Result{rowsAffected: total}, nil
 }
 
 func (e *ExecutorV2) executeTruncateTable(tableName string) (driver.Result, error) {
@@ -858,7 +861,7 @@ func (e *ExecutorV2) executeTruncateTable(tableName string) (driver.Result, erro
 	if err := e.applyDeleteOperations(keys); err != nil {
 		return nil, err
 	}
-	return &Result{rowsAffected: int64(len(keys))}, nil
+	return Result{rowsAffected: int64(len(keys))}, nil
 }
 
 func (e *ExecutorV2) executeSelectStatement(ctx context.Context, stmt *ast.SelectStmt, args []driver.NamedValue) (*Rows, error) {
@@ -977,7 +980,7 @@ func (e *ExecutorV2) executeSingleSelect(ctx context.Context, sel *ast.SelectStm
 }
 
 func (e *ExecutorV2) tryFastPrimaryKeySelect(sel *ast.SelectStmt, args []driver.NamedValue) (*Rows, bool, error) {
-	if sel == nil || sel.Where == nil || sel.Distinct || len(sel.GroupBy) > 0 || len(sel.OrderBy) > 0 || sel.Having != nil || sel.Limit != nil {
+	if sel == nil || sel.Where == nil || sel.Distinct || len(sel.GroupBy) > 0 || len(sel.OrderBy) > 0 || sel.Having != nil || sel.Limit != nil || selectHasAggregate(sel) {
 		return nil, false, nil
 	}
 	if len(sel.From) != 1 || hasJoinRef(sel.From) {
@@ -1855,7 +1858,7 @@ func (e *ExecutorV2) fastCountWhereSupported(expr ast.Expr, args []driver.NamedV
 }
 
 func countOnlySelectName(cols []ast.SelectColumn) (string, bool) {
-	if len(cols) != 1 || cols[0].Star {
+	if len(cols) != 1 {
 		return "", false
 	}
 	call, ok := cols[0].Expr.(*ast.FuncCall)
@@ -2299,6 +2302,28 @@ func (e *ExecutorV2) schemaMetaFromCreateStmt(ctx context.Context, stmt *ast.Cre
 			meta.Unique = appendUniqueString(meta.Unique, name)
 		}
 	}
+	if configured := e.conn.configuredSearchSchemas[qualifiedIdentToString(stmt.Table)]; configured != nil {
+		meta.SearchSchema = cloneSearchSchema(configured)
+		fieldByName = make(map[string]*velocity.SearchSchemaField, len(meta.SearchSchema.Fields))
+		for i := range meta.SearchSchema.Fields {
+			field := &meta.SearchSchema.Fields[i]
+			fieldByName[field.Name] = field
+		}
+		if meta.PrimaryKey != "" {
+			if field, ok := fieldByName[meta.PrimaryKey]; ok {
+				field.HashSearch = true
+			} else {
+				meta.SearchSchema.Fields = append(meta.SearchSchema.Fields, velocity.SearchSchemaField{Name: meta.PrimaryKey, HashSearch: true})
+			}
+		}
+		for _, col := range meta.Unique {
+			if field, ok := fieldByName[col]; ok {
+				field.HashSearch = true
+			} else {
+				meta.SearchSchema.Fields = append(meta.SearchSchema.Fields, velocity.SearchSchemaField{Name: col, HashSearch: true})
+			}
+		}
+	}
 
 	if stmt.Select != nil {
 		rows, err := e.executeSelectStatement(ctx, stmt.Select, args)
@@ -2321,6 +2346,13 @@ func (e *ExecutorV2) schemaMetaFromCreateStmt(ctx context.Context, stmt *ast.Cre
 	return meta, nil
 }
 
+func cloneSearchSchema(schema *velocity.SearchSchema) *velocity.SearchSchema {
+	if schema == nil {
+		return nil
+	}
+	return &velocity.SearchSchema{Fields: append([]velocity.SearchSchemaField(nil), schema.Fields...)}
+}
+
 func (e *ExecutorV2) saveTableSchemaMeta(tableName string, meta tableSchemaMeta) error {
 	data, err := json.Marshal(meta)
 	if err != nil {
@@ -2329,21 +2361,14 @@ func (e *ExecutorV2) saveTableSchemaMeta(tableName string, meta tableSchemaMeta)
 	if err := e.conn.Put(schemaStorageKey(tableName), data); err != nil {
 		return err
 	}
+	e.conn.storeSchemaCache(tableName, meta, true)
 	e.conn.db.SetSearchSchemaForPrefix(tableName, meta.SearchSchema)
 	e.conn.markSchemaChanged()
 	return nil
 }
 
 func (e *ExecutorV2) loadTableSchemaMeta(tableName string) (tableSchemaMeta, bool, error) {
-	data, err := e.conn.db.Get(schemaStorageKey(tableName))
-	if err != nil {
-		return tableSchemaMeta{}, false, nil
-	}
-	var meta tableSchemaMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return tableSchemaMeta{}, false, err
-	}
-	return meta, true, nil
+	return e.conn.loadSchemaMeta(tableName)
 }
 
 func (e *ExecutorV2) saveViewMeta(viewName string, meta viewMeta) error {

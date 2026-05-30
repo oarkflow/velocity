@@ -3,3 +3,4 @@
 .codex
 .gocache
 heap.prof
+*.test

@@ -193,7 +193,7 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 	db.mutex.RLock()
 	// Scan memtable
 	db.memTable.entries.Range(func(k, v any) bool {
-		e := v.(*Entry)
+		e := storedEntryPtr(v)
 		if e.Deleted {
 			return true
 		}
@@ -215,7 +215,7 @@ func (db *DB) RebuildIndex(prefix string, schema *SearchSchema, opts *RebuildOpt
 	})
 	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
 		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
-			e := v.(*Entry)
+			e := storedEntryPtr(v)
 			if e.Deleted || isIndexKey(e.Key) {
 				return true
 			}
@@ -412,8 +412,10 @@ func (db *DB) applyIndexBatch(prefix string, batch []indexWorkItem, opts *Rebuil
 			}
 		}
 	}
-	if nextDocIDLoaded && !inMemoryOnly {
-		if err := db.storeNextDocIDLockedNoWAL(nextDocID); err != nil {
+	if nextDocIDLoaded {
+		if inMemoryOnly {
+			db.nextDocID = nextDocID
+		} else if err := db.storeNextDocIDLockedNoWAL(nextDocID); err != nil {
 			return err
 		}
 	}
@@ -1131,11 +1133,11 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 
 	// Scan memtable first: most recent values take precedence.
 	db.memTable.entries.Range(func(k, v any) bool {
-		return !processEntry(v.(*Entry), k.(string))
+		return !processEntry(storedEntryPtr(v), k.(string))
 	})
 	for i := len(db.flushingMemTables) - 1; i >= 0 && len(results) < q.Limit; i-- {
 		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
-			return !processEntry(v.(*Entry), k.(string))
+			return !processEntry(storedEntryPtr(v), k.(string))
 		})
 	}
 	if len(results) >= q.Limit {
@@ -1215,11 +1217,11 @@ func (db *DB) scanSearchCountLocked(q SearchQuery) (int, error) {
 	}
 
 	db.memTable.entries.Range(func(k, v any) bool {
-		return !processEntry(v.(*Entry), k.(string))
+		return !processEntry(storedEntryPtr(v), k.(string))
 	})
 	for i := len(db.flushingMemTables) - 1; i >= 0 && count < q.Limit; i-- {
 		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
-			return !processEntry(v.(*Entry), k.(string))
+			return !processEntry(storedEntryPtr(v), k.(string))
 		})
 	}
 	if count >= q.Limit {
@@ -1326,50 +1328,80 @@ func fastJSONScalarField(raw []byte, field string) (any, bool) {
 	if len(raw) == 0 || field == "" {
 		return nil, false
 	}
-	pattern := []byte(strconv.Quote(field))
-	for searchFrom := 0; searchFrom < len(raw); {
-		idx := bytes.Index(raw[searchFrom:], pattern)
-		if idx < 0 {
+	i := 0
+	for i < len(raw) && isJSONSpace(raw[i]) {
+		i++
+	}
+	if i >= len(raw) || raw[i] != '{' {
+		return nil, false
+	}
+	i++
+	for i < len(raw) {
+		for i < len(raw) && isJSONSpace(raw[i]) {
+			i++
+		}
+		if i >= len(raw) || raw[i] == '}' {
 			return nil, false
 		}
-		i := searchFrom + idx + len(pattern)
+		if raw[i] != '"' {
+			return nil, false
+		}
+		keyStart := i
+		keyEnd, escaped, ok := scanJSONString(raw, i)
+		if !ok {
+			return nil, false
+		}
+		key := string(raw[keyStart+1 : keyEnd])
+		if escaped {
+			var decoded string
+			if err := json.Unmarshal(raw[keyStart:keyEnd+1], &decoded); err != nil {
+				return nil, false
+			}
+			key = decoded
+		}
+		i = keyEnd + 1
 		for i < len(raw) && isJSONSpace(raw[i]) {
 			i++
 		}
 		if i >= len(raw) || raw[i] != ':' {
-			searchFrom = searchFrom + idx + 1
-			continue
+			return nil, false
 		}
 		i++
 		for i < len(raw) && isJSONSpace(raw[i]) {
 			i++
 		}
-		if i >= len(raw) {
-			return nil, false
+		if key != field {
+			next, ok := skipJSONValue(raw, i)
+			if !ok {
+				return nil, false
+			}
+			i = next
+			for i < len(raw) && isJSONSpace(raw[i]) {
+				i++
+			}
+			if i < len(raw) && raw[i] == ',' {
+				i++
+				continue
+			}
+			if i < len(raw) && raw[i] == '}' {
+				return nil, false
+			}
+			continue
 		}
 		switch raw[i] {
 		case '"':
-			j := i + 1
-			escaped := false
-			for j < len(raw) {
-				if raw[j] == '\\' {
-					escaped = true
-					j += 2
-					continue
-				}
-				if raw[j] == '"' {
-					if !escaped {
-						return string(raw[i+1 : j]), true
-					}
-					var s string
-					if err := json.Unmarshal(raw[i:j+1], &s); err != nil {
-						return nil, false
-					}
-					return s, true
-				}
-				j++
+			j, escaped, ok := scanJSONString(raw, i)
+			if !ok {
+				return nil, false
 			}
-			return nil, false
+			if !escaped {
+				return string(raw[i+1 : j]), true
+			}
+			var s string
+			if err := json.Unmarshal(raw[i:j+1], &s); err != nil {
+				return nil, false
+			}
+			return s, true
 		case 't':
 			if i+4 <= len(raw) && string(raw[i:i+4]) == "true" {
 				return true, true
@@ -1382,6 +1414,8 @@ func fastJSONScalarField(raw []byte, field string) (any, bool) {
 			if i+4 <= len(raw) && string(raw[i:i+4]) == "null" {
 				return nil, true
 			}
+		case '{', '[':
+			return nil, false
 		default:
 			j := i
 			for j < len(raw) && raw[j] != ',' && raw[j] != '}' && !isJSONSpace(raw[j]) {
@@ -1395,9 +1429,65 @@ func fastJSONScalarField(raw []byte, field string) (any, bool) {
 			}
 			return string(raw[i:j]), true
 		}
-		searchFrom = searchFrom + idx + 1
+		return nil, false
 	}
 	return nil, false
+}
+
+func scanJSONString(raw []byte, start int) (end int, escaped bool, ok bool) {
+	if start >= len(raw) || raw[start] != '"' {
+		return 0, false, false
+	}
+	for i := start + 1; i < len(raw); i++ {
+		switch raw[i] {
+		case '\\':
+			escaped = true
+			i++
+		case '"':
+			return i, escaped, true
+		}
+	}
+	return 0, false, false
+}
+
+func skipJSONValue(raw []byte, start int) (int, bool) {
+	if start >= len(raw) {
+		return 0, false
+	}
+	switch raw[start] {
+	case '"':
+		end, _, ok := scanJSONString(raw, start)
+		if !ok {
+			return 0, false
+		}
+		return end + 1, true
+	case '{', '[':
+		depth := 1
+		for i := start + 1; i < len(raw); i++ {
+			switch raw[i] {
+			case '"':
+				end, _, ok := scanJSONString(raw, i)
+				if !ok {
+					return 0, false
+				}
+				i = end
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					return i + 1, true
+				}
+			}
+		}
+		return 0, false
+	default:
+		i := start
+		for i < len(raw) && raw[i] != ',' && raw[i] != '}' && !isJSONSpace(raw[i]) {
+			i++
+		}
+		return i, i > start
+	}
 }
 
 func compareValues(a, b any, op string) bool {
@@ -1508,10 +1598,12 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 			continue
 		}
 		normalized := normalizeValue(v)
-		if values == nil {
-			values = make(map[string]string)
+		if field.ValueIndex {
+			if values == nil {
+				values = make(map[string]string)
+			}
+			values[field.Name] = normalized
 		}
-		values[field.Name] = normalized
 		if field.Searchable {
 			if termsSet == nil {
 				termsSet = make(map[string]struct{})
@@ -1520,7 +1612,7 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 				termsSet[hashValue(t)] = struct{}{}
 			}
 		}
-		if field.HashSearch {
+		if field.HashSearch && !isDirectPrimaryLookupField(field.Name) {
 			if hashes == nil {
 				hashes = make(map[string]string)
 			}
@@ -1565,10 +1657,12 @@ func buildIndexProjectionsFromFieldPairs(fields []IndexFieldValue, schema *Searc
 			continue
 		}
 		normalized := normalizeValue(v)
-		if values == nil {
-			values = make(map[string]string)
+		if field.ValueIndex {
+			if values == nil {
+				values = make(map[string]string)
+			}
+			values[field.Name] = normalized
 		}
-		values[field.Name] = normalized
 		if field.Searchable {
 			if termsSet == nil {
 				termsSet = make(map[string]struct{})
@@ -1577,7 +1671,7 @@ func buildIndexProjectionsFromFieldPairs(fields []IndexFieldValue, schema *Searc
 				termsSet[hashValue(t)] = struct{}{}
 			}
 		}
-		if field.HashSearch {
+		if field.HashSearch && !isDirectPrimaryLookupField(field.Name) {
 			if hashes == nil {
 				hashes = make(map[string]string)
 			}
@@ -1603,6 +1697,53 @@ func indexFieldPairValue(fields []IndexFieldValue, name string) (any, bool) {
 		}
 	}
 	return nil, false
+}
+
+func (db *DB) canUseFastVolatileValueIndexLocked(schema *SearchSchema) bool {
+	if schema == nil || len(schema.Fields) == 0 || !db.disableIndexPersistence || !db.canUsePlainValueIndexLocked() {
+		return false
+	}
+	hasValue := false
+	for _, field := range schema.Fields {
+		if field.Name == "" || field.Name == "$value" || field.Searchable {
+			return false
+		}
+		if field.HashSearch && !isDirectPrimaryLookupField(field.Name) {
+			return false
+		}
+		if field.ValueIndex {
+			hasValue = true
+		}
+	}
+	return hasValue
+}
+
+type valueIndexFieldKey struct {
+	prefix string
+	field  string
+}
+
+func (db *DB) addFastVolatileValuePostingsLocked(prefix string, schema *SearchSchema, fields []IndexFieldValue, docID uint64, valueFieldKeys map[valueIndexFieldKey]string) {
+	for _, field := range schema.Fields {
+		if !field.ValueIndex {
+			continue
+		}
+		v, ok := indexFieldPairValue(fields, field.Name)
+		if !ok || v == nil {
+			continue
+		}
+		cacheKey := valueIndexFieldKey{prefix: prefix, field: field.Name}
+		key := valueFieldKeys[cacheKey]
+		if key == "" {
+			key = valueIndexValuesKey(prefix, field.Name)
+			valueFieldKeys[cacheKey] = key
+		}
+		db.rememberValueIndexPostingKeyLocked(key, normalizeValue(v), docID)
+	}
+}
+
+func isDirectPrimaryLookupField(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "id")
 }
 
 func canUseFastJSONScalars(schema *SearchSchema) bool {
@@ -1790,6 +1931,32 @@ func normalizeValue(v any) string {
 		return strings.TrimSpace(t)
 	case []byte:
 		return strings.TrimSpace(string(t))
+	case int:
+		return strconv.Itoa(t)
+	case int8:
+		return strconv.FormatInt(int64(t), 10)
+	case int16:
+		return strconv.FormatInt(int64(t), 10)
+	case int32:
+		return strconv.FormatInt(int64(t), 10)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case uint:
+		return strconv.FormatUint(uint64(t), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(t), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(t), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(t), 10)
+	case uint64:
+		return strconv.FormatUint(t, 10)
+	case float32:
+		return strconv.FormatFloat(float64(t), 'f', -1, 32)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(t)
 	default:
 		return strings.TrimSpace(fmt.Sprintf("%v", t))
 	}
@@ -1864,6 +2031,10 @@ func (db *DB) rememberHashIndexPostingLocked(prefix, field, hash string, docID u
 		db.hashIndexPostings[key] = postings
 	}
 	ids := postings[hash]
+	if len(ids) == 0 || ids[len(ids)-1] < docID {
+		postings[hash] = append(ids, docID)
+		return
+	}
 	idx := sort.Search(len(ids), func(i int) bool { return ids[i] >= docID })
 	if idx < len(ids) && ids[idx] == docID {
 		return
@@ -1913,10 +2084,13 @@ func (db *DB) canUsePlainValueIndexLocked() bool {
 }
 
 func (db *DB) rememberValueIndexLocked(prefix, field, value string) {
+	db.rememberValueIndexLockedKey(valueIndexValuesKey(prefix, field), value)
+}
+
+func (db *DB) rememberValueIndexLockedKey(key, value string) {
 	if db.valueIndexValues == nil {
 		db.valueIndexValues = make(map[string]map[string]struct{})
 	}
-	key := valueIndexValuesKey(prefix, field)
 	values := db.valueIndexValues[key]
 	if values == nil {
 		values = make(map[string]struct{})
@@ -1926,17 +2100,24 @@ func (db *DB) rememberValueIndexLocked(prefix, field, value string) {
 }
 
 func (db *DB) rememberValueIndexPostingLocked(prefix, field, value string, docID uint64) {
-	db.rememberValueIndexLocked(prefix, field, value)
+	db.rememberValueIndexPostingKeyLocked(valueIndexValuesKey(prefix, field), value, docID)
+}
+
+func (db *DB) rememberValueIndexPostingKeyLocked(key, value string, docID uint64) {
+	db.rememberValueIndexLockedKey(key, value)
 	if db.valueIndexPostings == nil {
 		db.valueIndexPostings = make(map[string]map[string][]uint64)
 	}
-	key := valueIndexValuesKey(prefix, field)
 	postings := db.valueIndexPostings[key]
 	if postings == nil {
 		postings = make(map[string][]uint64)
 		db.valueIndexPostings[key] = postings
 	}
 	ids := postings[value]
+	if len(ids) == 0 || ids[len(ids)-1] < docID {
+		postings[value] = append(ids, docID)
+		return
+	}
 	idx := sort.Search(len(ids), func(i int) bool { return ids[i] >= docID })
 	if idx < len(ids) && ids[idx] == docID {
 		return
@@ -2128,14 +2309,37 @@ func (db *DB) storeNextDocIDLockedNoWAL(nextID uint64) error {
 }
 
 func (db *DB) bindDocIDLocked(key []byte, docID uint64) error {
+	return db.bindDocIDLockedWithOwnership(key, docID, false)
+}
+
+func (db *DB) bindDocIDLockedOwned(key []byte, docID uint64) error {
+	return db.bindDocIDLockedOwnedString(key, "", docID)
+}
+
+func (db *DB) bindDocIDLockedOwnedString(key []byte, keyString string, docID uint64) error {
+	if keyString != "" {
+		return db.bindDocIDLockedWithKeyString(key, keyString, docID, true)
+	}
+	return db.bindDocIDLockedWithOwnership(key, docID, true)
+}
+
+func (db *DB) bindDocIDLockedWithOwnership(key []byte, docID uint64, owned bool) error {
+	return db.bindDocIDLockedWithKeyString(key, string(key), docID, owned)
+}
+
+func (db *DB) bindDocIDLockedWithKeyString(key []byte, keyString string, docID uint64, owned bool) error {
 	if db.docIDByKey == nil {
 		db.docIDByKey = make(map[string]uint64)
 	}
 	if db.docKeyByID == nil {
 		db.docKeyByID = make(map[uint64][]byte)
 	}
-	db.docIDByKey[string(key)] = docID
-	db.docKeyByID[docID] = append([]byte(nil), key...)
+	db.docIDByKey[keyString] = docID
+	if owned {
+		db.docKeyByID[docID] = key
+	} else {
+		db.docKeyByID[docID] = append([]byte(nil), key...)
+	}
 	if db.disableIndexPersistence {
 		return nil
 	}

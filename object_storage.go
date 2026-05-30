@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -53,12 +52,15 @@ type ObjectMetadata struct {
 	Name           string            `json:"name"`
 	ContentType    string            `json:"content_type"`
 	Size           int64             `json:"size"`
+	EncryptedSize  int64             `json:"encrypted_size,omitempty"`
 	Hash           string            `json:"hash"` // SHA256 hash
+	ETag           string            `json:"etag,omitempty"`
 	Encrypted      bool              `json:"encrypted"`
 	EncryptionAlgo string            `json:"encryption_algo,omitempty"`
 	Version        string            `json:"version"`
 	VersionID      string            `json:"version_id"`
 	IsLatest       bool              `json:"is_latest"`
+	State          string            `json:"state,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
 	ModifiedAt     time.Time         `json:"modified_at"`
 	CreatedBy      string            `json:"created_by"`
@@ -94,10 +96,12 @@ type ObjectVersion struct {
 	ObjectID     string    `json:"object_id"`
 	Size         int64     `json:"size"`
 	Hash         string    `json:"hash"`
+	ETag         string    `json:"etag,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	CreatedBy    string    `json:"created_by"`
 	IsLatest     bool      `json:"is_latest"`
 	DeleteMarker bool      `json:"delete_marker"`
+	Encrypted    bool      `json:"encrypted,omitempty"`
 }
 
 // FolderMetadata represents a folder/directory
@@ -140,188 +144,18 @@ type ObjectOptions struct {
 
 // StoreObjectStream stores an object from a stream with encryption and versioning
 func (db *DB) StoreObjectStream(path, contentType, user string, r io.Reader, size int64, opts *ObjectOptions) (*ObjectMetadata, error) {
-	if path == "" {
-		return nil, ErrInvalidPath
-	}
-
-	// Validate and normalize path
-	path = normalizePath(path)
-	if !isValidPath(path) {
-		return nil, ErrInvalidPath
-	}
-
-	if opts == nil {
-		opts = &ObjectOptions{
-			Version: DefaultVersion,
-			Encrypt: true,
-		}
-	}
-
-	if opts.Version == "" {
-		opts.Version = DefaultVersion
-	}
-
-	// Compliance validation
-	if _, err := db.validateObjectCompliance("write", path, user, opts.Encrypt, opts.CustomMetadata, nil, opts.SystemOperation); err != nil {
-		return nil, err
-	}
-
-	// Ensure object storage directory exists
-	if db.filesDir == "" {
-		db.filesDir = filepath.Join(db.path, "files")
-		os.MkdirAll(db.filesDir, 0755)
-	}
-
-	objectsDir := filepath.Join(db.filesDir, "objects")
-	if err := os.MkdirAll(objectsDir, 0700); err != nil {
-		return nil, err
-	}
-
-	// Generate object ID
-	objectID := generateObjectID()
-	versionID := generateVersionID()
-
-	// Create folder structure if needed
-	folder := extractFolder(path)
-	if folder != "" {
-		// Use system user if this is a system operation to bypass compliance
-		folderUser := user
-		if opts.SystemOperation {
-			folderUser = "system"
-		}
-		if err := db.CreateFolder(folder, folderUser); err != nil && !errors.Is(err, ErrObjectExists) {
-			return nil, err
-		}
-	}
-
-	// Create temp file
-	tmp, err := os.CreateTemp(objectsDir, "upload-*.tmp")
+	record, err := db.PutObject(context.Background(), PutObjectRequest{
+		Path:        path,
+		ContentType: contentType,
+		User:        user,
+		Reader:      r,
+		Size:        size,
+		Options:     opts,
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = tmp.Close(); _ = os.Remove(tmp.Name()) }()
-
-	// Compute hash while copying
-	hash := sha256.New()
-	// Track plaintext bytes read
-	var plaintextBytes int64
-	cr := &countReader{R: r, Count: &plaintextBytes}
-	tee := io.TeeReader(cr, hash)
-
-	if opts.Encrypt && db.crypto != nil {
-		// Securely derive key if needed or use objectID
-		encryptedReader := db.crypto.NewEncryptReader(tee, []byte(objectID))
-		_, err = io.Copy(tmp, encryptedReader)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		_, err = io.Copy(tmp, tee)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	size = plaintextBytes
-	hashStr := hex.EncodeToString(hash.Sum(nil))
-
-	// Create metadata
-	meta := &ObjectMetadata{
-		ObjectID:       objectID,
-		Path:           path,
-		Folder:         folder,
-		Name:           extractName(path),
-		ContentType:    contentType,
-		Size:           size,
-		Hash:           hashStr,
-		Encrypted:      opts.Encrypt && db.crypto != nil,
-		EncryptionAlgo: "ChaCha20-Poly1305",
-		Version:        opts.Version,
-		VersionID:      versionID,
-		IsLatest:       true,
-		CreatedAt:      time.Now().UTC(),
-		ModifiedAt:     time.Now().UTC(),
-		CreatedBy:      user,
-		ModifiedBy:     user,
-		Tags:           opts.Tags,
-		CustomMetadata: opts.CustomMetadata,
-		Checksum:       hashStr,
-		StorageClass:   opts.StorageClass,
-	}
-
-	if meta.StorageClass == "" {
-		meta.StorageClass = "STANDARD"
-	}
-
-	// Move temp file to final location
-	finalPath := filepath.Join(objectsDir, objectID, versionID)
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0700); err != nil {
-		return nil, err
-	}
-
-	if err := tmp.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp.Name(), finalPath); err != nil {
-		return nil, err
-	}
-
-	// Check if object already exists and mark old versions as not latest
-	existingMeta, err := db.GetObjectMetadata(path)
-	if err == nil {
-		existingMeta.IsLatest = false
-		if err := db.saveObjectMetadata(existingMeta); err != nil {
-			// Log error but continue
-		}
-	}
-
-	// Store metadata
-	if err := db.saveObjectMetadata(meta); err != nil {
-		_ = os.Remove(finalPath)
-		return nil, err
-	}
-
-	// Store version info
-	version := &ObjectVersion{
-		VersionID:    versionID,
-		ObjectID:     objectID,
-		Size:         size,
-		Hash:         hashStr,
-		CreatedAt:    time.Now().UTC(),
-		CreatedBy:    user,
-		IsLatest:     true,
-		DeleteMarker: false,
-	}
-	if err := db.saveObjectVersion(path, version); err != nil {
-		// Log error but continue
-	}
-
-	// Create or update ACL
-	if opts.ACL != nil {
-		if err := db.SetObjectACL(path, opts.ACL); err != nil {
-			// Log error but continue
-		}
-	} else {
-		// Create default ACL
-		defaultACL := &ObjectACL{
-			ObjectID:    objectID,
-			Owner:       user,
-			Permissions: map[string][]string{user: {PermissionFull}},
-			Public:      false,
-			CreatedAt:   time.Now().UTC(),
-			ModifiedAt:  time.Now().UTC(),
-		}
-		if err := db.SetObjectACL(path, defaultACL); err != nil {
-			// Log error but continue
-		}
-	}
-
-	// Create index entry for path lookup
-	if err := db.indexObject(path, objectID); err != nil {
-		// Log error but continue
-	}
-
-	return meta, nil
+	return record.toMetadata(), nil
 }
 
 // GetObject retrieves an object by path
@@ -337,66 +171,19 @@ func (db *DB) GetObject(path, user string) ([]byte, *ObjectMetadata, error) {
 }
 
 func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte, *ObjectMetadata, error) {
-	meta, err := db.GetObjectMetadata(path)
+	stream, err := db.GetObjectStreamV2(context.Background(), GetObjectRequest{Path: path, User: user, System: systemOp})
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Compliance validation (bypassed for internal system operations)
-	result, err := db.validateObjectCompliance("read", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, systemOp)
+	defer stream.Close()
+	data, err := io.ReadAll(stream)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Check if latest version is a delete marker by looking at version info
-	// Version keys are stored as: "obj:version:<path>:<versionID>"
-	versionPrefix := ObjectVersionPrefix + path + ":"
-	versions, err := db.Keys(versionPrefix + "*")
-	if err == nil && len(versions) > 0 {
-		// Check each version to find the latest one
-		for _, versionKey := range versions {
-			versionBytes, err := db.Get([]byte(versionKey))
-			if err == nil {
-				var version ObjectVersion
-				if json.Unmarshal(versionBytes, &version) == nil {
-					if version.IsLatest && version.DeleteMarker {
-						return nil, nil, ErrObjectNotFound
-					}
-				}
-			}
-		}
-	}
-
-	// Check permissions (bypassed for system operations)
-	if !db.hasPermissionInternal(path, user, PermissionRead, systemOp) {
-		return nil, nil, ErrAccessDenied
-	}
-
-	// Read from filesystem
-	objectsDir := filepath.Join(db.filesDir, "objects")
-	filePath := filepath.Join(objectsDir, meta.ObjectID, meta.VersionID)
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer f.Close()
-
-	var data []byte
-	if meta.Encrypted && db.crypto != nil {
-		dr := db.crypto.NewDecryptReader(f, []byte(meta.ObjectID))
-		data, err = io.ReadAll(dr)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		data, err = io.ReadAll(f)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
+	meta := stream.Record.toMetadata()
 
 	// Apply masking if required
+	result, _ := db.validateObjectCompliance("read", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, systemOp)
 	if result != nil && result.AppliedTag != nil && db.complianceTagManager != nil {
 		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= DataClassConfidential {
 			masked := db.complianceTagManager.maskingEngine.MaskString(string(data), result.AppliedTag.DataClass)
@@ -409,30 +196,11 @@ func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte,
 
 // GetObjectStream retrieves an object as a stream
 func (db *DB) GetObjectStream(path, user string) (io.ReadCloser, *ObjectMetadata, error) {
-	meta, err := db.GetObjectMetadata(path)
+	stream, err := db.GetObjectStreamV2(context.Background(), GetObjectRequest{Path: path, User: user})
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Compliance and permissions check
-	if !db.hasPermissionInternal(path, user, PermissionRead, false) {
-		return nil, nil, ErrAccessDenied
-	}
-
-	objectsDir := filepath.Join(db.filesDir, "objects")
-	filePath := filepath.Join(objectsDir, meta.ObjectID, meta.VersionID)
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if meta.Encrypted && db.crypto != nil {
-		dr := db.crypto.NewDecryptReader(f, []byte(meta.ObjectID))
-		return &readCloserWrapper{Reader: dr, Closer: f}, meta, nil
-	}
-
-	return f, meta, nil
+	return stream.ReadCloser, stream.Record.toMetadata(), nil
 }
 
 type readCloserWrapper struct {
@@ -443,90 +211,12 @@ type readCloserWrapper struct {
 // DeleteObjectInternal deletes an object (soft delete) bypassing compliance checks.
 // This is an internal method for system operations and should NOT be exposed to external users.
 func (db *DB) DeleteObjectInternal(path, user string) error {
-	meta, err := db.GetObjectMetadata(path)
-	if err != nil {
-		return err
-	}
-
-	// Skip compliance validation for internal operations
-
-	// Create delete marker version
-	versionID := generateVersionID()
-	version := &ObjectVersion{
-		VersionID:    versionID,
-		ObjectID:     meta.ObjectID,
-		Size:         0,
-		Hash:         "",
-		CreatedAt:    time.Now().UTC(),
-		CreatedBy:    user,
-		IsLatest:     true,
-		DeleteMarker: true,
-	}
-
-	// Mark current version as not latest
-	meta.IsLatest = false
-	if err := db.saveObjectMetadata(meta); err != nil {
-		return err
-	}
-
-	// Save delete marker
-	if err := db.saveObjectVersion(path, version); err != nil {
-		return err
-	}
-
-	// Remove index
-	indexKey := []byte(ObjectIndexPrefix + path)
-	_ = db.Delete(indexKey)
-
-	return nil
+	return db.DeleteObjectV2(context.Background(), DeleteObjectRequest{Path: path, User: user, System: true})
 }
 
 // DeleteObject deletes an object (soft delete with version marker)
 func (db *DB) DeleteObject(path, user string) error {
-	meta, err := db.GetObjectMetadata(path)
-	if err != nil {
-		return err
-	}
-
-	// Compliance validation
-	if _, err := db.validateObjectCompliance("delete", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, false); err != nil {
-		return err
-	}
-
-	// Check permissions
-	if !db.hasPermissionInternal(path, user, PermissionDelete, false) {
-		return ErrAccessDenied
-	}
-
-	// Create delete marker version
-	versionID := generateVersionID()
-	version := &ObjectVersion{
-		VersionID:    versionID,
-		ObjectID:     meta.ObjectID,
-		Size:         0,
-		Hash:         "",
-		CreatedAt:    time.Now().UTC(),
-		CreatedBy:    user,
-		IsLatest:     true,
-		DeleteMarker: true,
-	}
-
-	// Mark current version as not latest
-	meta.IsLatest = false
-	if err := db.saveObjectMetadata(meta); err != nil {
-		return err
-	}
-
-	// Save delete marker
-	if err := db.saveObjectVersion(path, version); err != nil {
-		return err
-	}
-
-	// Remove index
-	indexKey := []byte(ObjectIndexPrefix + path)
-	_ = db.Delete(indexKey)
-
-	return nil
+	return db.DeleteObjectV2(context.Background(), DeleteObjectRequest{Path: path, User: user})
 }
 
 func (db *DB) validateObjectCompliance(operation, path, user string, encrypted bool, metadata map[string]string, createdAt *time.Time, systemOp bool) (*ComplianceValidationResult, error) {
@@ -590,45 +280,7 @@ func (db *DB) validateObjectCompliance(operation, path, user string, encrypted b
 
 // HardDeleteObject permanently deletes an object and all versions
 func (db *DB) HardDeleteObject(path, user string) error {
-	meta, err := db.GetObjectMetadata(path)
-	if err != nil {
-		return err
-	}
-
-	// Compliance validation
-	if _, err := db.validateObjectCompliance("delete", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, false); err != nil {
-		return err
-	}
-
-	// Check permissions
-	if !db.hasPermissionInternal(path, user, PermissionDelete, false) {
-		return ErrAccessDenied
-	}
-
-	// Delete all versions from filesystem
-	objectsDir := filepath.Join(db.filesDir, "objects")
-	objectDir := filepath.Join(objectsDir, meta.ObjectID)
-	if err := os.RemoveAll(objectDir); err != nil {
-		return err
-	}
-
-	// Delete metadata
-	metaKey := []byte(ObjectMetaPrefix + path)
-	_ = db.Delete(metaKey)
-
-	// Delete ACL
-	aclKey := []byte(ObjectACLPrefix + path)
-	_ = db.Delete(aclKey)
-
-	// Delete versions
-	versionKey := []byte(ObjectVersionPrefix + path)
-	_ = db.Delete(versionKey)
-
-	// Delete index
-	indexKey := []byte(ObjectIndexPrefix + path)
-	_ = db.Delete(indexKey)
-
-	return nil
+	return db.DeleteObjectV2(context.Background(), DeleteObjectRequest{Path: path, User: user, Hard: true})
 }
 
 // ListObjects lists objects in a folder
@@ -1485,60 +1137,16 @@ func (db *DB) ListObjectVersions(path string) ([]ObjectVersion, error) {
 
 // GetObjectVersion retrieves a specific version of an object
 func (db *DB) GetObjectVersion(path, versionID, user string) ([]byte, *ObjectMetadata, error) {
-	path = normalizePath(path)
-
-	// Get version info to find the ObjectID
-	versionKey := ObjectVersionPrefix + path + ":" + versionID
-	versionBytes, err := db.Get([]byte(versionKey))
-	if err != nil {
-		return nil, nil, ErrInvalidVersion
-	}
-
-	var version ObjectVersion
-	if err := json.Unmarshal(versionBytes, &version); err != nil {
-		return nil, nil, err
-	}
-
-	// Reconstruct metadata for this specific version.
-	meta, err := db.GetObjectMetadata(path)
+	stream, err := db.GetObjectStreamV2(context.Background(), GetObjectRequest{Path: path, VersionID: versionID, User: user})
 	if err != nil {
 		return nil, nil, err
 	}
-
-	meta.VersionID = version.VersionID
-	meta.Size = version.Size
-	meta.Hash = version.Hash
-	meta.IsLatest = version.IsLatest
-
-	// Check permissions
-	if !db.hasPermissionInternal(path, user, PermissionRead, false) {
-		return nil, nil, ErrAccessDenied
-	}
-
-	// Read from filesystem
-	objectsDir := filepath.Join(db.filesDir, "objects")
-	filePath := filepath.Join(objectsDir, version.ObjectID, version.VersionID)
-
-	data, err := os.ReadFile(filePath)
+	defer stream.Close()
+	data, err := io.ReadAll(stream)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Decrypt if necessary
-	if meta.Encrypted && db.crypto != nil {
-		if len(data) < 24 {
-			return nil, nil, fmt.Errorf("invalid encrypted data")
-		}
-		nonce := data[:24]
-		ciphertext := data[24:]
-		plaintext, err := db.crypto.Decrypt(nonce, ciphertext, []byte(version.ObjectID))
-		if err != nil {
-			return nil, nil, err
-		}
-		data = plaintext
-	}
-
-	return data, meta, nil
+	return data, stream.Record.toMetadata(), nil
 }
 
 type countReader struct {

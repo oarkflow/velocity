@@ -18,6 +18,7 @@ type BatchWriter struct {
 	mutex           sync.Mutex
 	maxSize         int
 	skipIndex       bool
+	deferFlush      bool
 }
 
 // DisableIndexMaintenance makes this writer skip online secondary-index updates.
@@ -27,22 +28,65 @@ func (bw *BatchWriter) DisableIndexMaintenance() *BatchWriter {
 	return bw
 }
 
+// DisableAutoFlush keeps queued entries in memory until Flush is called.
+// Transactional callers need this so rollback cannot leak earlier writes.
+func (bw *BatchWriter) DisableAutoFlush() *BatchWriter {
+	bw.deferFlush = true
+	return bw
+}
+
+// Reserve grows batch buffers up front for callers that know they will append
+// many entries before flushing, such as SQL transactions.
+func (bw *BatchWriter) Reserve(entries, indexFields int) *BatchWriter {
+	if entries > cap(bw.entries) {
+		next := make([]Entry, len(bw.entries), entries)
+		copy(next, bw.entries)
+		bw.entries = next
+	}
+	if entries > cap(bw.indexFieldSpans) {
+		next := make([]indexFieldSpan, len(bw.indexFieldSpans), entries)
+		copy(next, bw.indexFieldSpans)
+		bw.indexFieldSpans = next
+	}
+	if indexFields > cap(bw.indexFieldPairs) {
+		next := make([]IndexFieldValue, len(bw.indexFieldPairs), indexFields)
+		copy(next, bw.indexFieldPairs)
+		bw.indexFieldPairs = next
+	}
+	return bw
+}
+
+func (bw *BatchWriter) Len() int {
+	if bw == nil {
+		return 0
+	}
+	return len(bw.entries)
+}
+
 type IndexFieldValue struct {
 	Name  string
 	Value any
 }
 
 type indexFieldSpan struct {
-	start int
-	end   int
+	start     int
+	end       int
+	assumeNew bool
 }
 
 func (db *DB) NewBatchWriter(maxSize int) *BatchWriter {
+	initialCap := maxSize
+	if initialCap > 256 {
+		initialCap = 256
+	}
+	if initialCap < 1 {
+		initialCap = 1
+	}
 	return &BatchWriter{
 		db:              db,
-		entries:         make([]Entry, 0, maxSize),
-		indexFieldPairs: make([]IndexFieldValue, 0, maxSize),
-		indexFieldSpans: make([]indexFieldSpan, 0, maxSize),
+		entries:         make([]Entry, 0, initialCap),
+		indexFieldPairs: make([]IndexFieldValue, 0, initialCap),
+		indexFieldSpans: make([]indexFieldSpan, 0, initialCap),
 		maxSize:         maxSize,
 	}
 }
@@ -65,37 +109,72 @@ func (bw *BatchWriter) PutWithIndexFieldsUnsafe(key, value []byte, fields map[st
 	for name, value := range fields {
 		pairs = append(pairs, IndexFieldValue{Name: name, Value: value})
 	}
-	return bw.putWithIndexFieldPairsUnsafe(key, value, pairs)
+	return bw.putWithIndexFieldPairsUnsafe(key, "", value, pairs, false)
 }
 
 func (bw *BatchWriter) putWithIndexFieldsUnsafe(key, value []byte, fields map[string]any) error {
 	if fields != nil {
 		return bw.PutWithIndexFieldsUnsafe(key, value, fields)
 	}
-	return bw.putWithIndexFieldPairsUnsafe(key, value, nil)
+	return bw.putWithIndexFieldPairsUnsafe(key, "", value, nil, false)
 }
 
 func (bw *BatchWriter) PutWithIndexFieldPairsUnsafe(key, value []byte, fields []IndexFieldValue) error {
-	return bw.putWithIndexFieldPairsUnsafe(key, value, fields)
+	return bw.putWithIndexFieldPairsUnsafe(key, "", value, fields, false)
 }
 
-func (bw *BatchWriter) putWithIndexFieldPairsUnsafe(key, value []byte, fields []IndexFieldValue) error {
+// PutNewWithIndexFieldPairsUnsafe appends a row known to be a new primary
+// record. It lets Flush skip the per-row existing docID lookup.
+func (bw *BatchWriter) PutNewWithIndexFieldPairsUnsafe(key, value []byte, fields []IndexFieldValue) error {
+	return bw.putWithIndexFieldPairsUnsafe(key, "", value, fields, true)
+}
+
+func (bw *BatchWriter) PutNewWithIndexFieldPairsKeyStringUnsafe(key []byte, keyString string, value []byte, fields []IndexFieldValue) error {
+	return bw.putWithIndexFieldPairsUnsafe(key, keyString, value, fields, true)
+}
+
+func (bw *BatchWriter) PutNewOwnedWithIndexFieldPairsKeyStringUnsafe(key []byte, keyString string, value []byte, fields []IndexFieldValue) error {
+	return bw.putOwnedWithIndexFieldPairsUnsafe(key, keyString, value, fields, true)
+}
+
+func (bw *BatchWriter) putWithIndexFieldPairsUnsafe(key []byte, keyString string, value []byte, fields []IndexFieldValue, assumeNew bool) error {
+	buf := make([]byte, len(key)+len(value))
+	keyCopy := buf[:len(key)]
+	valueCopy := buf[len(key):]
+	copy(keyCopy, key)
+	copy(valueCopy, value)
 	// Grow slice in-place, avoid pointer allocation
 	bw.entries = append(bw.entries, Entry{
-		Key:       append([]byte(nil), key...),
-		Value:     append([]byte(nil), value...),
+		Key:       keyCopy,
+		KeyString: keyString,
+		Value:     valueCopy,
 		Timestamp: uint64(time.Now().UnixNano()),
 		Deleted:   false,
 	})
+	return bw.finishPutWithIndexFieldPairsUnsafe(fields, assumeNew)
+}
+
+func (bw *BatchWriter) putOwnedWithIndexFieldPairsUnsafe(key []byte, keyString string, value []byte, fields []IndexFieldValue, assumeNew bool) error {
+	bw.entries = append(bw.entries, Entry{
+		Key:       key,
+		KeyString: keyString,
+		Value:     value,
+		Timestamp: uint64(time.Now().UnixNano()),
+		Deleted:   false,
+	})
+	return bw.finishPutWithIndexFieldPairsUnsafe(fields, assumeNew)
+}
+
+func (bw *BatchWriter) finishPutWithIndexFieldPairsUnsafe(fields []IndexFieldValue, assumeNew bool) error {
 	start := len(bw.indexFieldPairs)
 	bw.indexFieldPairs = append(bw.indexFieldPairs, fields...)
-	bw.indexFieldSpans = append(bw.indexFieldSpans, indexFieldSpan{start: start, end: len(bw.indexFieldPairs)})
+	bw.indexFieldSpans = append(bw.indexFieldSpans, indexFieldSpan{start: start, end: len(bw.indexFieldPairs), assumeNew: assumeNew})
 
 	idx := len(bw.entries) - 1
 	entry := &bw.entries[idx]
 	entry.checksum = crc32.Update(crc32.ChecksumIEEE(entry.Key), crc32.IEEETable, entry.Value)
 
-	if len(bw.entries) >= bw.maxSize {
+	if !bw.deferFlush && len(bw.entries) >= bw.maxSize {
 		return bw.flushUnsafe()
 	}
 
@@ -184,7 +263,7 @@ func (bw *BatchWriter) deleteUnsafe(key []byte) error {
 	entry := &bw.entries[idx]
 	entry.checksum = crc32.ChecksumIEEE(entry.Key)
 
-	if len(bw.entries) >= bw.maxSize {
+	if !bw.deferFlush && len(bw.entries) >= bw.maxSize {
 		return bw.flushUnsafe()
 	}
 
@@ -215,6 +294,7 @@ func (bw *BatchWriter) flushUnsafe() error {
 	if bw.db.searchIndexEnabled && !bw.skipIndex {
 		bw.db.mutex.Lock()
 		additions := make(map[string][]uint64)
+		valueIndexFieldKeys := make(map[valueIndexFieldKey]string, 4)
 		nextDocID, nextDocIDLoaded := uint64(0), false
 		for i := range bw.entries {
 			entry := &bw.entries[i]
@@ -225,16 +305,20 @@ func (bw *BatchWriter) flushUnsafe() error {
 			if schema == nil {
 				continue
 			}
-			// Get or allocate docID
-			docID, exists, err := bw.db.getDocIDLocked(entry.Key)
-			if err != nil {
-				bw.db.mutex.Unlock()
-				return err
-			}
-			if exists {
-				if err := bw.db.removeIndexEntriesLocked(docID); err != nil {
+			assumeNew := i < len(bw.indexFieldSpans) && bw.indexFieldSpans[i].assumeNew
+			docID, exists, err := uint64(0), false, error(nil)
+			if !assumeNew {
+				// Get or allocate docID
+				docID, exists, err = bw.db.getDocIDLocked(entry.Key)
+				if err != nil {
 					bw.db.mutex.Unlock()
 					return err
+				}
+				if exists {
+					if err := bw.db.removeIndexEntriesLocked(docID); err != nil {
+						bw.db.mutex.Unlock()
+						return err
+					}
 				}
 			}
 
@@ -254,9 +338,23 @@ func (bw *BatchWriter) flushUnsafe() error {
 				}
 				docID = nextDocID
 				nextDocID++
-				if err := bw.db.bindDocIDLocked(entry.Key, docID); err != nil {
+				if assumeNew {
+					err = bw.db.bindDocIDLockedOwnedString(entry.Key, entry.KeyString, docID)
+				} else {
+					err = bw.db.bindDocIDLocked(entry.Key, docID)
+				}
+				if err != nil {
 					bw.db.mutex.Unlock()
 					return err
+				}
+			}
+			if bw.db.canUseFastVolatileValueIndexLocked(schema) {
+				if i < len(bw.indexFieldSpans) {
+					span := bw.indexFieldSpans[i]
+					if span.end > span.start {
+						bw.db.addFastVolatileValuePostingsLocked(prefix, schema, bw.indexFieldPairs[span.start:span.end], docID, valueIndexFieldKeys)
+						continue
+					}
 				}
 			}
 			var terms []string

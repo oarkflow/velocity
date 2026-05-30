@@ -3,12 +3,16 @@ package velocity
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"testing"
-	"time"
 )
 
 func TestMemCheck(t *testing.T) {
+	if os.Getenv("VELOCITY_MEMCHECK") == "" {
+		t.Skip("set VELOCITY_MEMCHECK=1 to write a heap profile")
+	}
 	dir := "./memcheck_db"
 	os.RemoveAll(dir)
 	db, err := New(dir)
@@ -36,10 +40,9 @@ func TestMemCheck(t *testing.T) {
 
 	t.Logf("inserted %d total records", n)
 
-	// let GC settle
-	time.Sleep(2 * time.Second)
+	runtime.GC()
 
-	f, err := os.Create("./heap.prof")
+	f, err := os.Create(filepath.Join(t.TempDir(), "heap.prof"))
 	if err != nil {
 		t.Fatalf("failed to create profile: %v", err)
 	}

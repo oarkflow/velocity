@@ -2,7 +2,7 @@ module github.com/oarkflow/velocity/web
 
 go 1.26.0
 
-replace github.com/oarkflow/velocity => ../
+replace github.com/oarkflow/velocity => ../../
 
 require (
 	github.com/gofiber/fiber/v3 v3.1.0

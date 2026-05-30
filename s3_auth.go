@@ -17,21 +17,23 @@ import (
 // S3 Signature V4 authentication implementation
 
 const (
-	sigV4Algorithm  = "AWS4-HMAC-SHA256"
-	s3ServiceName   = "s3"
-	defaultS3Region = "us-east-1"
-	credPrefix      = "s3:cred:"
+	sigV4Algorithm   = "AWS4-HMAC-SHA256"
+	s3ServiceName    = "s3"
+	defaultS3Region  = "us-east-1"
+	credPrefix       = "s3:cred:"
 	credSecretPrefix = "s3:secret:"
 )
 
 // S3Credential represents an S3 access key pair
 type S3Credential struct {
-	AccessKeyID     string    `json:"access_key_id"`
-	SecretAccessKey  string    `json:"secret_access_key"`
-	UserID          string    `json:"user_id"`
-	Description     string    `json:"description"`
-	Active          bool      `json:"active"`
-	CreatedAt       time.Time `json:"created_at"`
+	AccessKeyID     string     `json:"access_key_id"`
+	SecretAccessKey string     `json:"secret_access_key,omitempty"`
+	SecretHash      string     `json:"secret_hash,omitempty"`
+	EncryptedSecret string     `json:"encrypted_secret,omitempty"`
+	UserID          string     `json:"user_id"`
+	Description     string     `json:"description"`
+	Active          bool       `json:"active"`
+	CreatedAt       time.Time  `json:"created_at"`
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 }
 
@@ -59,14 +61,18 @@ func (cs *S3CredentialStore) GenerateCredentials(userID, description string) (*S
 
 	cred := &S3Credential{
 		AccessKeyID:     accessKey,
-		SecretAccessKey:  secretKey,
+		SecretAccessKey: secretKey,
 		UserID:          userID,
 		Description:     description,
 		Active:          true,
 		CreatedAt:       time.Now().UTC(),
 	}
 
-	data, err := json.Marshal(cred)
+	stored := *cred
+	if err := cs.sealCredentialSecret(&stored); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(&stored)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +95,9 @@ func (cs *S3CredentialStore) GetCredential(accessKeyID string) (*S3Credential, e
 	if err := json.Unmarshal(data, &cred); err != nil {
 		return nil, err
 	}
+	if err := cs.openCredentialSecret(&cred); err != nil {
+		return nil, err
+	}
 
 	if !cred.Active {
 		return nil, fmt.Errorf("credential is inactive")
@@ -109,6 +118,9 @@ func (cs *S3CredentialStore) DeleteCredential(accessKeyID string) error {
 	}
 
 	cred.Active = false
+	if err := cs.sealCredentialSecret(cred); err != nil {
+		return err
+	}
 	data, err := json.Marshal(cred)
 	if err != nil {
 		return err
@@ -135,6 +147,7 @@ func (cs *S3CredentialStore) ListCredentials(userID string) ([]*S3Credential, er
 		if err := json.Unmarshal(data, &cred); err != nil {
 			continue
 		}
+		cred.SecretAccessKey = ""
 
 		if cred.UserID == userID && cred.Active {
 			creds = append(creds, &cred)
@@ -142,6 +155,48 @@ func (cs *S3CredentialStore) ListCredentials(userID string) ([]*S3Credential, er
 	}
 
 	return creds, nil
+}
+
+func (cs *S3CredentialStore) sealCredentialSecret(cred *S3Credential) error {
+	if cred == nil || cred.SecretAccessKey == "" {
+		return nil
+	}
+	hash := sha256.Sum256([]byte(cred.SecretAccessKey))
+	cred.SecretHash = hex.EncodeToString(hash[:])
+	if cs.db != nil && cs.db.crypto != nil {
+		nonce, ciphertext, err := cs.db.crypto.Encrypt([]byte(cred.SecretAccessKey), []byte(cred.AccessKeyID))
+		if err != nil {
+			return err
+		}
+		sealed := make([]byte, 0, len(nonce)+len(ciphertext))
+		sealed = append(sealed, nonce...)
+		sealed = append(sealed, ciphertext...)
+		cred.EncryptedSecret = hex.EncodeToString(sealed)
+		cred.SecretAccessKey = ""
+	}
+	return nil
+}
+
+func (cs *S3CredentialStore) openCredentialSecret(cred *S3Credential) error {
+	if cred == nil || cred.SecretAccessKey != "" || cred.EncryptedSecret == "" {
+		return nil
+	}
+	if cs.db == nil || cs.db.crypto == nil {
+		return fmt.Errorf("credential secret is encrypted but database crypto is unavailable")
+	}
+	sealed, err := hex.DecodeString(cred.EncryptedSecret)
+	if err != nil {
+		return err
+	}
+	if len(sealed) < 24 {
+		return fmt.Errorf("credential secret is malformed")
+	}
+	plain, err := cs.db.crypto.Decrypt(sealed[:24], sealed[24:], []byte(cred.AccessKeyID))
+	if err != nil {
+		return err
+	}
+	cred.SecretAccessKey = string(plain)
+	return nil
 }
 
 // SigV4Auth handles AWS Signature V4 verification

@@ -123,6 +123,10 @@ func (pg *PresignedURLGenerator) generatePresignedURL(method, accessKeyID, bucke
 
 // ValidatePresignedURL validates a presigned URL's signature and expiration
 func (pg *PresignedURLGenerator) ValidatePresignedURL(rawURL string) (string, string, error) {
+	return pg.ValidatePresignedURLForMethod("GET", rawURL, nil)
+}
+
+func (pg *PresignedURLGenerator) ValidatePresignedURLForMethod(method, rawURL string, headers map[string]string) (string, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid URL")
@@ -138,8 +142,10 @@ func (pg *PresignedURLGenerator) ValidatePresignedURL(rawURL string) (string, st
 	amzDate := query.Get("X-Amz-Date")
 	expiresStr := query.Get("X-Amz-Expires")
 	credential := query.Get("X-Amz-Credential")
+	signature := query.Get("X-Amz-Signature")
+	signedHeaders := query.Get("X-Amz-SignedHeaders")
 
-	if amzDate == "" || expiresStr == "" || credential == "" {
+	if amzDate == "" || expiresStr == "" || credential == "" || signature == "" || signedHeaders == "" {
 		return "", "", fmt.Errorf("missing required presigned URL parameters")
 	}
 
@@ -153,6 +159,53 @@ func (pg *PresignedURLGenerator) ValidatePresignedURL(rawURL string) (string, st
 	fmt.Sscanf(expiresStr, "%d", &expSecs)
 	if time.Now().After(t.Add(time.Duration(expSecs) * time.Second)) {
 		return "", "", fmt.Errorf("presigned URL has expired")
+	}
+	if expSecs <= 0 || expSecs > 7*24*60*60 {
+		return "", "", fmt.Errorf("invalid presigned URL expiration")
+	}
+	credParts := strings.Split(credential, "/")
+	if len(credParts) != 5 || credParts[4] != "aws4_request" {
+		return "", "", fmt.Errorf("invalid credential scope")
+	}
+	accessKeyID, dateStamp, region, service := credParts[0], credParts[1], credParts[2], credParts[3]
+	cred, err := pg.credStore.GetCredential(accessKeyID)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid access key: %w", err)
+	}
+	if region == "" || service != s3ServiceName {
+		return "", "", fmt.Errorf("invalid credential scope")
+	}
+	queryForSignature := u.Query()
+	queryForSignature.Del("X-Amz-Signature")
+	canonicalQueryString := buildCanonicalQueryString(queryForSignature, false)
+	headerNames := strings.Split(signedHeaders, ";")
+	var canonicalHeaders strings.Builder
+	for _, name := range headerNames {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		value := headers[name]
+		if value == "" && name == "host" {
+			value = u.Host
+		}
+		canonicalHeaders.WriteString(name)
+		canonicalHeaders.WriteString(":")
+		canonicalHeaders.WriteString(strings.TrimSpace(value))
+		canonicalHeaders.WriteString("\n")
+	}
+	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\nUNSIGNED-PAYLOAD",
+		method,
+		u.Path,
+		canonicalQueryString,
+		canonicalHeaders.String(),
+		signedHeaders,
+	)
+	credentialScope := fmt.Sprintf("%s/%s/%s/aws4_request", dateStamp, region, service)
+	stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", sigV4Algorithm, amzDate, credentialScope, hashSHA256([]byte(canonicalRequest)))
+	expected := hmacSHA256Hex(computeSigningKey(cred.SecretAccessKey, dateStamp, region, service), []byte(stringToSign))
+	if !hmac.Equal([]byte(expected), []byte(signature)) {
+		return "", "", fmt.Errorf("signature does not match")
 	}
 
 	// Extract bucket and key from path

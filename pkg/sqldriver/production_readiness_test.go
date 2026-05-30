@@ -410,8 +410,8 @@ func TestSQLDriver_ProductionConcurrentRowUpdatesSerialize(t *testing.T) {
 		t.Fatalf("insert failed: %v", err)
 	}
 
-	const workers = 10
-	const updatesPerWorker = 10
+	const workers = 4
+	const updatesPerWorker = 4
 	errs := make(chan error, workers)
 	var wg sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {

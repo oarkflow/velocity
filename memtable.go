@@ -12,6 +12,7 @@ import (
 // Entry represents a key-value pair with metadata
 type Entry struct {
 	Key       []byte
+	KeyString string
 	Value     []byte
 	Timestamp uint64
 	ExpiresAt uint64 // unix nano timestamp; 0 means no expiry
@@ -46,6 +47,7 @@ func NewMemTable() *MemTable {
 func (mt *MemTable) Put(key, value []byte) {
 	entry := entryPool.Get().(*Entry)
 	entry.Key = append(entry.Key[:0], key...)
+	entry.KeyString = ""
 	entry.Value = append(entry.Value[:0], value...)
 	entry.Timestamp = uint64(time.Now().UnixNano())
 	entry.ExpiresAt = 0
@@ -57,7 +59,7 @@ func (mt *MemTable) Put(key, value []byte) {
 	old, loaded := mt.entries.Swap(keyStr, entry)
 	oldSize := int64(0)
 	if loaded {
-		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+		oldSize = storedEntrySize(old)
 	}
 	atomic.AddInt64(&mt.size, int64(len(entry.Key)+len(entry.Value))-oldSize)
 }
@@ -68,6 +70,7 @@ func (mt *MemTable) PutEntry(entry *Entry) {
 	// Copy key/value into a pooled entry to avoid retaining caller buffers
 	e := entryPool.Get().(*Entry)
 	e.Key = append(e.Key[:0], entry.Key...)
+	e.KeyString = ""
 	e.Value = append(e.Value[:0], entry.Value...)
 	e.Timestamp = entry.Timestamp
 	e.ExpiresAt = entry.ExpiresAt
@@ -77,7 +80,7 @@ func (mt *MemTable) PutEntry(entry *Entry) {
 	old, loaded := mt.entries.Swap(string(e.Key), e)
 	oldSize := int64(0)
 	if loaded {
-		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+		oldSize = storedEntrySize(old)
 	}
 	atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
 }
@@ -87,6 +90,7 @@ func (mt *MemTable) PutEntry(entry *Entry) {
 func (mt *MemTable) PutEntryOwned(entry *Entry) {
 	e := entryPool.Get().(*Entry)
 	e.Key = entry.Key
+	e.KeyString = entry.KeyString
 	e.Value = entry.Value
 	e.Timestamp = entry.Timestamp
 	e.ExpiresAt = entry.ExpiresAt
@@ -96,7 +100,7 @@ func (mt *MemTable) PutEntryOwned(entry *Entry) {
 	old, loaded := mt.entries.Swap(string(e.Key), e)
 	oldSize := int64(0)
 	if loaded {
-		oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+		oldSize = storedEntrySize(old)
 	}
 	atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
 }
@@ -112,20 +116,25 @@ func (mt *MemTable) PutEntriesOwned(entries []Entry) {
 			mt.Delete(entry.Key)
 			continue
 		}
-		e := entryPool.Get().(*Entry)
-		e.Key = entry.Key
-		e.Value = entry.Value
-		e.Timestamp = entry.Timestamp
-		e.ExpiresAt = entry.ExpiresAt
-		e.Deleted = false
-		e.checksum = entry.checksum
-
-		old, loaded := mt.entries.Swap(string(e.Key), e)
+		keyStr := entry.KeyString
+		if keyStr == "" {
+			keyStr = string(entry.Key)
+		}
+		stored := Entry{
+			Key:       entry.Key,
+			KeyString: keyStr,
+			Value:     entry.Value,
+			Timestamp: entry.Timestamp,
+			ExpiresAt: entry.ExpiresAt,
+			Deleted:   false,
+			checksum:  entry.checksum,
+		}
+		old, loaded := mt.entries.Swap(keyStr, stored)
 		oldSize := int64(0)
 		if loaded {
-			oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+			oldSize = storedEntrySize(old)
 		}
-		delta += int64(len(e.Key)+len(e.Value)) - oldSize
+		delta += int64(len(stored.Key)+len(stored.Value)) - oldSize
 	}
 	if delta != 0 {
 		atomic.AddInt64(&mt.size, delta)
@@ -133,15 +142,38 @@ func (mt *MemTable) PutEntriesOwned(entries []Entry) {
 }
 
 func (mt *MemTable) Get(key []byte) *Entry {
-	if val, ok := mt.entries.Load(string(key)); ok {
-		return val.(*Entry)
+	return mt.GetString(string(key))
+}
+
+func (mt *MemTable) GetString(key string) *Entry {
+	if val, ok := mt.entries.Load(key); ok {
+		return storedEntryPtr(val)
 	}
 	return nil
+}
+
+func storedEntryPtr(v any) *Entry {
+	switch e := v.(type) {
+	case *Entry:
+		return e
+	case Entry:
+		return &e
+	default:
+		return nil
+	}
+}
+
+func storedEntrySize(v any) int64 {
+	if e := storedEntryPtr(v); e != nil {
+		return int64(len(e.Key) + len(e.Value))
+	}
+	return 0
 }
 
 func (mt *MemTable) Delete(key []byte) {
 	entry := entryPool.Get().(*Entry)
 	entry.Key = append(entry.Key[:0], key...)
+	entry.KeyString = ""
 	entry.Value = entry.Value[:0]
 	entry.Timestamp = uint64(time.Now().UnixNano())
 	entry.Deleted = true
@@ -157,7 +189,7 @@ func (mt *MemTable) LoadEntries(entries []*Entry) {
 	for _, e := range entries {
 		oldSize := int64(0)
 		if old, ok := mt.entries.Load(string(e.Key)); ok {
-			oldSize = int64(len(old.(*Entry).Key) + len(old.(*Entry).Value))
+			oldSize = storedEntrySize(old)
 		}
 		mt.entries.Store(string(e.Key), e)
 		atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)

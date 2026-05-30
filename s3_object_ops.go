@@ -288,11 +288,9 @@ func (db *DB) GetHeadObjectInfo(bucket, key, user string) (*HeadObjectInfo, erro
 		return nil, ErrAccessDenied
 	}
 
-	// Compute ETag from stored data
-	data, _, err := db.GetObject(path, user)
-	etag := ""
-	if err == nil {
-		etag = ComputeETag(data)
+	etag := meta.ETag
+	if etag == "" && meta.Hash != "" {
+		etag = `"` + meta.Hash + `"`
 	}
 
 	return &HeadObjectInfo{

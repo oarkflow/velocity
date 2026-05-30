@@ -805,7 +805,7 @@ func (db *DB) flushMemTableOnce() (bool, error) {
 
 	var entries []*Entry
 	oldMemTable.entries.Range(func(key, value any) bool {
-		entries = append(entries, value.(*Entry))
+		entries = append(entries, storedEntryPtr(value))
 		return true
 	})
 	db.mutex.Unlock()
@@ -911,26 +911,47 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) Has(key []byte) bool {
+	return db.HasString(string(key))
+}
+
+func (db *DB) HasString(key string) bool {
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
 	if db.cache != nil {
-		if _, ok := db.cache.Get(string(key)); ok {
+		if _, ok := db.cache.Get(key); ok {
 			return true
 		}
 	}
 
 	// Check memtable first
-	if entry := db.memTable.Get(key); entry != nil {
+	if entry := db.memTable.GetString(key); entry != nil {
 		return !entry.Deleted
 	}
+	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
+		if entry := db.flushingMemTables[i].GetString(key); entry != nil {
+			return !entry.Deleted
+		}
+	}
+
+	hasSSTable := false
+	for level := 0; level < len(db.levels); level++ {
+		if len(db.levels[level]) > 0 {
+			hasSSTable = true
+			break
+		}
+	}
+	if !hasSSTable {
+		return false
+	}
+	keyBytes := []byte(key)
 
 	// Check SSTables by level
 	for level := 0; level < len(db.levels); level++ {
 		sstables := db.levels[level]
 		// Search SSTables in reverse order (newest first) within level
 		for i := len(sstables) - 1; i >= 0; i-- {
-			entry, err := sstables[i].Get(key)
+			entry, err := sstables[i].Get(keyBytes)
 			if err != nil {
 				log.Printf("velocity: integrity verification failed for key %x: %v", key, err)
 				continue
@@ -1075,7 +1096,7 @@ func (db *DB) keysLocked(pattern string) ([]string, error) {
 
 	// memtable: recent entries override
 	db.memTable.entries.Range(func(k, v any) bool {
-		e := v.(*Entry)
+		e := storedEntryPtr(v)
 		s := string(e.Key)
 		if e.Deleted {
 			return true
@@ -1243,7 +1264,7 @@ func (db *DB) keysPageLocked(offset, limit int) ([][]byte, int) {
 	// iterate the memtable completely. For large DBs we may stop early in the
 	// sequential SSTable scan below to avoid scanning the entire dataset.
 	db.memTable.entries.Range(func(key, value any) bool {
-		entry := value.(*Entry)
+		entry := storedEntryPtr(value)
 		if !entry.Deleted {
 			appendKey(entry.Key)
 		}
@@ -1377,7 +1398,7 @@ func (db *DB) Scan(prefix []byte, fn func(key, value []byte) bool) error {
 	// Collect from memtable first — these override SSTable values.
 	memKeys := make(map[string][]byte)
 	db.memTable.entries.Range(func(k, v any) bool {
-		e := v.(*Entry)
+		e := storedEntryPtr(v)
 		s := string(e.Key)
 		if len(s) >= len(prefixStr) && s[:len(prefixStr)] == prefixStr {
 			if e.Deleted {
@@ -1460,7 +1481,7 @@ func min(a, b int) int {
 
 func entryIsDeletedInMemTable(mt *MemTable, key []byte) bool {
 	if v, ok := mt.entries.Load(string(key)); ok {
-		e := v.(*Entry)
+		e := storedEntryPtr(v)
 		return e.Deleted
 	}
 	return false

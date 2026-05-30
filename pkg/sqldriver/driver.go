@@ -22,11 +22,12 @@ var (
 )
 
 type engineState struct {
-	db       *velocity.DB
-	refs     int
-	rowLocks *rowLockManager
-	cache    *SQLQueryCache
-	cacheCfg queryCacheConfig
+	db            *velocity.DB
+	refs          int
+	rowLocks      *rowLockManager
+	cache         *SQLQueryCache
+	cacheCfg      queryCacheConfig
+	searchSchemas map[string]*velocity.SearchSchema
 }
 
 // DSNConfigs allows injecting pre-configured velocity.Config setups for a given DSN.
@@ -70,12 +71,12 @@ func (d *Driver) Open(name string) (driver.Conn, error) {
 			return nil, fmt.Errorf("velocity driver: failed to load table schemas: %w", err)
 		}
 		cacheCfg := newQueryCacheConfig(config)
-		state = &engineState{db: db, rowLocks: newRowLockManager(), cache: newSQLQueryCache(cacheCfg), cacheCfg: cacheCfg}
+		state = &engineState{db: db, rowLocks: newRowLockManager(), cache: newSQLQueryCache(cacheCfg), cacheCfg: cacheCfg, searchSchemas: config.SearchSchemas}
 		engines[path] = state
 	}
 	state.refs++
 
-	return &Conn{db: state.db, path: path, rowLocks: state.rowLocks, queryCache: state.cache, queryCacheCfg: state.cacheCfg}, nil
+	return &Conn{db: state.db, path: path, rowLocks: state.rowLocks, queryCache: state.cache, queryCacheCfg: state.cacheCfg, configuredSearchSchemas: state.searchSchemas}, nil
 }
 
 // OpenConnector must optionally be implemented by a Driver in order to

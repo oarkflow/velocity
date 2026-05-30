@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/oarkflow/sqlparser"
 	"github.com/oarkflow/velocity"
@@ -40,6 +41,26 @@ func (s *StmtV2) NumInput() int {
 	return -1 // Return -1 to allow the sql package to figure it out by passing all args
 }
 
+func (s *StmtV2) CheckNamedValue(nv *driver.NamedValue) error {
+	return checkCommonNamedValue(nv.Value)
+}
+
+func checkCommonNamedValue(value any) error {
+	switch value.(type) {
+	case nil,
+		bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64,
+		string,
+		[]byte,
+		time.Time:
+		return nil
+	default:
+		return driver.ErrSkip
+	}
+}
+
 // Exec executes a query that doesn't return rows.
 func (s *StmtV2) Exec(args []driver.Value) (driver.Result, error) {
 	namedArgs := make([]driver.NamedValue, len(args))
@@ -60,7 +81,7 @@ func (s *StmtV2) Query(args []driver.Value) (driver.Rows, error) {
 
 func (s *StmtV2) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	if s.fastInsert != nil {
-		return s.fastInsert.Exec(s.conn, args)
+		return s.fastInsert.Exec(ctx, s.conn, args)
 	}
 	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL}
 	return executor.Execute(ctx, s.stmt, args)
@@ -77,11 +98,21 @@ type Result struct {
 	rowsAffected int64
 }
 
-func (r *Result) LastInsertId() (int64, error) {
+type singleInsertResult int64
+
+func (r singleInsertResult) LastInsertId() (int64, error) {
+	return int64(r), nil
+}
+
+func (r singleInsertResult) RowsAffected() (int64, error) {
+	return 1, nil
+}
+
+func (r Result) LastInsertId() (int64, error) {
 	return r.lastInsertId, nil
 }
 
-func (r *Result) RowsAffected() (int64, error) {
+func (r Result) RowsAffected() (int64, error) {
 	return r.rowsAffected, nil
 }
 

@@ -1,6 +1,7 @@
 package velocity
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
@@ -15,22 +16,22 @@ import (
 )
 
 const (
-	multipartPrefix    = "multipart:upload:"
+	multipartPrefix     = "multipart:upload:"
 	multipartPartPrefix = "multipart:part:"
-	minPartSize        = 5 * 1024 * 1024 // 5MB minimum (except last part)
-	maxPartNumber      = 10000
+	minPartSize         = 5 * 1024 * 1024 // 5MB minimum (except last part)
+	maxPartNumber       = 10000
 )
 
 // MultipartUpload represents an in-progress multipart upload
 type MultipartUpload struct {
-	UploadID    string            `json:"upload_id"`
-	Bucket      string            `json:"bucket"`
-	Key         string            `json:"key"`
-	ContentType string            `json:"content_type"`
-	Initiator   string            `json:"initiator"`
-	StorageClass string           `json:"storage_class"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
+	UploadID     string            `json:"upload_id"`
+	Bucket       string            `json:"bucket"`
+	Key          string            `json:"key"`
+	ContentType  string            `json:"content_type"`
+	Initiator    string            `json:"initiator"`
+	StorageClass string            `json:"storage_class"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
 }
 
 // MultipartPart represents a single part in a multipart upload
@@ -159,6 +160,9 @@ func (mm *MultipartManager) CompleteMultipartUpload(uploadID string, parts []Com
 	if err != nil {
 		return nil, fmt.Errorf("NoSuchUpload")
 	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("InvalidRequest: no parts specified")
+	}
 
 	// Sort parts by part number
 	sort.Slice(parts, func(i, j int) bool {
@@ -166,43 +170,52 @@ func (mm *MultipartManager) CompleteMultipartUpload(uploadID string, parts []Com
 	})
 
 	// Validate parts and compute combined ETag
-	var totalSize int64
 	md5Hashes := make([]byte, 0)
-
-	objectsDir := filepath.Join(mm.db.filesDir, "objects")
-	objectID := generateObjectID()
-	versionID := generateVersionID()
-	finalDir := filepath.Join(objectsDir, objectID)
-	if err := os.MkdirAll(finalDir, 0700); err != nil {
-		return nil, err
-	}
-
-	finalPath := filepath.Join(finalDir, versionID)
-	outFile, err := os.Create(finalPath)
+	storedParts, err := mm.ListParts(uploadID)
 	if err != nil {
 		return nil, err
 	}
-	defer outFile.Close()
+	partByNumber := make(map[int]MultipartPart, len(storedParts))
+	for _, part := range storedParts {
+		partByNumber[part.PartNumber] = part
+	}
+	tmp, err := os.CreateTemp(mm.partsDir, "complete-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = tmp.Close(); _ = os.Remove(tmpName) }()
 
-	for _, cp := range parts {
+	seen := make(map[int]struct{}, len(parts))
+	for i, cp := range parts {
+		if _, exists := seen[cp.PartNumber]; exists {
+			return nil, fmt.Errorf("InvalidPartOrder: duplicate part %d", cp.PartNumber)
+		}
+		seen[cp.PartNumber] = struct{}{}
+		stored, ok := partByNumber[cp.PartNumber]
+		if !ok {
+			return nil, fmt.Errorf("InvalidPart: part %d not found", cp.PartNumber)
+		}
+		if strings.Trim(cp.ETag, `"`) != strings.Trim(stored.ETag, `"`) {
+			return nil, fmt.Errorf("InvalidPart: ETag mismatch for part %d", cp.PartNumber)
+		}
+		if multipartStrict(upload) && i < len(parts)-1 && stored.Size < minPartSize {
+			return nil, fmt.Errorf("EntityTooSmall: part %d is smaller than %d bytes", cp.PartNumber, minPartSize)
+		}
 		partPath := filepath.Join(mm.partsDir, uploadID, fmt.Sprintf("%05d", cp.PartNumber))
 		partFile, err := os.Open(partPath)
 		if err != nil {
-			os.Remove(finalPath)
 			return nil, fmt.Errorf("InvalidPart: part %d not found", cp.PartNumber)
 		}
 
-		n, err := io.Copy(outFile, partFile)
+		_, err = io.Copy(tmp, partFile)
 		partFile.Close()
 		if err != nil {
-			os.Remove(finalPath)
 			return nil, err
 		}
 
-		totalSize += n
-
 		// Parse ETag for MD5 hash
-		etag := strings.Trim(cp.ETag, `"`)
+		etag := strings.Trim(stored.ETag, `"`)
 		hashBytes, _ := hex.DecodeString(etag)
 		md5Hashes = append(md5Hashes, hashBytes...)
 	}
@@ -210,56 +223,37 @@ func (mm *MultipartManager) CompleteMultipartUpload(uploadID string, parts []Com
 	// Compute combined ETag: MD5 of concatenated part MD5s, with -N suffix
 	combinedHash := md5.Sum(md5Hashes)
 	combinedETag := fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(combinedHash[:]), len(parts))
-
-	now := time.Now().UTC()
-	path := upload.Bucket + "/" + upload.Key
-
-	meta := &ObjectMetadata{
-		ObjectID:       objectID,
-		Path:           path,
-		Folder:         upload.Bucket,
-		Name:           upload.Key,
-		ContentType:    upload.ContentType,
-		Size:           totalSize,
-		Hash:           combinedETag,
-		Encrypted:      false,
-		Version:        DefaultVersion,
-		VersionID:      versionID,
-		IsLatest:       true,
-		CreatedAt:      now,
-		ModifiedAt:     now,
-		CreatedBy:      upload.Initiator,
-		ModifiedBy:     upload.Initiator,
-		Checksum:       combinedETag,
-		StorageClass:   upload.StorageClass,
-		CustomMetadata: upload.Metadata,
-	}
-
-	// Save metadata
-	if err := mm.db.saveObjectMetadata(meta); err != nil {
-		os.Remove(finalPath)
+	if err := tmp.Sync(); err != nil {
 		return nil, err
 	}
-
-	// Save version
-	version := &ObjectVersion{
-		VersionID: versionID,
-		ObjectID:  objectID,
-		Size:      totalSize,
-		Hash:      combinedETag,
-		CreatedAt: now,
-		CreatedBy: upload.Initiator,
-		IsLatest:  true,
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, err
 	}
-	mm.db.saveObjectVersion(path, version)
-
-	// Index
-	mm.db.indexObject(path, objectID)
+	record, err := mm.db.PutObject(context.Background(), PutObjectRequest{
+		Bucket:        upload.Bucket,
+		Key:           upload.Key,
+		ContentType:   upload.ContentType,
+		User:          upload.Initiator,
+		Reader:        tmp,
+		Options:       &ObjectOptions{Version: DefaultVersion, Encrypt: mm.db.crypto != nil, StorageClass: upload.StorageClass, CustomMetadata: upload.Metadata},
+		MultipartETag: combinedETag,
+		EnforceBucket: false,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Cleanup
 	mm.cleanupUpload(uploadID)
 
-	return meta, nil
+	return record.toMetadata(), nil
+}
+
+func multipartStrict(upload *MultipartUpload) bool {
+	if upload == nil || upload.Metadata == nil {
+		return false
+	}
+	return strings.EqualFold(upload.Metadata["strict_s3_multipart"], "true")
 }
 
 // AbortMultipartUpload cancels a multipart upload and cleans up parts
