@@ -119,11 +119,13 @@ func (s *HTTPServer) setupRoutes() {
 	api.Get("/files/:key/thumbnail", s.handleFileThumbnail)
 	api.Delete("/files/:key", s.handleFileDelete)
 
+	staticRoot := resolveStaticRoot()
+
 	// Public static assets for the admin UI
-	s.app.Get("/static*", static.New("./static", static.Config{}))
+	s.app.Get("/static*", static.New(staticRoot, static.Config{}))
 
 	// Serve the admin UI at a separate public path to avoid admin API middleware
-	s.app.Get("/admin-ui*", static.New("./static", static.Config{IndexNames: []string{"index.html"}}))
+	s.app.Get("/admin-ui*", static.New(staticRoot, static.Config{IndexNames: []string{"index.html"}}))
 	// Optional redirect from /admin to /admin-ui (placed before admin group)
 	s.app.Get("/admin", func(c fiber.Ctx) error {
 		return c.Redirect().Status(fiber.StatusFound).To("/admin-ui")
@@ -147,6 +149,15 @@ func (s *HTTPServer) setupRoutes() {
 	admin.Post("/thumbnails/regenerate", s.handleAdminRegenerateThumbnails)
 	admin.Post("/thumbnails/:key/regenerate", s.handleAdminRegenerateThumbnail)
 	admin.Delete("/thumbnails/:key", s.handleAdminDeleteThumbnail)
+}
+
+func resolveStaticRoot() string {
+	for _, candidate := range []string{"./static", "./pkg/web/static", "../pkg/web/static"} {
+		if info, err := os.Stat(filepath.Join(candidate, "index.html")); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return "./static"
 }
 
 // jwtAuthMiddleware validates JWT tokens
