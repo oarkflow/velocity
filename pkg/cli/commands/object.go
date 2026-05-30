@@ -25,6 +25,8 @@ func ObjectCommands(db *velocity.DB) velocitycli.CommandBuilder {
 	cmd.AddSubcommand(ObjectListCommand(db))
 	cmd.AddSubcommand(ObjectInfoCommand(db))
 	cmd.AddSubcommand(ObjectViewCommand(db))
+	cmd.AddSubcommand(ObjectRenderCommand(db))
+	cmd.AddSubcommand(ObjectPreviewCommand(db))
 
 	return cmd
 }
@@ -111,6 +113,108 @@ func ObjectPutCommand(db *velocity.DB) velocitycli.CommandBuilder {
 			fmt.Fprintf(c.Root().Writer, "  Content Type: %s\n", meta.ContentType)
 			return nil
 		})
+}
+
+// ObjectRenderCommand uploads a local file and opens it in the browser preview.
+func ObjectRenderCommand(db *velocity.DB) velocitycli.CommandBuilder {
+	return objectStoreAndPreviewCommand(db, "render", "Store and render an object")
+}
+
+// ObjectPreviewCommand uploads a local file and opens it in the browser preview.
+func ObjectPreviewCommand(db *velocity.DB) velocitycli.CommandBuilder {
+	return objectStoreAndPreviewCommand(db, "preview", "Store an object and open Preview")
+}
+
+func objectStoreAndPreviewCommand(db *velocity.DB, name, description string) velocitycli.CommandBuilder {
+	return velocitycli.NewBaseCommand(name, description).
+		SetUsage("Upload a file to object storage and open it in browser Preview").
+		SetPermission(velocitycli.PermissionUser).
+		AddFlags(
+			&cli.StringFlag{
+				Name:     "file",
+				Aliases:  []string{"f"},
+				Usage:    "Local file path to upload and preview",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:    "path",
+				Aliases: []string{"p"},
+				Usage:   "Object path in storage (defaults to file name)",
+			},
+			&cli.StringFlag{
+				Name:    "content-type",
+				Aliases: []string{"c"},
+				Usage:   "Content type (auto-detected if not specified)",
+			},
+			&cli.BoolFlag{
+				Name:    "encrypt",
+				Aliases: []string{"e"},
+				Usage:   "Encrypt the object",
+				Value:   true,
+			},
+			&cli.BoolFlag{
+				Name:  "public",
+				Usage: "Store object as public",
+				Value: false,
+			},
+			&cli.StringSliceFlag{
+				Name:    "tag",
+				Aliases: []string{"t"},
+				Usage:   "Tags in format key=value (can specify multiple)",
+			},
+		).
+		SetAction(func(ctx context.Context, c *cli.Command) error {
+			filePath := c.String("file")
+			objPath := c.String("path")
+			if objPath == "" {
+				objPath = filepath.ToSlash(filepath.Base(filePath))
+			}
+			user := c.Root().String("user")
+			contentType := c.String("content-type")
+			if contentType == "" {
+				contentType = getContentType(filepath.Ext(filePath))
+			}
+			tags := c.StringSlice("tag")
+
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				return fmt.Errorf("failed to read file: %w", err)
+			}
+
+			tagMap := make(map[string]string)
+			for _, tag := range tags {
+				key, value := parseTag(tag)
+				if key != "" {
+					tagMap[key] = value
+				}
+			}
+
+			meta, err := db.StoreObject(objPath, contentType, user, data, &velocity.ObjectOptions{
+				Encrypt: c.Bool("encrypt"),
+				Tags:    tagMap,
+				ACL:     objectPreviewACL(user, c.Bool("public")),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to store object: %w", err)
+			}
+
+			fmt.Fprintf(c.Root().Writer, "✓ Stored object\n")
+			fmt.Fprintf(c.Root().Writer, "  Path: %s\n", meta.Path)
+			fmt.Fprintf(c.Root().Writer, "  Size: %d bytes\n", meta.Size)
+			fmt.Fprintf(c.Root().Writer, "  Content Type: %s\n", meta.ContentType)
+			fmt.Fprintf(c.Root().Writer, "Opening Preview in browser: %s\n", meta.Path)
+			if err := db.ViewObject(meta.Path, user); err != nil {
+				return fmt.Errorf("failed to preview object: %w", err)
+			}
+			return nil
+		})
+}
+
+func objectPreviewACL(user string, public bool) *velocity.ObjectACL {
+	if !public {
+		return nil
+	}
+	return &velocity.ObjectACL{Owner: user, Public: true}
 }
 
 // ObjectGetCommand creates the object get subcommand

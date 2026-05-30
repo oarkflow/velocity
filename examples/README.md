@@ -16,6 +16,15 @@ go run ./backup_resilience_cookbook
 
 Each cookbook uses temporary local directories and does not require cloud credentials, external services, open ports, or persistent state.
 
+## CLI Preview
+
+The `velocity` command can store a local file as an object and immediately open it in the browser preview:
+
+```bash
+VELOCITY_PATH=/tmp/velocity_preview velocity object preview ./README.md docs/README.md
+VELOCITY_PATH=/tmp/velocity_preview velocity object render ./README.md docs/README.md
+```
+
 ## Cookbook Coverage
 
 | Cookbook | Covers |
@@ -40,4 +49,3 @@ The repository also includes end-to-end demos for specific workflows:
 - `sql_complete_demo`, `sql_crud_demo`, and `sql_million_demo` for SQL coverage.
 - `compliance_full_demo`, `enterprise_compliance_demo`, `multiple_tags_demo`, and `tag_update_demo` for compliance workflows.
 - `kg_batch_demo`, `kg_search_demo`, and `kg_ner_demo` for knowledge graph workflows.
-

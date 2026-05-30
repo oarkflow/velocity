@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/oarkflow/velocity"
@@ -71,6 +74,7 @@ Commands:
   secret get <name>        Retrieve a secret
   object put <key>          Store an object
   object get <key>          Retrieve an object
+  object preview <file> [object-path]  Store a file and open browser preview
   envelope create --label L   Create an envelope
   envelope get --id ID       Get envelope details
   envelope export --id ID --path PATH  Export envelope
@@ -83,6 +87,7 @@ Examples:
   velocity data put mykey myvalue
   velocity data get mykey
   velocity secret set api_key sk_12345
+  velocity object preview ./notes.md docs/notes.md
   velocity envelope create --label "Case 001" --type court_evidence
   velocity envelope bundle create --label "Evidence" --resource '[{"type":"file","name":"doc.pdf","path":"evidence/doc.pdf"}]'
 
@@ -165,13 +170,13 @@ func handleSecret(db *velocity.DB, args []string) error {
 
 func handleObject(db *velocity.DB, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: velocity object put <key> or velocity object get <key>")
+		return fmt.Errorf("usage: velocity object put <key>, velocity object get <key>, or velocity object preview <file> [object-path]")
 	}
 	subcmd := args[0]
-	key := args[1]
 
 	switch subcmd {
 	case "put":
+		key := args[1]
 		content := []byte(key)
 		_, err := db.StoreObject(key, "application/octet-stream", "system", content, nil)
 		if err != nil {
@@ -179,15 +184,84 @@ func handleObject(db *velocity.DB, args []string) error {
 		}
 		fmt.Printf("Stored: %s\n", key)
 	case "get":
+		key := args[1]
 		data, _, err := db.GetObject(key, "system")
 		if err != nil {
 			return fmt.Errorf("failed to get: %w", err)
 		}
 		fmt.Println(string(data))
+	case "preview", "render":
+		return storeAndPreviewObject(db, args[1:])
 	default:
 		return fmt.Errorf("unknown object command: %s", subcmd)
 	}
 	return nil
+}
+
+func storeAndPreviewObject(db *velocity.DB, args []string) error {
+	flags, positional := parseFlags(args)
+	if len(positional) < 1 {
+		return fmt.Errorf("usage: velocity object preview <file> [object-path] [--content-type TYPE] [--user USER] [--public]")
+	}
+	filePath := positional[0]
+	objectPath := ""
+	if len(positional) >= 2 {
+		objectPath = positional[1]
+	} else if flagPath := flags["path"]; flagPath != "" {
+		objectPath = flagPath
+	} else {
+		objectPath = filepath.ToSlash(filepath.Base(filePath))
+	}
+	user := flags["user"]
+	if user == "" {
+		user = "system"
+	}
+	contentType := flags["content-type"]
+	if contentType == "" {
+		var err error
+		contentType, err = detectFileContentType(filePath)
+		if err != nil {
+			return err
+		}
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+	opts := &velocity.ObjectOptions{}
+	if flags["public"] == "true" || flags["public"] == "1" || flags["public"] == "yes" {
+		opts.ACL = &velocity.ObjectACL{Owner: user, Public: true}
+	}
+	meta, err := db.StoreObject(objectPath, contentType, user, data, opts)
+	if err != nil {
+		return fmt.Errorf("failed to store object: %w", err)
+	}
+	fmt.Printf("Stored object: %s (%d bytes, %s)\n", meta.Path, meta.Size, meta.ContentType)
+	fmt.Printf("Opening Preview in browser: %s\n", meta.Path)
+	if err := db.ViewObject(meta.Path, user); err != nil {
+		return fmt.Errorf("failed to preview object: %w", err)
+	}
+	return nil
+}
+
+func detectFileContentType(path string) (string, error) {
+	if ext := filepath.Ext(path); ext != "" {
+		if contentType := mime.TypeByExtension(ext); contentType != "" {
+			return contentType, nil
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file for content detection: %w", err)
+	}
+	defer file.Close()
+	buf := make([]byte, 512)
+	n, err := file.Read(buf)
+	if err != nil && n == 0 {
+		return "", fmt.Errorf("failed to read file for content detection: %w", err)
+	}
+	return http.DetectContentType(buf[:n]), nil
 }
 
 func parseFlags(args []string) (map[string]string, []string) {
@@ -203,11 +277,15 @@ func parseFlags(args []string) (map[string]string, []string) {
 			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
 				flags[strings.TrimPrefix(parts[0], "--")] = args[i+1]
 				i++
+			} else {
+				flags[strings.TrimPrefix(parts[0], "--")] = "true"
 			}
 		} else if strings.HasPrefix(arg, "-") {
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				flags[strings.TrimPrefix(arg, "-")] = args[i+1]
 				i++
+			} else {
+				flags[strings.TrimPrefix(arg, "-")] = "true"
 			}
 		} else {
 			positional = append(positional, arg)
@@ -248,10 +326,10 @@ func handleEnvelope(db *velocity.DB, ctx context.Context, args []string) error {
 		}
 
 		req := &velocity.EnvelopeRequest{
-			Label:    label,
-			Type:    velocity.EnvelopeType(envType),
+			Label:     label,
+			Type:      velocity.EnvelopeType(envType),
 			CreatedBy: "system",
-			Payload: payload,
+			Payload:   payload,
 		}
 
 		env, err := db.CreateEnvelope(ctx, req)
@@ -353,10 +431,10 @@ func handleEnvelopeBundle(db *velocity.DB, ctx context.Context, args []string) e
 		}
 
 		req := &velocity.EnvelopeRequest{
-			Label:    label,
-			Type:     velocity.EnvelopeTypeInvestigationRecord,
+			Label:     label,
+			Type:      velocity.EnvelopeTypeInvestigationRecord,
 			CreatedBy: "system",
-			Payload: payload,
+			Payload:   payload,
 		}
 
 		env, err := db.CreateEnvelope(ctx, req)
