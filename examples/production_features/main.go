@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/oarkflow/velocity"
-	_ "github.com/oarkflow/velocity/sqldriver" // Register velocity driver
+	_ "github.com/oarkflow/velocity/pkg/sqldriver" // Register velocity driver
 )
 
 func main() {

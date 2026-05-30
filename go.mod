@@ -19,4 +19,7 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 )
 
-require github.com/google/uuid v1.6.0
+require (
+	github.com/google/uuid v1.6.0
+	github.com/oarkflow/money v0.0.2
+)

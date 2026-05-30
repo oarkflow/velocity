@@ -59,18 +59,44 @@ type SearchFilter struct {
 	HashOnly bool
 }
 
+// SearchCondition is a nested boolean predicate tree for advanced searches.
+// Bool accepts "AND" or "OR"; empty defaults to AND for groups and OR for
+// multi-parameter leaves. Not negates the node result. A leaf may use Field or
+// Fields, Op or Operators, Value or Values. FullText leaves can be scoped to a
+// field or run against the whole value.
+type SearchCondition struct {
+	Bool        string
+	Not         bool
+	Field       string
+	Fields      []string
+	Op          string
+	Operators   []string
+	Value       any
+	Values      []any
+	FullText    string
+	MatchMode   string
+	PrefixMatch bool
+	Children    []SearchCondition
+}
+
 // SearchQuery defines a hybrid full-text + structured query.
 type SearchQuery struct {
-	Prefix   string
-	FullText string
-	Filters  []SearchFilter
-	Limit    int
+	Prefix      string
+	FullText    string
+	Filters     []SearchFilter
+	Condition   *SearchCondition
+	Limit       int
+	MatchMode   string // "", "all", "any", "phrase", or "boolean"; empty keeps all-terms behavior.
+	PrefixMatch bool   // allows query terms ending in * to match token prefixes.
+	Highlight   bool   // include lightweight text snippets for matching full-text queries.
 }
 
 // SearchResult contains key/value pairs returned by Search().
 type SearchResult struct {
-	Key   []byte
-	Value []byte
+	Key        []byte
+	Value      []byte
+	Score      float64
+	Highlights map[string][]string
 }
 
 // RebuildOptions controls bulk index rebuild.
@@ -660,35 +686,27 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 			return nil, nil
 		}
 		if matchesQuery(value, q) {
-			return []SearchResult{{Key: append([]byte{}, key...), Value: append([]byte{}, value...)}}, nil
+			plan := parseFullTextQuery(q)
+			return []SearchResult{{Key: append([]byte{}, key...), Value: append([]byte{}, value...), Score: searchQueryScore(value, q, plan), Highlights: searchQueryHighlights(value, q, plan)}}, nil
 		}
 		return nil, nil
 	}
 
 	indexEnabled := db.searchIndexEnabled
+	fullTextPlan := parseFullTextQuery(q)
+	rankTextResults := fullTextPlan.active() || conditionHasFullText(q.Condition)
 
 	// Build candidate set from indexes (if possible)
 	var candidates []uint64
 	usedIndex := false
 
-	if indexEnabled && strings.TrimSpace(q.FullText) != "" {
-		terms := tokenize(strings.ToLower(q.FullText))
-		if len(terms) == 0 {
-			return nil, nil
+	if indexEnabled && fullTextPlan.active() {
+		ids, ok, err := db.fullTextCandidatesLocked(q.Prefix, fullTextPlan)
+		if err != nil {
+			return nil, err
 		}
-		for _, term := range terms {
-			ids, err := db.getPostingListLocked(indexTermKey(q.Prefix, hashValue(term)))
-			if err != nil {
-				return nil, err
-			}
-			if ids == nil {
-				return nil, nil
-			}
-			if candidates == nil {
-				candidates = ids
-			} else {
-				candidates = intersectSorted(candidates, ids)
-			}
+		if ok {
+			candidates = ids
 			usedIndex = true
 			if len(candidates) == 0 {
 				return nil, nil
@@ -751,7 +769,7 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 
 	// Evaluate candidates
 	for _, id := range candidates {
-		if len(results) >= q.Limit {
+		if !rankTextResults && len(results) >= q.Limit {
 			break
 		}
 		meta, metaFound, metaErr := db.getIndexMetaLocked(id)
@@ -772,7 +790,23 @@ func (db *DB) Search(q SearchQuery) ([]SearchResult, error) {
 			continue
 		}
 		if matchesQuery(value, q) {
-			results = append(results, SearchResult{Key: append([]byte{}, key...), Value: append([]byte{}, value...)})
+			results = append(results, SearchResult{
+				Key:        append([]byte{}, key...),
+				Value:      append([]byte{}, value...),
+				Score:      searchQueryScore(value, q, fullTextPlan),
+				Highlights: searchQueryHighlights(value, q, fullTextPlan),
+			})
+		}
+	}
+	if rankTextResults {
+		sort.SliceStable(results, func(i, j int) bool {
+			if results[i].Score == results[j].Score {
+				return string(results[i].Key) < string(results[j].Key)
+			}
+			return results[i].Score > results[j].Score
+		})
+		if len(results) > q.Limit {
+			results = results[:q.Limit]
 		}
 	}
 
@@ -802,27 +836,17 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 	}
 
 	indexEnabled := db.searchIndexEnabled
+	fullTextPlan := parseFullTextQuery(q)
 	var candidates []uint64
 	usedIndex := false
 
-	if indexEnabled && strings.TrimSpace(q.FullText) != "" {
-		terms := tokenize(strings.ToLower(q.FullText))
-		if len(terms) == 0 {
-			return 0, nil
+	if indexEnabled && fullTextPlan.active() {
+		ids, ok, err := db.fullTextCandidatesLocked(q.Prefix, fullTextPlan)
+		if err != nil {
+			return 0, err
 		}
-		for _, term := range terms {
-			ids, err := db.getPostingListLocked(indexTermKey(q.Prefix, hashValue(term)))
-			if err != nil {
-				return 0, err
-			}
-			if ids == nil {
-				return 0, nil
-			}
-			if candidates == nil {
-				candidates = ids
-			} else {
-				candidates = intersectSorted(candidates, ids)
-			}
+		if ok {
+			candidates = ids
 			usedIndex = true
 			if len(candidates) == 0 {
 				return 0, nil
@@ -924,6 +948,45 @@ func (db *DB) SearchCount(q SearchQuery) (int, error) {
 	}
 
 	return count, nil
+}
+
+func (db *DB) fullTextCandidatesLocked(prefix string, plan fullTextPlan) ([]uint64, bool, error) {
+	terms := plan.indexTerms()
+	if len(terms) == 0 {
+		return nil, false, nil
+	}
+
+	var candidates []uint64
+	used := false
+	missing := 0
+	for _, term := range terms {
+		ids, err := db.getPostingListLocked(indexTermKey(prefix, hashValue(term)))
+		if err != nil {
+			return nil, false, err
+		}
+		if len(ids) == 0 {
+			missing++
+			if !plan.anyMode {
+				return []uint64{}, true, nil
+			}
+			continue
+		}
+		if !used {
+			candidates = ids
+			used = true
+		} else if plan.anyMode {
+			candidates = mergeSortedUnique(candidates, ids)
+		} else {
+			candidates = intersectSorted(candidates, ids)
+		}
+		if !plan.anyMode && len(candidates) == 0 {
+			return candidates, true, nil
+		}
+	}
+	if plan.anyMode && missing == len(terms) {
+		return []uint64{}, true, nil
+	}
+	return candidates, used, nil
 }
 
 func (db *DB) valueIndexCandidatesLocked(q SearchQuery) ([]uint64, bool, error) {
@@ -1086,6 +1149,8 @@ func (db *DB) rangeValueIndexCandidatesLocked(prefix string, f SearchFilter) ([]
 
 func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 	results := make([]SearchResult, 0, min(q.Limit, 100))
+	fullTextPlan := parseFullTextQuery(q)
+	rankTextResults := fullTextPlan.active() || conditionHasFullText(q.Condition)
 
 	trackSeen := db.hasOlderTablesLocked()
 	var seen map[string]struct{}
@@ -1125,22 +1190,27 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 			return false
 		}
 		results = append(results, SearchResult{
-			Key:   append([]byte{}, key...),
-			Value: append([]byte{}, value...),
+			Key:        append([]byte{}, key...),
+			Value:      append([]byte{}, value...),
+			Score:      searchQueryScore(value, q, fullTextPlan),
+			Highlights: searchQueryHighlights(value, q, fullTextPlan),
 		})
-		return len(results) >= q.Limit
+		return !rankTextResults && len(results) >= q.Limit
 	}
 
 	// Scan memtable first: most recent values take precedence.
 	db.memTable.entries.Range(func(k, v any) bool {
 		return !processEntry(storedEntryPtr(v), k.(string))
 	})
-	for i := len(db.flushingMemTables) - 1; i >= 0 && len(results) < q.Limit; i-- {
+	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
+		if !rankTextResults && len(results) >= q.Limit {
+			break
+		}
 		db.flushingMemTables[i].entries.Range(func(k, v any) bool {
 			return !processEntry(storedEntryPtr(v), k.(string))
 		})
 	}
-	if len(results) >= q.Limit {
+	if !rankTextResults && len(results) >= q.Limit {
 		return results, nil
 	}
 
@@ -1169,6 +1239,17 @@ func (db *DB) scanSearchLocked(q SearchQuery) ([]SearchResult, error) {
 					return results, nil
 				}
 			}
+		}
+	}
+	if rankTextResults {
+		sort.SliceStable(results, func(i, j int) bool {
+			if results[i].Score == results[j].Score {
+				return string(results[i].Key) < string(results[j].Key)
+			}
+			return results[i].Score > results[j].Score
+		})
+		if len(results) > q.Limit {
+			results = results[:q.Limit]
 		}
 	}
 	return results, nil
@@ -1268,20 +1349,438 @@ func (db *DB) hasOlderTablesLocked() bool {
 	return false
 }
 
-func matchesQuery(value []byte, q SearchQuery) bool {
-	if strings.TrimSpace(q.FullText) != "" {
-		terms := tokenize(strings.ToLower(q.FullText))
-		if len(terms) == 0 {
-			return false
+type fullTextPlan struct {
+	raw       string
+	terms     []string
+	phrases   []string
+	prefixes  []string
+	negative  []string
+	anyMode   bool
+	phraseAll bool
+}
+
+func parseFullTextQuery(q SearchQuery) fullTextPlan {
+	text := strings.TrimSpace(q.FullText)
+	plan := fullTextPlan{raw: text}
+	if text == "" {
+		return plan
+	}
+	mode := strings.ToLower(strings.TrimSpace(q.MatchMode))
+	plan.anyMode = mode == "any"
+	plan.phraseAll = mode == "phrase"
+	if mode == "boolean" {
+		plan.anyMode = strings.Contains(text, "|") || containsBooleanOR(text)
+	}
+
+	tokens := splitFullTextQuery(text)
+	negateNext := false
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
 		}
-		valTerms := tokenize(strings.ToLower(string(value)))
-		if !containsAllTerms(valTerms, terms) {
+		upper := strings.ToUpper(token)
+		if upper == "OR" || token == "|" {
+			plan.anyMode = true
+			continue
+		}
+		if upper == "AND" {
+			continue
+		}
+		if upper == "NOT" {
+			negateNext = true
+			continue
+		}
+		negative := negateNext
+		negateNext = false
+		if strings.HasPrefix(token, "-") && len(token) > 1 {
+			negative = true
+			token = strings.TrimPrefix(token, "-")
+		}
+		quoted := strings.HasPrefix(token, "\"") && strings.HasSuffix(token, "\"") && len(token) >= 2
+		if quoted {
+			phrase := strings.TrimSpace(token[1 : len(token)-1])
+			if phrase == "" {
+				continue
+			}
+			if negative {
+				plan.negative = append(plan.negative, tokenize(strings.ToLower(phrase))...)
+				continue
+			}
+			plan.phrases = append(plan.phrases, strings.ToLower(phrase))
+			continue
+		}
+		prefix := strings.HasSuffix(token, "*") && len(token) > 1
+		if prefix {
+			token = strings.TrimSuffix(token, "*")
+		}
+		for _, term := range tokenize(strings.ToLower(token)) {
+			if negative {
+				plan.negative = append(plan.negative, term)
+			} else if prefix || q.PrefixMatch {
+				plan.prefixes = append(plan.prefixes, term)
+			} else {
+				plan.terms = append(plan.terms, term)
+			}
+		}
+	}
+	if plan.phraseAll && len(plan.phrases) == 0 {
+		plan.phrases = []string{text}
+		plan.terms = nil
+	}
+	plan.terms = dedupeStrings(plan.terms)
+	plan.prefixes = dedupeStrings(plan.prefixes)
+	plan.negative = dedupeStrings(plan.negative)
+	return plan
+}
+
+func containsBooleanOR(text string) bool {
+	for _, token := range splitFullTextQuery(text) {
+		if strings.EqualFold(token, "OR") {
+			return true
+		}
+	}
+	return false
+}
+
+func splitFullTextQuery(text string) []string {
+	var out []string
+	var b strings.Builder
+	inQuote := false
+	for _, r := range text {
+		switch {
+		case r == '"':
+			b.WriteRune(r)
+			inQuote = !inQuote
+		case unicode.IsSpace(r) && !inQuote:
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+		case r == '|' && !inQuote:
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+			out = append(out, "|")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+func (p fullTextPlan) active() bool {
+	return p.raw != ""
+}
+
+func (p fullTextPlan) indexTerms() []string {
+	terms := make([]string, 0, len(p.terms)+len(p.phrases)*2)
+	terms = append(terms, p.terms...)
+	for _, phrase := range p.phrases {
+		terms = append(terms, tokenize(strings.ToLower(phrase))...)
+	}
+	return dedupeStrings(terms)
+}
+
+func (p fullTextPlan) matches(value []byte) bool {
+	if !p.active() {
+		return true
+	}
+	tokens := tokenize(strings.ToLower(string(value)))
+	if len(tokens) == 0 {
+		return false
+	}
+	tokenSet := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		tokenSet[token] = struct{}{}
+	}
+	for _, term := range p.negative {
+		if _, ok := tokenSet[term]; ok {
 			return false
 		}
 	}
+	positive := 0
+	matched := 0
+	for _, term := range p.terms {
+		positive++
+		if _, ok := tokenSet[term]; ok {
+			matched++
+		}
+	}
+	normalizedText := strings.Join(tokens, " ")
+	for _, phrase := range p.phrases {
+		positive++
+		if containsNormalizedPhrase(normalizedText, phrase) {
+			matched++
+		}
+	}
+	for _, prefix := range p.prefixes {
+		positive++
+		if containsTokenPrefix(tokens, prefix) {
+			matched++
+		}
+	}
+	if positive == 0 {
+		return len(p.negative) > 0
+	}
+	if p.anyMode {
+		return matched > 0
+	}
+	return matched == positive
+}
 
-	if len(q.Filters) == 0 {
+func fullTextScore(value []byte, plan fullTextPlan) float64 {
+	if !plan.active() {
+		return 0
+	}
+	tokens := tokenize(strings.ToLower(string(value)))
+	if len(tokens) == 0 {
+		return 0
+	}
+	score := 0.0
+	for _, term := range plan.terms {
+		score += float64(termFrequency(tokens, term))
+	}
+	normalizedText := strings.Join(tokens, " ")
+	for _, phrase := range plan.phrases {
+		if containsNormalizedPhrase(normalizedText, phrase) {
+			score += 4
+		}
+	}
+	for _, prefix := range plan.prefixes {
+		score += float64(prefixFrequency(tokens, prefix)) * 0.75
+	}
+	return score
+}
+
+func fullTextHighlights(value []byte, plan fullTextPlan, enabled bool) map[string][]string {
+	if !enabled || !plan.active() {
+		return nil
+	}
+	text := string(value)
+	lower := strings.ToLower(text)
+	needles := make([]string, 0, len(plan.terms)+len(plan.phrases)+len(plan.prefixes))
+	needles = append(needles, plan.terms...)
+	for _, phrase := range plan.phrases {
+		needles = append(needles, strings.Join(tokenize(strings.ToLower(phrase)), " "))
+	}
+	needles = append(needles, plan.prefixes...)
+	var snippets []string
+	for _, needle := range dedupeStrings(needles) {
+		if needle == "" {
+			continue
+		}
+		idx := strings.Index(lower, needle)
+		if idx < 0 {
+			continue
+		}
+		start := idx - 48
+		if start < 0 {
+			start = 0
+		}
+		end := idx + len(needle) + 48
+		if end > len(text) {
+			end = len(text)
+		}
+		snippet := strings.TrimSpace(text[start:end])
+		if start > 0 {
+			snippet = "..." + snippet
+		}
+		if end < len(text) {
+			snippet += "..."
+		}
+		snippets = append(snippets, snippet)
+		if len(snippets) >= 3 {
+			break
+		}
+	}
+	if len(snippets) == 0 {
+		return nil
+	}
+	return map[string][]string{"$value": snippets}
+}
+
+func searchQueryScore(value []byte, q SearchQuery, plan fullTextPlan) float64 {
+	score := fullTextScore(value, plan)
+	if q.Condition != nil {
+		score += conditionFullTextScore(value, *q.Condition)
+	}
+	return score
+}
+
+func searchQueryHighlights(value []byte, q SearchQuery, plan fullTextPlan) map[string][]string {
+	if !q.Highlight {
+		return nil
+	}
+	highlights := fullTextHighlights(value, plan, true)
+	if q.Condition == nil {
+		return highlights
+	}
+	conditionHighlights := conditionFullTextHighlights(value, *q.Condition)
+	if len(conditionHighlights) == 0 {
+		return highlights
+	}
+	if highlights == nil {
+		highlights = make(map[string][]string, len(conditionHighlights))
+	}
+	for field, snippets := range conditionHighlights {
+		highlights[field] = append(highlights[field], snippets...)
+		if len(highlights[field]) > 3 {
+			highlights[field] = highlights[field][:3]
+		}
+	}
+	return highlights
+}
+
+func conditionHasFullText(c *SearchCondition) bool {
+	if c == nil {
+		return false
+	}
+	if strings.TrimSpace(c.FullText) != "" {
 		return true
+	}
+	for i := range c.Children {
+		if conditionHasFullText(&c.Children[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+func conditionFullTextScore(raw []byte, c SearchCondition) float64 {
+	score := 0.0
+	if strings.TrimSpace(c.FullText) != "" {
+		plan := parseFullTextQuery(SearchQuery{
+			FullText:    c.FullText,
+			MatchMode:   c.MatchMode,
+			PrefixMatch: c.PrefixMatch,
+		})
+		fields := conditionFields(c)
+		if len(fields) == 0 {
+			score += fullTextScore(raw, plan)
+		} else {
+			for _, field := range fields {
+				value, ok := conditionFieldValue(raw, field)
+				if ok {
+					score += fullTextScore([]byte(normalizeValue(value)), plan)
+				}
+			}
+		}
+	}
+	for _, child := range c.Children {
+		if evaluateSearchCondition(raw, child) {
+			score += conditionFullTextScore(raw, child)
+		}
+	}
+	return score
+}
+
+func conditionFullTextHighlights(raw []byte, c SearchCondition) map[string][]string {
+	out := make(map[string][]string)
+	if strings.TrimSpace(c.FullText) != "" {
+		plan := parseFullTextQuery(SearchQuery{
+			FullText:    c.FullText,
+			MatchMode:   c.MatchMode,
+			PrefixMatch: c.PrefixMatch,
+		})
+		fields := conditionFields(c)
+		if len(fields) == 0 {
+			if snippets := fullTextHighlights(raw, plan, true); len(snippets) > 0 {
+				out["$value"] = append(out["$value"], snippets["$value"]...)
+			}
+		} else {
+			for _, field := range fields {
+				value, ok := conditionFieldValue(raw, field)
+				if !ok {
+					continue
+				}
+				if snippets := fullTextHighlights([]byte(normalizeValue(value)), plan, true); len(snippets) > 0 {
+					out[field] = append(out[field], snippets["$value"]...)
+				}
+			}
+		}
+	}
+	for _, child := range c.Children {
+		if !evaluateSearchCondition(raw, child) {
+			continue
+		}
+		for field, snippets := range conditionFullTextHighlights(raw, child) {
+			out[field] = append(out[field], snippets...)
+			if len(out[field]) > 3 {
+				out[field] = out[field][:3]
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func containsNormalizedPhrase(normalizedText, phrase string) bool {
+	phraseTokens := tokenize(strings.ToLower(phrase))
+	if len(phraseTokens) == 0 {
+		return false
+	}
+	return strings.Contains(normalizedText, strings.Join(phraseTokens, " "))
+}
+
+func containsTokenPrefix(tokens []string, prefix string) bool {
+	for _, token := range tokens {
+		if strings.HasPrefix(token, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func termFrequency(tokens []string, term string) int {
+	count := 0
+	for _, token := range tokens {
+		if token == term {
+			count++
+		}
+	}
+	return count
+}
+
+func prefixFrequency(tokens []string, prefix string) int {
+	count := 0
+	for _, token := range tokens {
+		if strings.HasPrefix(token, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := values[:0]
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func matchesQuery(value []byte, q SearchQuery) bool {
+	plan := parseFullTextQuery(q)
+	if plan.active() && !plan.matches(value) {
+		return false
 	}
 
 	for _, f := range q.Filters {
@@ -1289,7 +1788,174 @@ func matchesQuery(value []byte, q SearchQuery) bool {
 			return false
 		}
 	}
+	if q.Condition != nil && !evaluateSearchCondition(value, *q.Condition) {
+		return false
+	}
 	return true
+}
+
+func evaluateSearchCondition(raw []byte, c SearchCondition) bool {
+	result := evaluateSearchConditionNode(raw, c)
+	if c.Not {
+		return !result
+	}
+	return result
+}
+
+func evaluateSearchConditionNode(raw []byte, c SearchCondition) bool {
+	if len(c.Children) > 0 {
+		boolMode := conditionBool(c.Bool, "AND")
+		if boolMode == "OR" {
+			for _, child := range c.Children {
+				if evaluateSearchCondition(raw, child) {
+					return true
+				}
+			}
+			return false
+		}
+		for _, child := range c.Children {
+			if !evaluateSearchCondition(raw, child) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if strings.TrimSpace(c.FullText) != "" {
+		return evaluateFullTextCondition(raw, c)
+	}
+
+	return evaluateScalarCondition(raw, c)
+}
+
+func evaluateFullTextCondition(raw []byte, c SearchCondition) bool {
+	plan := parseFullTextQuery(SearchQuery{
+		FullText:    c.FullText,
+		MatchMode:   c.MatchMode,
+		PrefixMatch: c.PrefixMatch,
+	})
+	if !plan.active() {
+		return false
+	}
+	fields := conditionFields(c)
+	if len(fields) == 0 {
+		return plan.matches(raw)
+	}
+	boolMode := conditionBool(c.Bool, "OR")
+	if boolMode == "AND" {
+		for _, field := range fields {
+			value, ok := conditionFieldValue(raw, field)
+			if !ok || !plan.matches([]byte(normalizeValue(value))) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, field := range fields {
+		value, ok := conditionFieldValue(raw, field)
+		if ok && plan.matches([]byte(normalizeValue(value))) {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateScalarCondition(raw []byte, c SearchCondition) bool {
+	fields := conditionFields(c)
+	if len(fields) == 0 {
+		fields = []string{"$value"}
+	}
+	operators := conditionOperators(c)
+	values := conditionValues(c)
+	if len(values) == 0 {
+		return false
+	}
+	boolMode := conditionBool(c.Bool, "OR")
+	matched := 0
+	total := 0
+	for _, field := range fields {
+		left, ok := conditionFieldValue(raw, field)
+		if !ok {
+			if boolMode == "AND" {
+				return false
+			}
+			continue
+		}
+		for _, op := range operators {
+			for _, value := range values {
+				total++
+				if compareValues(left, value, op) {
+					matched++
+					if boolMode == "OR" {
+						return true
+					}
+				} else if boolMode == "AND" {
+					return false
+				}
+			}
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return matched == total
+}
+
+func conditionFields(c SearchCondition) []string {
+	fields := make([]string, 0, 1+len(c.Fields))
+	if strings.TrimSpace(c.Field) != "" {
+		fields = append(fields, strings.TrimSpace(c.Field))
+	}
+	for _, field := range c.Fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			fields = append(fields, field)
+		}
+	}
+	return dedupeStrings(fields)
+}
+
+func conditionOperators(c SearchCondition) []string {
+	ops := make([]string, 0, 1+len(c.Operators))
+	if strings.TrimSpace(c.Op) != "" {
+		ops = append(ops, strings.TrimSpace(c.Op))
+	}
+	for _, op := range c.Operators {
+		op = strings.TrimSpace(op)
+		if op != "" {
+			ops = append(ops, op)
+		}
+	}
+	if len(ops) == 0 {
+		return []string{"=="}
+	}
+	return dedupeStrings(ops)
+}
+
+func conditionValues(c SearchCondition) []any {
+	values := make([]any, 0, 1+len(c.Values))
+	if c.Value != nil {
+		values = append(values, c.Value)
+	}
+	values = append(values, c.Values...)
+	return values
+}
+
+func conditionBool(value, fallback string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	switch value {
+	case "AND", "OR":
+		return value
+	default:
+		return fallback
+	}
+}
+
+func conditionFieldValue(raw []byte, field string) (any, bool) {
+	if field == "" || field == "$value" {
+		return string(raw), true
+	}
+	return fastJSONScalarField(raw, field)
 }
 
 func exactIDFilterValue(filters []SearchFilter) (string, bool) {
@@ -1631,14 +2297,6 @@ func buildIndexProjections(value []byte, schema *SearchSchema) ([]string, map[st
 	return terms, hashes, values
 }
 
-func buildIndexProjectionsFromFields(fields map[string]any, schema *SearchSchema) ([]string, map[string]string, map[string]string) {
-	pairs := make([]IndexFieldValue, 0, len(fields))
-	for name, value := range fields {
-		pairs = append(pairs, IndexFieldValue{Name: name, Value: value})
-	}
-	return buildIndexProjectionsFromFieldPairs(pairs, schema)
-}
-
 func buildIndexProjectionsFromFieldPairs(fields []IndexFieldValue, schema *SearchSchema) ([]string, map[string]string, map[string]string) {
 	if schema == nil || len(schema.Fields) == 0 {
 		return nil, nil, nil
@@ -1852,6 +2510,10 @@ func (db *DB) getIndexMetaLocked(docID uint64) (indexMeta, bool, error) {
 
 func matchesQueryMeta(meta indexMeta, q SearchQuery) (bool, bool) {
 	if strings.TrimSpace(q.FullText) != "" {
+		plan := parseFullTextQuery(q)
+		if plan.anyMode || len(plan.phrases) > 0 || len(plan.prefixes) > 0 || len(plan.negative) > 0 {
+			return false, false
+		}
 		if len(meta.Terms) == 0 {
 			return false, false
 		}
@@ -1859,7 +2521,7 @@ func matchesQueryMeta(meta indexMeta, q SearchQuery) (bool, bool) {
 		for _, term := range meta.Terms {
 			termSet[term] = struct{}{}
 		}
-		for _, term := range tokenize(strings.ToLower(q.FullText)) {
+		for _, term := range plan.terms {
 			if _, ok := termSet[hashValue(term)]; !ok {
 				return false, true
 			}
@@ -1907,22 +2569,6 @@ func tokenize(s string) []string {
 		out = append(out, p)
 	}
 	return out
-}
-
-func containsAllTerms(haystack, needles []string) bool {
-	if len(needles) == 0 {
-		return true
-	}
-	set := make(map[string]struct{}, len(haystack))
-	for _, t := range haystack {
-		set[t] = struct{}{}
-	}
-	for _, n := range needles {
-		if _, ok := set[n]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func normalizeValue(v any) string {
@@ -2245,10 +2891,6 @@ func (db *DB) allocateDocIDLocked(key []byte) (uint64, error) {
 	return db.allocateDocIDLockedWithWAL(key, true)
 }
 
-func (db *DB) allocateDocIDLockedNoWAL(key []byte) (uint64, error) {
-	return db.allocateDocIDLockedWithWAL(key, false)
-}
-
 func (db *DB) allocateDocIDLockedWithWAL(key []byte, useWAL bool) (uint64, error) {
 	nextID, err := db.nextDocIDLocked()
 	if err != nil {
@@ -2310,10 +2952,6 @@ func (db *DB) storeNextDocIDLockedNoWAL(nextID uint64) error {
 
 func (db *DB) bindDocIDLocked(key []byte, docID uint64) error {
 	return db.bindDocIDLockedWithOwnership(key, docID, false)
-}
-
-func (db *DB) bindDocIDLockedOwned(key []byte, docID uint64) error {
-	return db.bindDocIDLockedOwnedString(key, "", docID)
 }
 
 func (db *DB) bindDocIDLockedOwnedString(key []byte, keyString string, docID uint64) error {

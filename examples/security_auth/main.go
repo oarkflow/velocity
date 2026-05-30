@@ -6,7 +6,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/oarkflow/velocity/pkg/web"
+	"github.com/oarkflow/velocity/web"
 )
 
 func main() {

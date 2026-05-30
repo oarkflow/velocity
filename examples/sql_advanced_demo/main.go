@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/oarkflow/velocity"
-	_ "github.com/oarkflow/velocity/sqldriver"
+	_ "github.com/oarkflow/velocity/pkg/sqldriver"
 )
 
 func main() {

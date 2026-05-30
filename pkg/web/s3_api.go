@@ -257,8 +257,8 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 	recursive := delimiter == ""
 
 	opts := velocity.ObjectListOptions{
-		Prefix:     bucket + "/" + prefix,
-		MaxKeys:    maxKeys + 1, // fetch one extra to detect truncation
+		Prefix:  bucket + "/" + prefix,
+		MaxKeys: maxKeys + 1, // fetch one extra to detect truncation
 		StartAfter: func() string {
 			if startAfter != "" {
 				return bucket + "/" + startAfter
@@ -474,6 +474,24 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 	}
 
 	if ranges != nil && len(ranges) > 0 {
+		if len(ranges) > 1 {
+			boundary := fmt.Sprintf("velocity-%d", time.Now().UnixNano())
+			var multipart bytes.Buffer
+			for _, r := range ranges {
+				part := velocity.GetObjectRange(data, r)
+				fmt.Fprintf(&multipart, "--%s\r\n", boundary)
+				if meta != nil && meta.ContentType != "" {
+					fmt.Fprintf(&multipart, "Content-Type: %s\r\n", meta.ContentType)
+				}
+				fmt.Fprintf(&multipart, "Content-Range: bytes %d-%d/%d\r\n\r\n", r.Start, r.End, meta.Size)
+				multipart.Write(part)
+				multipart.WriteString("\r\n")
+			}
+			fmt.Fprintf(&multipart, "--%s--\r\n", boundary)
+			c.Set("Content-Type", "multipart/byteranges; boundary="+boundary)
+			c.Set("Content-Length", strconv.Itoa(multipart.Len()))
+			return c.Status(http.StatusPartialContent).Send(multipart.Bytes())
+		}
 		r := ranges[0]
 		totalSize := meta.Size
 		c.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.Start, r.End, totalSize))

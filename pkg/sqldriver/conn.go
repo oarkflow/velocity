@@ -50,9 +50,10 @@ type cachedTableSchema struct {
 }
 
 type parsedStatement struct {
-	stmt          sqlparser.Statement
-	parser        *sqlparser.Parser
-	normalizedSQL string
+	stmt           sqlparser.Statement
+	parser         *sqlparser.Parser
+	normalizedSQL  string
+	velocitySchema map[string]velocityColumnFlags
 }
 
 type bulkInsertPlan struct {
@@ -99,6 +100,7 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 		paramOrder: paramOrder,
 		cacheSQL:   parsed.normalizedSQL,
 		fastInsert: newSimpleInsertPlan(parsed.stmt, paramOrder),
+		ddlFlags:   parsed.velocitySchema,
 	}, nil
 }
 
@@ -112,12 +114,13 @@ func (c *Conn) getOrParseStatement(query string) (*parsedStatement, error) {
 	}
 	c.stmtMu.RUnlock()
 
-	parser := sqlparser.NewString(query)
+	rewritten := rewriteVelocityCreateTable(query)
+	parser := sqlparser.NewString(rewritten.sql)
 	stmt, err := parser.Next()
 	if err != nil {
 		return nil, err
 	}
-	parsed := &parsedStatement{stmt: stmt, parser: parser, normalizedSQL: normalizeSQLForCache(query)}
+	parsed := &parsedStatement{stmt: stmt, parser: parser, normalizedSQL: normalizeSQLForCache(rewritten.sql), velocitySchema: rewritten.flags}
 
 	c.stmtMu.Lock()
 	if c.stmtCache == nil {
@@ -654,10 +657,16 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 	if batchSize <= 0 || batchSize > count {
 		batchSize = count
 	}
-	plan := c.bulkInsertPlan(table, columns)
-	constraints, err := c.rawInsertConstraintPlan(table, columns)
+	meta, found, err := c.loadSchemaMeta(table)
 	if err != nil {
 		return 0, err
+	}
+	var constraints rawInsertConstraintPlan
+	if !found {
+		constraints, err = c.rawInsertConstraintPlan(table, columns)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	inserted := int64(0)
@@ -666,8 +675,15 @@ func (c *Conn) BulkInsertFuncBatchSize(table string, columns []string, count int
 	write := func(put func([]byte, []byte, []velocity.IndexFieldValue) error) error {
 		for rowIdx := 0; rowIdx < count; rowIdx++ {
 			fill(rowIdx, row)
-			key, payload, fields := plan.encodeRow(row, rowIdx)
-			if err := c.checkRawInsertConstraintPlan(constraints, row, key, batchConstraintKeys); err != nil {
+			key, payload, fields, data, err := c.encodeTypedBulkRow(table, columns, row, rowIdx, meta, found)
+			if err != nil {
+				return err
+			}
+			if found {
+				if err := c.checkInsertConstraintsForData(table, meta, data, string(key), batchConstraintKeys); err != nil {
+					return err
+				}
+			} else if err := c.checkRawInsertConstraintPlan(constraints, row, key, batchConstraintKeys); err != nil {
 				return err
 			}
 			if err := put(key, payload, fields); err != nil {
@@ -720,9 +736,19 @@ func (c *Conn) InsertRow(table string, columns []string, values []any) error {
 	if table == "" || len(columns) == 0 {
 		return nil
 	}
-	plan := c.bulkInsertPlan(table, columns)
-	key, payload, fields := plan.encodeRow(values, 0)
-	if err := c.checkRawInsertConstraints(table, columns, values, key); err != nil {
+	meta, found, err := c.loadSchemaMeta(table)
+	if err != nil {
+		return err
+	}
+	key, payload, fields, data, err := c.encodeTypedBulkRow(table, columns, values, 0, meta, found)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := c.checkInsertConstraintsForData(table, meta, data, string(key), nil); err != nil {
+			return err
+		}
+	} else if err := c.checkRawInsertConstraints(table, columns, values, key); err != nil {
 		return err
 	}
 	return c.PutTableRowWithIndexFieldPairs(table, key, payload, fields)
@@ -734,11 +760,49 @@ func (c *Conn) InsertRowFunc(table string, columns []string, fill func(dst []any
 	}
 	plan := c.bulkInsertPlan(table, columns)
 	fill(plan.rowScratch)
-	key, payload, fields := plan.encodeRow(plan.rowScratch, 0)
-	if err := c.checkRawInsertConstraints(table, columns, plan.rowScratch, key); err != nil {
+	meta, found, err := c.loadSchemaMeta(table)
+	if err != nil {
+		return err
+	}
+	key, payload, fields, data, err := c.encodeTypedBulkRow(table, columns, plan.rowScratch, 0, meta, found)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := c.checkInsertConstraintsForData(table, meta, data, string(key), nil); err != nil {
+			return err
+		}
+	} else if err := c.checkRawInsertConstraints(table, columns, plan.rowScratch, key); err != nil {
 		return err
 	}
 	return c.PutTableRowWithIndexFieldPairs(table, key, payload, fields)
+}
+
+func (c *Conn) encodeTypedBulkRow(table string, columns []string, row []any, rowIdx int, meta tableSchemaMeta, found bool) ([]byte, []byte, []velocity.IndexFieldValue, map[string]any, error) {
+	if !found {
+		plan := c.bulkInsertPlan(table, columns)
+		key, payload, fields := plan.encodeRow(row, rowIdx)
+		return key, payload, fields, nil, nil
+	}
+	data := make(map[string]any, len(columns))
+	for i, col := range columns {
+		if i < len(row) {
+			data[col] = row[i]
+		}
+	}
+	if meta.PrimaryKey == "" {
+		data["_rownum"] = rowIdx
+	}
+	coerced, err := applyInsertDefaultsAndTypes(table, meta, data, &Evaluator{})
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	keyString, _ := insertKey(table, meta, coerced, int64(rowIdx))
+	payload, err := json.Marshal(coerced)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return []byte(keyString), payload, indexFieldsFromData(meta, coerced), coerced, nil
 }
 
 func (c *Conn) bulkInsertPlan(table string, columns []string) *bulkInsertPlan {
@@ -961,6 +1025,80 @@ func (c *Conn) checkRawInsertConstraintPlanKeyString(plan rawInsertConstraintPla
 			continue
 		}
 		if value == nil {
+			continue
+		}
+		txKey := "unique\x00" + table + "\x00" + col + "\x00" + fmt.Sprintf("%v", value)
+		if hasSeen(txKey) {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", table, col)
+		}
+		count, err := c.db.SearchCount(velocity.SearchQuery{
+			Prefix: table,
+			Filters: []velocity.SearchFilter{{
+				Field:    col,
+				Op:       "==",
+				Value:    value,
+				HashOnly: true,
+			}},
+			Limit: 1,
+		})
+		if err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("velocity driver: duplicate unique value on %s.%s", table, col)
+		}
+		markSeen(txKey)
+	}
+	return nil
+}
+
+func (c *Conn) checkInsertConstraintsForData(table string, meta tableSchemaMeta, data map[string]any, primaryKey string, seen map[string]struct{}) error {
+	hasSeen := func(key string) bool {
+		if seen != nil {
+			if _, exists := seen[key]; exists {
+				return true
+			}
+		}
+		if c.txConstraintKeys != nil {
+			if _, exists := c.txConstraintKeys[key]; exists {
+				return true
+			}
+		}
+		return false
+	}
+	markSeen := func(key string) {
+		if seen != nil {
+			seen[key] = struct{}{}
+		}
+		if c.txConstraintKeys != nil {
+			c.txConstraintKeys[key] = struct{}{}
+		}
+	}
+	for _, col := range meta.NotNull {
+		if data[col] == nil {
+			return fmt.Errorf("velocity driver: column %s.%s cannot be NULL", table, col)
+		}
+	}
+	if meta.PrimaryKey != "" {
+		value, ok := data[meta.PrimaryKey]
+		if !ok || value == nil {
+			return fmt.Errorf("velocity driver: primary key %s.%s cannot be NULL", table, meta.PrimaryKey)
+		}
+		txKey := "pk\x00" + primaryKey
+		if hasSeen(txKey) {
+			return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+		}
+		if c.db.Has([]byte(primaryKey)) {
+			return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
+		}
+		markSeen(txKey)
+	}
+	for _, col := range meta.Unique {
+		if col == meta.PrimaryKey {
+			continue
+		}
+		value, ok := data[col]
+		if !ok || value == nil {
 			continue
 		}
 		txKey := "unique\x00" + table + "\x00" + col + "\x00" + fmt.Sprintf("%v", value)

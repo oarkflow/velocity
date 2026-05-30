@@ -1,7 +1,6 @@
 package velocity
 
 import (
-	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -327,13 +326,7 @@ func (db *DB) GetObjectWithRange(bucket, key, user, rangeHeader string) ([]byte,
 		return rangedData, meta, ranges, nil
 	}
 
-	// Multiple ranges - concatenate with boundaries
-	var buf bytes.Buffer
-	for _, r := range ranges {
-		buf.Write(GetObjectRange(data, r))
-	}
-
-	return buf.Bytes(), meta, ranges, nil
+	return data, meta, ranges, nil
 }
 
 // GetObjectStreamByBucketKey is a convenience wrapper

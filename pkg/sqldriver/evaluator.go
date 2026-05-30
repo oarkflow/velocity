@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/oarkflow/sqlparser/ast"
 	"github.com/oarkflow/sqlparser/lexer"
 )
@@ -351,6 +353,15 @@ func (e *Evaluator) argByOrdinal(ordinal int) (interface{}, error) {
 func (e *Evaluator) evalFuncCall(v *ast.FuncCall, row Row) (interface{}, error) {
 	funcName := qualifiedIdentToString(v.Name)
 
+	if (strings.EqualFold(funcName, "now") || strings.EqualFold(funcName, "current_timestamp")) && len(v.Args) == 0 {
+		return time.Now().UTC(), nil
+	}
+	if strings.EqualFold(funcName, "current_date") && len(v.Args) == 0 {
+		return time.Now().UTC().Format("2006-01-02"), nil
+	}
+	if (strings.EqualFold(funcName, "uuid") || strings.EqualFold(funcName, "uuid_v4")) && len(v.Args) == 0 {
+		return uuid.NewString(), nil
+	}
 	if strings.EqualFold(funcName, "count") {
 		return 1, nil // Base count for single row context
 	}

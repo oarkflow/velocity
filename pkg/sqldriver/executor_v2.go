@@ -30,6 +30,7 @@ type ExecutorV2 struct {
 	outerRow   Row
 	rawSQL     string
 	cacheSQL   string
+	ddlFlags   map[string]velocityColumnFlags
 }
 
 type putOperation struct {
@@ -38,11 +39,13 @@ type putOperation struct {
 }
 
 type tableSchemaMeta struct {
-	Columns      []string               `json:"columns"`
-	SearchSchema *velocity.SearchSchema `json:"search_schema,omitempty"`
-	PrimaryKey   string                 `json:"primary_key,omitempty"`
-	Unique       []string               `json:"unique,omitempty"`
-	NotNull      []string               `json:"not_null,omitempty"`
+	Columns      []string                 `json:"columns"`
+	ColumnTypes  map[string]sqlColumnType `json:"column_types,omitempty"`
+	Defaults     map[string]string        `json:"defaults,omitempty"`
+	SearchSchema *velocity.SearchSchema   `json:"search_schema,omitempty"`
+	PrimaryKey   string                   `json:"primary_key,omitempty"`
+	Unique       []string                 `json:"unique,omitempty"`
+	NotNull      []string                 `json:"not_null,omitempty"`
 }
 
 type viewMeta struct {
@@ -170,7 +173,12 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 	}
 
 	appendRow := func(data map[string]interface{}) error {
-		key, keyValue := insertKey(tableName, data, inserted)
+		var err error
+		data, err = applyInsertDefaultsAndTypes(tableName, meta, data, eval)
+		if err != nil {
+			return err
+		}
+		key, keyValue := insertKey(tableName, meta, data, inserted)
 		if keyValue != nil {
 			if id, ok := asFloat(keyValue); ok {
 				lastInsertID = int64(id)
@@ -211,7 +219,10 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 						doc[name] = val
 						rowCtx[name] = val
 					}
-					data = doc
+					data, err = coerceRowTypes(tableName, meta, doc)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -250,7 +261,7 @@ func (e *ExecutorV2) executeInsert(ctx context.Context, n *ast.InsertStmt, args 
 				return nil, fmt.Errorf("velocity driver: insert column/value count mismatch")
 			}
 			if encodedColumns != nil {
-				key, keyValue, payload, data, err := e.fastInsertPayload(tableName, columns, encodedColumns, rowExprs, eval, inserted, len(n.Values) > 1, rowIdx)
+				key, keyValue, payload, data, err := e.fastInsertPayload(tableName, meta, columns, rowExprs, eval, inserted, len(n.Values) > 1, rowIdx)
 				if err != nil {
 					return nil, err
 				}
@@ -301,14 +312,9 @@ func (e *ExecutorV2) tryFastBulkInsert(ctx context.Context, tableName string, co
 	if len(columns) == 0 || len(n.Values) < 2 {
 		return nil, false, nil
 	}
-
-	encodedColumns := make([][]byte, len(columns))
-	idIndex := -1
-	for i, col := range columns {
-		encodedColumns[i] = strconv.AppendQuote(nil, col)
-		if col == "id" {
-			idIndex = i
-		}
+	meta, _, err := e.loadTableSchemaMeta(tableName)
+	if err != nil {
+		return nil, true, err
 	}
 	for _, rowExprs := range n.Values {
 		for _, expr := range rowExprs {
@@ -345,46 +351,42 @@ func (e *ExecutorV2) tryFastBulkInsert(ctx context.Context, tableName string, co
 			statementUnlocks = append(statementUnlocks, unlock)
 			return nil
 		}
-		for _, rowExprs := range n.Values {
+		eval := e.newEvaluator(ctx, args)
+		for rowIdx, rowExprs := range n.Values {
 			if len(rowExprs) != len(columns) {
 				return nil, fmt.Errorf("velocity driver: insert column/value count mismatch")
 			}
 
-			payload := make([]byte, 0, 96)
-			payload = append(payload, '{')
-			var keyValue interface{}
-			values := make([]any, len(columns))
+			data := make(map[string]any, len(columns))
 			for colIdx, expr := range rowExprs {
 				value, ok, err := e.fastInsertExprValue(expr, args)
 				if err != nil || !ok {
 					return nil, err
 				}
-				values[colIdx] = value
-				if colIdx > 0 {
-					payload = append(payload, ',')
-				}
-				payload = append(payload, encodedColumns[colIdx]...)
-				payload = append(payload, ':')
-				payload = appendJSONValue(payload, value)
-				if colIdx == idIndex {
-					keyValue = value
-				}
+				data[columns[colIdx]] = value
 			}
-			payload = append(payload, '}')
-
-			var key []byte
+			if meta.PrimaryKey == "" && len(n.Values) > 1 {
+				data["_rownum"] = rowIdx
+			}
+			coerced, err := applyInsertDefaultsAndTypes(tableName, meta, data, eval)
+			if err != nil {
+				return nil, err
+			}
+			keyString, keyValue := insertKey(tableName, meta, coerced, inserted)
 			if keyValue != nil {
-				key = appendTableKey(nil, tableName, keyValue)
 				if id, ok := asFloat(keyValue); ok {
 					lastInsertID = int64(id)
 				}
-			} else {
-				key = strconv.AppendInt(append(append(key, tableName...), ':'), time.Now().UnixNano()+inserted, 10)
 			}
+			key := []byte(keyString)
 			if err := lockInsertKey(string(key)); err != nil {
 				return nil, err
 			}
-			if err := e.conn.checkRawInsertConstraintsWithSeen(tableName, columns, values, key, batchConstraintKeys); err != nil {
+			if err := e.checkInsertConstraints(tableName, meta, coerced, keyString, batchConstraintKeys); err != nil {
+				return nil, err
+			}
+			payload, err := json.Marshal(coerced)
+			if err != nil {
 				return nil, err
 			}
 			if err := put(key, payload); err != nil {
@@ -570,6 +572,11 @@ func (e *ExecutorV2) executeUpdate(ctx context.Context, n *ast.UpdateStmt, args 
 			row[name] = val
 		}
 		if hasSingleTable {
+			var err error
+			doc, err = coerceRowTypes(tableName, meta, doc)
+			if err != nil {
+				return nil, err
+			}
 			if err := e.checkUpdateConstraints(tableName, meta, key, original, doc, uniqueSeen); err != nil {
 				return nil, err
 			}
@@ -749,9 +756,14 @@ func (e *ExecutorV2) executeCreateTable(ctx context.Context, n *ast.CreateTableS
 
 	puts := make([]putOperation, 0, len(rows.rowMaps))
 	inserted := int64(0)
+	eval := e.newEvaluator(ctx, args)
 	for _, row := range rows.rowMaps {
 		data := normalizeProjectedRow(row)
-		key, _ := insertKey(tableName, data, inserted)
+		data, err := applyInsertDefaultsAndTypes(tableName, meta, data, eval)
+		if err != nil {
+			return nil, err
+		}
+		key, _ := insertKey(tableName, meta, data, inserted)
 		payload, err := json.Marshal(data)
 		if err != nil {
 			return nil, err
@@ -1004,14 +1016,30 @@ func (e *ExecutorV2) tryFastPrimaryKeySelect(sel *ast.SelectStmt, args []driver.
 		return nil, false, nil
 	}
 
+	meta, found, err := e.loadTableSchemaMeta(tableName)
+	if err != nil {
+		return nil, true, err
+	}
+	primaryKey := "id"
+	if found && meta.PrimaryKey != "" {
+		primaryKey = meta.PrimaryKey
+	}
 	binary, ok := sel.Where.(*ast.BinaryExpr)
-	if !ok || binary.Op != lexer.EQ || exprColumnName(binary.Left) != "id" {
+	if !ok || binary.Op != lexer.EQ || exprColumnName(binary.Left) != primaryKey {
 		return nil, false, nil
 	}
 	eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
 	id, err := eval.Eval(binary.Right, nil)
 	if err != nil || id == nil {
 		return nil, false, err
+	}
+	if found {
+		if typ, ok := meta.ColumnTypes[primaryKey]; ok {
+			id, err = coerceColumnValue(typ, id)
+			if err != nil {
+				return nil, true, err
+			}
+		}
 	}
 
 	raw, err := e.conn.Get(appendTableKey(nil, tableName, id))
@@ -1371,8 +1399,9 @@ func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt,
 		rows = append(rows, row)
 	}
 
-	if len(rows) == 0 && plan.fullText != "" {
+	if len(rows) == 0 && (plan.fullText != "" || len(plan.filters) > 0) {
 		plan.fullText = ""
+		plan.filters = nil
 		return e.collectSourceRowsWithPlan(ctx, sel, args, plan, queryLimit)
 	}
 
@@ -1478,6 +1507,11 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 		if queryLimit <= 0 {
 			queryLimit = maxSearchLimit
 		}
+		var err error
+		tablePlan, err = e.coerceSearchPlan(tableName, tablePlan)
+		if err != nil {
+			return nil, err
+		}
 		return NewConnTableScanIterator(e.conn, alias, velocity.SearchQuery{
 			Prefix:   tableName,
 			FullText: tablePlan.fullText,
@@ -1513,6 +1547,29 @@ func (e *ExecutorV2) buildTableRefIterator(ctx context.Context, ref ast.TableRef
 	}
 
 	return nil, fmt.Errorf("velocity driver: unsupported table reference %T", ref)
+}
+
+func (e *ExecutorV2) coerceSearchPlan(tableName string, plan searchPlan) (searchPlan, error) {
+	if len(plan.filters) == 0 {
+		return plan, nil
+	}
+	meta, found, err := e.loadTableSchemaMeta(tableName)
+	if err != nil || !found || len(meta.ColumnTypes) == 0 {
+		return plan, err
+	}
+	for i := range plan.filters {
+		filter := &plan.filters[i]
+		typ, ok := meta.ColumnTypes[filter.Field]
+		if !ok || filter.Value == nil {
+			continue
+		}
+		coerced, err := coerceColumnValue(typ, filter.Value)
+		if err != nil {
+			return plan, err
+		}
+		filter.Value = coerced
+	}
+	return plan, nil
 }
 
 func (e *ExecutorV2) buildWhereCondition(ctx context.Context, expr ast.Expr, args []driver.NamedValue) func(Row) bool {
@@ -1760,11 +1817,6 @@ func (e *ExecutorV2) scanQueryLimit(sel *ast.SelectStmt, plan searchPlan, args [
 }
 
 func hasExactIDFilter(filters []velocity.SearchFilter) bool {
-	for _, filter := range filters {
-		if strings.EqualFold(filter.Field, "id") && (filter.Op == "=" || filter.Op == "==") {
-			return true
-		}
-	}
 	return false
 }
 
@@ -1795,6 +1847,11 @@ func (e *ExecutorV2) tryFastCountSelect(sel *ast.SelectStmt, args []driver.Named
 		return nil, false, nil
 	}
 	if !e.fastCountWhereSupported(sel.Where, args) {
+		return nil, false, nil
+	}
+	if meta, found, err := e.loadTableSchemaMeta(tableName); err != nil {
+		return nil, true, err
+	} else if found && len(meta.ColumnTypes) > 0 && sel.Where != nil {
 		return nil, false, nil
 	}
 
@@ -2261,7 +2318,27 @@ func (e *ExecutorV2) schemaMetaFromCreateStmt(ctx context.Context, stmt *ast.Cre
 	for _, col := range stmt.Columns {
 		name := identToString(col.Name)
 		meta.Columns = append(meta.Columns, name)
-		field := velocity.SearchSchemaField{Name: name, Searchable: true}
+		colType, err := columnTypeFromAST(col.Type)
+		if err != nil {
+			return tableSchemaMeta{}, err
+		}
+		if colType.Kind != columnTypeAny {
+			if meta.ColumnTypes == nil {
+				meta.ColumnTypes = make(map[string]sqlColumnType)
+			}
+			meta.ColumnTypes[name] = colType
+		}
+		if col.Default != nil {
+			defaultSQL := exprToSQL(col.Default)
+			if defaultSQL == "" {
+				return tableSchemaMeta{}, fmt.Errorf("velocity driver: unsupported DEFAULT expression on %s", name)
+			}
+			if meta.Defaults == nil {
+				meta.Defaults = make(map[string]string)
+			}
+			meta.Defaults[name] = defaultSQL
+		}
+		field := searchSchemaFieldFromColumnDef(name, e.ddlFlags[name])
 		if col.PrimaryKey || col.Unique {
 			field.HashSearch = true
 		}
@@ -2344,6 +2421,14 @@ func (e *ExecutorV2) schemaMetaFromCreateStmt(ctx context.Context, stmt *ast.Cre
 		}
 	}
 	return meta, nil
+}
+
+func searchSchemaFieldFromColumnDef(name string, flags velocityColumnFlags) velocity.SearchSchemaField {
+	field := velocity.SearchSchemaField{Name: name}
+	field.Searchable = flags.fulltext
+	field.HashSearch = flags.index
+	field.ValueIndex = flags.value
+	return field
 }
 
 func cloneSearchSchema(schema *velocity.SearchSchema) *velocity.SearchSchema {
@@ -2697,7 +2782,12 @@ func rowToJSONBytes(row Row) []byte {
 	return data
 }
 
-func insertKey(tableName string, data map[string]interface{}, rowNum int64) (string, interface{}) {
+func insertKey(tableName string, meta tableSchemaMeta, data map[string]interface{}, rowNum int64) (string, interface{}) {
+	if meta.PrimaryKey != "" {
+		if value, ok := data[meta.PrimaryKey]; ok && value != nil {
+			return fmt.Sprintf("%s:%v", tableName, value), value
+		}
+	}
 	if id, ok := data["id"]; ok {
 		return fmt.Sprintf("%s:%v", tableName, id), id
 	}
@@ -2707,36 +2797,28 @@ func insertKey(tableName string, data map[string]interface{}, rowNum int64) (str
 	return fmt.Sprintf("%s:%d", tableName, time.Now().UnixNano()), nil
 }
 
-func (e *ExecutorV2) fastInsertPayload(tableName string, columns []string, encodedColumns [][]byte, rowExprs []ast.Expr, eval *Evaluator, inserted int64, multiRow bool, rowIdx int) (string, interface{}, []byte, map[string]interface{}, error) {
-	var keyValue interface{}
+func (e *ExecutorV2) fastInsertPayload(tableName string, meta tableSchemaMeta, columns []string, rowExprs []ast.Expr, eval *Evaluator, inserted int64, multiRow bool, rowIdx int) (string, interface{}, []byte, map[string]interface{}, error) {
 	data := make(map[string]interface{}, len(rowExprs))
-	payload := make([]byte, 0, 96)
-	payload = append(payload, '{')
 	for colIdx, expr := range rowExprs {
 		val, err := eval.Eval(expr, nil)
 		if err != nil {
 			return "", nil, nil, nil, err
 		}
 		data[columns[colIdx]] = val
-		if colIdx > 0 {
-			payload = append(payload, ',')
-		}
-		payload = append(payload, encodedColumns[colIdx]...)
-		payload = append(payload, ':')
-		payload = appendJSONValue(payload, val)
-		if columns[colIdx] == "id" {
-			keyValue = val
-		}
 	}
-	payload = append(payload, '}')
-
-	if keyValue != nil {
-		return fmt.Sprintf("%s:%v", tableName, keyValue), keyValue, payload, data, nil
+	if meta.PrimaryKey == "" && multiRow {
+		data["_rownum"] = rowIdx
 	}
-	if multiRow {
-		return fmt.Sprintf("%s:%d:%d", tableName, time.Now().UnixNano(), rowIdx), nil, payload, data, nil
+	data, err := applyInsertDefaultsAndTypes(tableName, meta, data, eval)
+	if err != nil {
+		return "", nil, nil, nil, err
 	}
-	return fmt.Sprintf("%s:%d", tableName, time.Now().UnixNano()), nil, payload, data, nil
+	key, keyValue := insertKey(tableName, meta, data, inserted)
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	return key, keyValue, payload, data, nil
 }
 
 func appendJSONValue(dst []byte, value interface{}) []byte {

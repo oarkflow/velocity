@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
-	"github.com/oarkflow/velocity/sqldriver"
+	"github.com/oarkflow/velocity/pkg/sqldriver"
 )
 
 func main() {

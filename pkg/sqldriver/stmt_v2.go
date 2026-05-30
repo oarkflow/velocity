@@ -23,6 +23,7 @@ type StmtV2 struct {
 	parser     *sqlparser.Parser
 	paramOrder map[int32]int
 	fastInsert *simpleInsertPlan
+	ddlFlags   map[string]velocityColumnFlags
 }
 
 // Close closes the statement.
@@ -83,12 +84,12 @@ func (s *StmtV2) ExecContext(ctx context.Context, args []driver.NamedValue) (dri
 	if s.fastInsert != nil {
 		return s.fastInsert.Exec(ctx, s.conn, args)
 	}
-	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL, ddlFlags: s.ddlFlags}
 	return executor.Execute(ctx, s.stmt, args)
 }
 
 func (s *StmtV2) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL}
+	executor := &ExecutorV2{conn: s.conn, paramOrder: s.paramOrder, rawSQL: s.query, cacheSQL: s.cacheSQL, ddlFlags: s.ddlFlags}
 	return executor.ExecuteSelect(ctx, s.stmt, args)
 }
 
@@ -136,9 +137,15 @@ func (r *Rows) Clone() *Rows {
 		rowMaps:    make([]Row, 0, len(r.rowMaps)),
 	}
 	for _, res := range r.results {
+		highlights := make(map[string][]string, len(res.Highlights))
+		for field, snippets := range res.Highlights {
+			highlights[field] = append([]string(nil), snippets...)
+		}
 		out.results = append(out.results, velocity.SearchResult{
-			Key:   append([]byte(nil), res.Key...),
-			Value: append([]byte(nil), res.Value...),
+			Key:        append([]byte(nil), res.Key...),
+			Value:      append([]byte(nil), res.Value...),
+			Score:      res.Score,
+			Highlights: highlights,
 		})
 	}
 	for _, row := range r.rowMaps {

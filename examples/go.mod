@@ -4,7 +4,7 @@ go 1.26.1
 
 replace (
 	github.com/oarkflow/velocity => ../
-	github.com/oarkflow/velocity/web => ../web
+	github.com/oarkflow/velocity/web => ../pkg/web
 )
 
 require (
@@ -32,6 +32,7 @@ require (
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/json v0.0.28 // indirect
 	github.com/oarkflow/licensing v0.0.26 // indirect
+	github.com/oarkflow/money v0.0.3 // indirect
 	github.com/oarkflow/previewer v0.0.6 // indirect
 	github.com/oarkflow/shamir v0.0.2 // indirect
 	github.com/oarkflow/sqlparser v0.0.0-20260322160025-9e8f05a7da94 // indirect

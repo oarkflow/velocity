@@ -3,9 +3,9 @@ package sqldriver
 import (
 	"context"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"strconv"
-	"time"
 	"unsafe"
 
 	sqlparser "github.com/oarkflow/sqlparser"
@@ -69,56 +69,41 @@ func newSimpleInsertPlan(stmt sqlparser.Statement, paramOrder map[int32]int) *si
 }
 
 func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.NamedValue) (driver.Result, error) {
-	payload := p.payloadScratch[:0]
-	if cap(payload) < 96 {
-		payload = make([]byte, 0, 96)
+	constraints, err := p.constraintPlan(conn)
+	if err != nil {
+		return nil, err
 	}
-	payload = append(payload, '{')
-	var keyValue interface{}
-	if cap(p.fieldsScratch) < len(p.columns) {
-		p.fieldsScratch = make([]velocity.IndexFieldValue, len(p.columns))
-	}
-	fields := p.fieldsScratch[:len(p.columns)]
-
+	data := make(map[string]any, len(p.columns))
 	for i, ordinal := range p.paramOrdinals {
 		value, err := namedArgByOrdinal(args, ordinal)
 		if err != nil {
 			return nil, err
 		}
-		if i > 0 {
-			payload = append(payload, ',')
-		}
-		payload = append(payload, p.encodedCols[i]...)
-		payload = append(payload, ':')
-		payload = appendJSONValue(payload, value)
-		fields[i] = velocity.IndexFieldValue{Name: p.columns[i], Value: value}
-		if i == p.idIndex {
-			keyValue = value
-		}
+		data[p.columns[i]] = value
 	}
-	payload = append(payload, '}')
+	eval := &Evaluator{Args: args}
+	data, err = applyInsertDefaultsAndTypes(p.table, constraints.meta, data, eval)
+	if err != nil {
+		return nil, err
+	}
 
 	var lastInsertID int64
-	key := p.keyScratch[:0]
+	keyString, keyValue := insertKey(p.table, constraints.meta, data, 0)
 	if keyValue != nil {
-		key = appendTableKey(key, p.table, keyValue)
 		if id, ok := asFloat(keyValue); ok {
 			lastInsertID = int64(id)
 		}
-	} else {
-		key = strconv.AppendInt(append(append(key, p.table...), ':'), time.Now().UnixNano(), 10)
 	}
+	key := []byte(keyString)
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	fields := indexFieldsFromData(constraints.meta, data)
 
-	if cap(p.valuesScratch) < len(fields) {
-		p.valuesScratch = make([]any, len(fields))
-	}
-	values := p.valuesScratch[:len(fields)]
-	for i, field := range fields {
-		values[i] = field.Value
-	}
 	var ownedKey []byte
 	var ownedPayload []byte
-	keyString := ""
+	ownedKeyString := ""
 	if conn.tx != nil {
 		buf := make([]byte, len(key)+len(payload))
 		ownedKey = buf[:len(key)]
@@ -126,7 +111,7 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 		copy(ownedKey, key)
 		copy(ownedPayload, payload)
 		if len(ownedKey) > 0 {
-			keyString = unsafe.String(&ownedKey[0], len(ownedKey))
+			ownedKeyString = unsafe.String(&ownedKey[0], len(ownedKey))
 		}
 	}
 	if conn.tx == nil {
@@ -136,23 +121,17 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 		}
 		defer unlock()
 	}
-	constraints, err := p.constraintPlan(conn)
-	if err != nil {
+	if err := conn.checkInsertConstraintsForData(p.table, constraints.meta, data, string(key), nil); err != nil {
 		return nil, err
 	}
-	if err := conn.checkRawInsertConstraintPlanKeyString(constraints, values, key, keyString, nil); err != nil {
-		return nil, err
-	}
-	indexFields := p.indexFieldsForSchema(fields, constraints.meta.SearchSchema)
-	if keyString != "" {
-		err = conn.PutNewOwnedTableRowWithIndexFieldPairsKeyString(p.table, ownedKey, keyString, ownedPayload, indexFields)
+	if ownedKeyString != "" {
+		err = conn.PutNewOwnedTableRowWithIndexFieldPairsKeyString(p.table, ownedKey, ownedKeyString, ownedPayload, fields)
 	} else {
-		err = conn.PutNewTableRowWithIndexFieldPairs(p.table, key, payload, indexFields)
+		err = conn.PutNewTableRowWithIndexFieldPairs(p.table, key, payload, fields)
 	}
 	if err != nil {
 		return nil, err
 	}
-	p.payloadScratch = payload[:0]
 	p.keyScratch = key[:0]
 	return singleInsertResult(lastInsertID), nil
 }
