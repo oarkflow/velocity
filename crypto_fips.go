@@ -236,7 +236,7 @@ func DefaultFIPSConfig() CryptoConfig {
 		KeyDerivation: DefaultFIPSKeyDerivation(),
 		KeyRotationPolicy: KeyRotationPolicy{
 			Enabled:           true,
-			RotationInterval:  90 * 24 * time.Hour, // 90 days
+			RotationInterval:  90 * 24 * time.Hour,  // 90 days
 			MaxKeyAge:         365 * 24 * time.Hour, // 1 year
 			ReencryptionBatch: 1000,
 		},
@@ -251,7 +251,7 @@ func DefaultStandardConfig() CryptoConfig {
 		KeyRotationPolicy: KeyRotationPolicy{
 			Enabled:           true,
 			RotationInterval:  180 * 24 * time.Hour, // 180 days
-			MaxKeyAge:         365 * 24 * time.Hour,  // 1 year
+			MaxKeyAge:         365 * 24 * time.Hour, // 1 year
 			ReencryptionBatch: 1000,
 		},
 	}

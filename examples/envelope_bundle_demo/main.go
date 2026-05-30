@@ -55,10 +55,10 @@ func createBundleEnvelope(db *velocity.DB, ctx context.Context) string {
 
 	resources := []velocity.EnvelopeResource{
 		{
-			ID:     "res-1",
-			Type:   "file",
-			Name:   "cctv_footage.mp4",
-			Path:   "evidence/cctv/case-001/camera5.mp4",
+			ID:       "res-1",
+			Type:     "file",
+			Name:     "cctv_footage.mp4",
+			Path:     "evidence/cctv/case-001/camera5.mp4",
 			Metadata: map[string]string{"camera": "5", "timestamp": "2026-01-20T14:30:00Z"},
 		},
 		{

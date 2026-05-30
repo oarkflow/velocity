@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 	"github.com/oarkflow/velocity/pkg/sqldriver"
 )
 
@@ -81,25 +82,25 @@ func main() {
 		_ = os.RemoveAll(path)
 	}()
 
-	kg := db.KnowledgeGraph(velocity.KGConfig{
+	graphEngine := db.KnowledgeGraph(kg.KGConfig{
 		ChunkMaxWords: 32,
 		ChunkOverlap:  8,
 		IngestWorkers: 2,
 	})
-	if kg == nil {
+	if graphEngine == nil {
 		log.Fatal("knowledge graph engine was nil")
 	}
 
 	db.EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
 		Enabled:       true,
-		Resources:     []velocity.KGResourceType{velocity.KGResourceKV, velocity.KGResourceObject, velocity.KGResourceSecret, velocity.KGResourceEnvelope, velocity.KGResourceEntity},
+		Resources:     []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret, kg.ResourceEnvelope, kg.ResourceEntity},
 		SecretValues:  true,
 		Existing:      false,
 		Async:         false,
 		MaxValueBytes: 1024 * 1024,
 	})
 
-	docs := []*velocity.KGIngestRequest{
+	docs := []*kg.KGIngestRequest{
 		{
 			Source:    "security-note.txt",
 			MediaType: "text/plain",
@@ -116,42 +117,42 @@ func main() {
 		},
 	}
 
-	results, errs := kg.IngestBatch(ctx, docs)
+	results, errs := graphEngine.IngestBatch(ctx, docs)
 	for i, err := range errs {
 		must(err)
 		fmt.Printf("ingested[%d]: doc=%s chunks=%d entities=%d\n", i, results[i].DocID[:8], results[i].ChunkCount, results[i].EntityCount)
 	}
 
-	search, err := kg.Search(ctx, &velocity.KGSearchRequest{
+	search, err := graphEngine.Search(ctx, &kg.KGSearchRequest{
 		Query:   "compliance audit secrets",
 		Limit:   5,
 		Filters: map[string]string{"team": "security"},
-		Mode:    velocity.KGSearchModeKeyword,
+		Mode:    kg.KGSearchModeKeyword,
 	})
 	must(err)
 	fmt.Printf("filtered search hits: %d mode=%s\n", search.TotalHits, search.Mode)
 	for i, hit := range search.Hits {
 		fmt.Printf("hit[%d]: source=%s title=%s score=%.4f\n", i, hit.Source, hit.Title, hit.Score)
 	}
-	fuzzy, err := kg.Search(ctx, &velocity.KGSearchRequest{
+	fuzzy, err := graphEngine.Search(ctx, &kg.KGSearchRequest{
 		Query:         "complaince secrts",
 		Limit:         5,
-		Mode:          velocity.KGSearchModeKeyword,
+		Mode:          kg.KGSearchModeKeyword,
 		Fuzzy:         true,
 		FuzzyMaxEdits: 1,
 	})
 	must(err)
 	fmt.Printf("fuzzy search hits: %d\n", fuzzy.TotalHits)
 
-	doc, err := kg.GetDocument(results[0].DocID)
+	doc, err := graphEngine.GetDocument(results[0].DocID)
 	must(err)
 	fmt.Printf("retrieved doc: %s source=%s chunks=%d entities=%d\n", doc.ID[:8], doc.Source, doc.ChunkCount, doc.EntityCount)
 
-	analytics := kg.GetAnalytics()
+	analytics := graphEngine.GetAnalytics()
 	fmt.Printf("analytics: documents=%d chunks=%d entities=%d\n", analytics.TotalDocuments, analytics.TotalChunks, analytics.TotalEntities)
 
-	must(kg.DeleteDocument(results[1].DocID))
-	if _, err := kg.GetDocument(results[1].DocID); err != nil {
+	must(graphEngine.DeleteDocument(results[1].DocID))
+	if _, err := graphEngine.GetDocument(results[1].DocID); err != nil {
 		fmt.Println("delete verified: analytics-note removed")
 	}
 
@@ -190,7 +191,7 @@ func main() {
 		"entity record indexed automatically",
 	}
 	for _, query := range autoQueries {
-		resp, err := kg.Search(ctx, &velocity.KGSearchRequest{Query: query, Limit: 3, Mode: velocity.KGSearchModeKeyword})
+		resp, err := graphEngine.Search(ctx, &kg.KGSearchRequest{Query: query, Limit: 3, Mode: kg.KGSearchModeKeyword})
 		must(err)
 		if resp.TotalHits == 0 {
 			log.Fatalf("auto-index query %q returned no hits", query)
@@ -200,10 +201,10 @@ func main() {
 	}
 	fmt.Printf("auto-indexed resources: secret=%s envelope=%s entity=%s\n", secret.Version, env.EnvelopeID, entity.EntityID)
 
-	graph, err := kg.SearchResourceGraph(ctx, &velocity.KGResourceGraphRequest{
+	graph, err := graphEngine.SearchResourceGraph(ctx, &kg.KGResourceGraphRequest{
 		Query: "Acme Corp",
 		Limit: 10,
-		Mode:  velocity.KGSearchModeKeyword,
+		Mode:  kg.KGSearchModeKeyword,
 	})
 	must(err)
 	fmt.Printf("resource graph: nodes=%d edges=%d\n", len(graph.Nodes), len(graph.Edges))
@@ -216,7 +217,7 @@ func main() {
 		Path:                                sqlPath,
 		DisableEncryption:                   true,
 		KnowledgeGraphAutoIndexEnabled:      true,
-		KnowledgeGraphAutoIndexResources:    []velocity.KGResourceType{velocity.KGResourceSQLRow},
+		KnowledgeGraphAutoIndexResources:    []kg.ResourceType{kg.ResourceSQLRow},
 		KnowledgeGraphAutoIndexMaxValueBytes: 1024 * 1024,
 	}
 	sqlDB, err := sql.Open(sqldriver.DriverName, sqlPath)
@@ -233,7 +234,7 @@ func main() {
 	must(err)
 	sqlVelocityDB.EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
 		Enabled:       true,
-		Resources:     []velocity.KGResourceType{velocity.KGResourceSQLRow},
+		Resources:     []kg.ResourceType{kg.ResourceSQLRow},
 		SecretValues:  true,
 		Existing:      false,
 		Async:         false,
@@ -241,13 +242,13 @@ func main() {
 	})
 	must(sqlVelocityDB.SyncKnowledgeGraph(ctx, velocity.KnowledgeGraphAutoIndexConfig{
 		Enabled:       true,
-		Resources:     []velocity.KGResourceType{velocity.KGResourceSQLRow},
+		Resources:     []kg.ResourceType{kg.ResourceSQLRow},
 		SecretValues:  true,
 		Existing:      true,
 		Async:         false,
 		MaxValueBytes: 1024 * 1024,
 	}))
-	sqlResp, err := sqlVelocityDB.KnowledgeGraph().Search(ctx, &velocity.KGSearchRequest{Query: "cardiology follow up", Limit: 3, Mode: velocity.KGSearchModeKeyword})
+	sqlResp, err := sqlVelocityDB.KnowledgeGraph().Search(ctx, &kg.KGSearchRequest{Query: "cardiology follow up", Limit: 3, Mode: kg.KGSearchModeKeyword})
 	must(err)
 	if sqlResp.TotalHits == 0 {
 		log.Fatal("SQL auto-index query returned no hits")

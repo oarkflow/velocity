@@ -14,22 +14,13 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-)
 
-type KGResourceType string
-
-const (
-	KGResourceKV       KGResourceType = "kv"
-	KGResourceObject   KGResourceType = "object"
-	KGResourceSecret   KGResourceType = "secret"
-	KGResourceSQLRow   KGResourceType = "sql_row"
-	KGResourceEnvelope KGResourceType = "envelope"
-	KGResourceEntity   KGResourceType = "entity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 type KnowledgeGraphAutoIndexConfig struct {
 	Enabled       bool
-	Resources     []KGResourceType
+	Resources     []kg.ResourceType
 	SecretValues  bool
 	Existing      bool
 	Async         bool
@@ -37,13 +28,13 @@ type KnowledgeGraphAutoIndexConfig struct {
 }
 
 type KnowledgeGraphSyncStatus struct {
-	Enabled        bool                   `json:"enabled"`
-	Running        bool                   `json:"running"`
-	LastStartedAt  time.Time              `json:"last_started_at,omitempty"`
-	LastFinishedAt time.Time              `json:"last_finished_at,omitempty"`
-	LastError      string                 `json:"last_error,omitempty"`
-	Indexed        map[KGResourceType]int `json:"indexed,omitempty"`
-	Skipped        map[KGResourceType]int `json:"skipped,omitempty"`
+	Enabled        bool                    `json:"enabled"`
+	Running        bool                    `json:"running"`
+	LastStartedAt  time.Time               `json:"last_started_at,omitempty"`
+	LastFinishedAt time.Time               `json:"last_finished_at,omitempty"`
+	LastError      string                  `json:"last_error,omitempty"`
+	Indexed        map[kg.ResourceType]int `json:"indexed,omitempty"`
+	Skipped        map[kg.ResourceType]int `json:"skipped,omitempty"`
 }
 
 type KGAutoIndexer struct {
@@ -63,8 +54,8 @@ func (db *DB) EnableKnowledgeGraphAutoIndex(config KnowledgeGraphAutoIndexConfig
 		cfg: config,
 		status: KnowledgeGraphSyncStatus{
 			Enabled: true,
-			Indexed: make(map[KGResourceType]int),
-			Skipped: make(map[KGResourceType]int),
+			Indexed: make(map[kg.ResourceType]int),
+			Skipped: make(map[kg.ResourceType]int),
 		},
 	}
 	if config.Existing {
@@ -99,7 +90,7 @@ func (db *DB) KnowledgeGraphSyncStatus() KnowledgeGraphSyncStatus {
 
 func normalizeKGAutoIndexConfig(cfg KnowledgeGraphAutoIndexConfig) KnowledgeGraphAutoIndexConfig {
 	if len(cfg.Resources) == 0 {
-		cfg.Resources = []KGResourceType{KGResourceKV, KGResourceObject, KGResourceSecret, KGResourceSQLRow, KGResourceEnvelope, KGResourceEntity}
+		cfg.Resources = []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret, kg.ResourceSQLRow, kg.ResourceEnvelope, kg.ResourceEntity}
 	}
 	if cfg.MaxValueBytes <= 0 {
 		cfg.MaxValueBytes = defaultKGAutoIndexMaxValueBytes
@@ -114,11 +105,11 @@ func (idx *KGAutoIndexer) Status() KnowledgeGraphSyncStatus {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	out := idx.status
-	out.Indexed = make(map[KGResourceType]int, len(idx.status.Indexed))
+	out.Indexed = make(map[kg.ResourceType]int, len(idx.status.Indexed))
 	for k, v := range idx.status.Indexed {
 		out.Indexed[k] = v
 	}
-	out.Skipped = make(map[KGResourceType]int, len(idx.status.Skipped))
+	out.Skipped = make(map[kg.ResourceType]int, len(idx.status.Skipped))
 	for k, v := range idx.status.Skipped {
 		out.Skipped[k] = v
 	}
@@ -144,19 +135,19 @@ func (idx *KGAutoIndexer) Sync(ctx context.Context) error {
 	return err
 }
 
-func (idx *KGAutoIndexer) syncType(ctx context.Context, typ KGResourceType) error {
+func (idx *KGAutoIndexer) syncType(ctx context.Context, typ kg.ResourceType) error {
 	switch typ {
-	case KGResourceKV:
+	case kg.ResourceKV:
 		return idx.syncKV(ctx)
-	case KGResourceObject:
+	case kg.ResourceObject:
 		return idx.syncObjects(ctx)
-	case KGResourceSecret:
+	case kg.ResourceSecret:
 		return idx.syncSecrets(ctx)
-	case KGResourceSQLRow:
+	case kg.ResourceSQLRow:
 		return idx.syncSQLRows(ctx)
-	case KGResourceEnvelope:
+	case kg.ResourceEnvelope:
 		return idx.syncEnvelopes(ctx)
-	case KGResourceEntity:
+	case kg.ResourceEntity:
 		return idx.syncEntities(ctx)
 	default:
 		return nil
@@ -170,8 +161,8 @@ func (idx *KGAutoIndexer) markStart() {
 	idx.status.Running = true
 	idx.status.LastStartedAt = time.Now().UTC()
 	idx.status.LastError = ""
-	idx.status.Indexed = make(map[KGResourceType]int)
-	idx.status.Skipped = make(map[KGResourceType]int)
+	idx.status.Indexed = make(map[kg.ResourceType]int)
+	idx.status.Skipped = make(map[kg.ResourceType]int)
 }
 
 func (idx *KGAutoIndexer) markFinish(err error) {
@@ -184,7 +175,7 @@ func (idx *KGAutoIndexer) markFinish(err error) {
 	}
 }
 
-func (idx *KGAutoIndexer) count(typ KGResourceType, indexed bool) {
+func (idx *KGAutoIndexer) count(typ kg.ResourceType, indexed bool) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	if indexed {
@@ -194,7 +185,7 @@ func (idx *KGAutoIndexer) count(typ KGResourceType, indexed bool) {
 	}
 }
 
-func (idx *KGAutoIndexer) enabled(typ KGResourceType) bool {
+func (idx *KGAutoIndexer) enabled(typ kg.ResourceType) bool {
 	if idx == nil || !idx.cfg.Enabled {
 		return false
 	}
@@ -206,7 +197,7 @@ func (idx *KGAutoIndexer) enabled(typ KGResourceType) bool {
 	return false
 }
 
-func (db *DB) kgAutoIndexResource(ctx context.Context, typ KGResourceType, req *KGIngestRequest) {
+func (db *DB) kgAutoIndexResource(ctx context.Context, typ kg.ResourceType, req *kg.KGIngestRequest) {
 	idx := db.kgAutoIndex
 	if idx == nil || !idx.enabled(typ) || req == nil {
 		return
@@ -223,7 +214,7 @@ func (db *DB) kgAutoIndexResource(ctx context.Context, typ KGResourceType, req *
 	}
 }
 
-func (idx *KGAutoIndexer) indexRequest(ctx context.Context, typ KGResourceType, req *KGIngestRequest) error {
+func (idx *KGAutoIndexer) indexRequest(ctx context.Context, typ kg.ResourceType, req *kg.KGIngestRequest) error {
 	if req == nil || req.Source == "" {
 		idx.count(typ, false)
 		return nil
@@ -270,9 +261,9 @@ func (db *DB) kgAutoIndexKV(key, value []byte) {
 	if !db.kgShouldIndexKVKey(string(key)) {
 		return
 	}
-	content, meta := db.kgContentForBytes(KGResourceKV, string(key), value, nil)
+	content, meta := db.kgContentForBytes(kg.ResourceKV, string(key), value, nil)
 	meta["key"] = string(key)
-	db.kgAutoIndexResource(context.Background(), KGResourceKV, &KGIngestRequest{
+	db.kgAutoIndexResource(context.Background(), kg.ResourceKV, &kg.KGIngestRequest{
 		Source:    "kv:" + string(key),
 		MediaType: "text/plain",
 		Title:     "KV " + string(key),
@@ -297,7 +288,7 @@ func (db *DB) kgAutoIndexObjectRecord(rec *ObjectRecord, content []byte) {
 		}
 	}
 	meta := map[string]string{
-		"resource_type": string(KGResourceObject),
+		"resource_type": string(kg.ResourceObject),
 		"path":          rec.Path,
 		"bucket":        rec.Bucket,
 		"key":           rec.Key,
@@ -311,11 +302,11 @@ func (db *DB) kgAutoIndexObjectRecord(rec *ObjectRecord, content []byte) {
 	for k, v := range rec.CustomMetadata {
 		meta["meta_"+k] = v
 	}
-	body, extra := db.kgContentForBytes(KGResourceObject, rec.Path, content, meta)
+	body, extra := db.kgContentForBytes(kg.ResourceObject, rec.Path, content, meta)
 	for k, v := range extra {
 		meta[k] = v
 	}
-	db.kgAutoIndexResource(context.Background(), KGResourceObject, &KGIngestRequest{
+	db.kgAutoIndexResource(context.Background(), kg.ResourceObject, &kg.KGIngestRequest{
 		Source:    "object:" + rec.Path,
 		MediaType: rec.ContentType,
 		Title:     rec.Path,
@@ -333,7 +324,7 @@ func (db *DB) kgAutoIndexSecretValue(rec *SecretRecord, value []byte) {
 		return
 	}
 	meta := map[string]string{
-		"resource_type": string(KGResourceSecret),
+		"resource_type": string(kg.ResourceSecret),
 		"name":          rec.Name,
 		"version":       rec.Version,
 		"secret_id":     rec.SecretID,
@@ -344,9 +335,9 @@ func (db *DB) kgAutoIndexSecretValue(rec *SecretRecord, value []byte) {
 	}
 	content := []byte(metadataText(meta))
 	if db.kgAutoIndex != nil && db.kgAutoIndex.cfg.SecretValues {
-		content, meta = db.kgContentForBytes(KGResourceSecret, rec.Name, value, meta)
+		content, meta = db.kgContentForBytes(kg.ResourceSecret, rec.Name, value, meta)
 	}
-	db.kgAutoIndexResource(context.Background(), KGResourceSecret, &KGIngestRequest{
+	db.kgAutoIndexResource(context.Background(), kg.ResourceSecret, &kg.KGIngestRequest{
 		Source:    "secret:" + rec.Name + ":" + rec.Version,
 		MediaType: "text/plain",
 		Title:     "Secret " + rec.Name,
@@ -359,9 +350,9 @@ func (db *DB) kgAutoIndexSQLRow(table, key string, value []byte) {
 	if table == "" || key == "" {
 		return
 	}
-	meta := map[string]string{"resource_type": string(KGResourceSQLRow), "table": table, "row_key": key}
-	content, meta := db.kgContentForBytes(KGResourceSQLRow, table+"/"+key, value, meta)
-	db.kgAutoIndexResource(context.Background(), KGResourceSQLRow, &KGIngestRequest{
+	meta := map[string]string{"resource_type": string(kg.ResourceSQLRow), "table": table, "row_key": key}
+	content, meta := db.kgContentForBytes(kg.ResourceSQLRow, table+"/"+key, value, meta)
+	db.kgAutoIndexResource(context.Background(), kg.ResourceSQLRow, &kg.KGIngestRequest{
 		Source:    "sql:" + table + ":" + key,
 		MediaType: "application/json",
 		Title:     "SQL " + table + " " + key,
@@ -371,13 +362,13 @@ func (db *DB) kgAutoIndexSQLRow(table, key string, value []byte) {
 }
 
 func (db *DB) KGAutoIndexSQLRow(table string, key, value []byte) {
-	if db.kgAutoIndex != nil && db.kgAutoIndex.enabled(KGResourceSQLRow) {
+	if db.kgAutoIndex != nil && db.kgAutoIndex.enabled(kg.ResourceSQLRow) {
 		db.kgAutoIndexSQLRow(table, string(key), value)
 	}
 }
 
 func (db *DB) KGAutoDeleteSQLRow(table string, key []byte) {
-	if db.kgAutoIndex != nil && db.kgAutoIndex.enabled(KGResourceSQLRow) {
+	if db.kgAutoIndex != nil && db.kgAutoIndex.enabled(kg.ResourceSQLRow) {
 		db.kgAutoDeleteSource("sql:" + table + ":" + string(key))
 	}
 }
@@ -387,7 +378,7 @@ func (db *DB) kgAutoIndexEnvelope(env *Envelope) {
 		return
 	}
 	meta := map[string]string{
-		"resource_type": string(KGResourceEnvelope),
+		"resource_type": string(kg.ResourceEnvelope),
 		"envelope_id":   env.EnvelopeID,
 		"type":          string(env.Type),
 		"status":        env.Status,
@@ -398,7 +389,7 @@ func (db *DB) kgAutoIndexEnvelope(env *Envelope) {
 		meta["tag_"+k] = v
 	}
 	content := envelopeKGText(env)
-	db.kgAutoIndexResource(context.Background(), KGResourceEnvelope, &KGIngestRequest{
+	db.kgAutoIndexResource(context.Background(), kg.ResourceEnvelope, &kg.KGIngestRequest{
 		Source:    "envelope:" + env.EnvelopeID,
 		MediaType: "text/plain",
 		Title:     env.Label,
@@ -418,7 +409,7 @@ func (db *DB) kgAutoIndexEntity(entity *Entity) {
 		return
 	}
 	meta := map[string]string{
-		"resource_type": string(KGResourceEntity),
+		"resource_type": string(kg.ResourceEntity),
 		"entity_id":     entity.EntityID,
 		"type":          entity.Type,
 		"name":          entity.Name,
@@ -430,7 +421,7 @@ func (db *DB) kgAutoIndexEntity(entity *Entity) {
 		meta["meta_"+k] = v
 	}
 	content := entity.Name + "\n" + entity.Description + "\n" + string(entity.Data) + "\n" + metadataText(entity.Tags) + "\n" + metadataText(entity.Metadata)
-	db.kgAutoIndexResource(context.Background(), KGResourceEntity, &KGIngestRequest{
+	db.kgAutoIndexResource(context.Background(), kg.ResourceEntity, &kg.KGIngestRequest{
 		Source:    "entity:" + entity.EntityID,
 		MediaType: "text/plain",
 		Title:     entity.Name,
@@ -444,7 +435,7 @@ func (db *DB) kgAutoDeleteEntity(entityID string) {
 }
 
 func (db *DB) kgShouldIndexKVKey(key string) bool {
-	if key == "" || isIndexKey([]byte(key)) || strings.HasPrefix(key, kgPrefix) || strings.HasPrefix(key, "__kgm:") {
+	if key == "" || isIndexKey([]byte(key)) || strings.HasPrefix(key, "__kg:") || strings.HasPrefix(key, "__kgm:") {
 		return false
 	}
 	skipPrefixes := []string{
@@ -459,7 +450,7 @@ func (db *DB) kgShouldIndexKVKey(key string) bool {
 	return true
 }
 
-func (db *DB) kgContentForBytes(typ KGResourceType, name string, value []byte, meta map[string]string) ([]byte, map[string]string) {
+func (db *DB) kgContentForBytes(typ kg.ResourceType, name string, value []byte, meta map[string]string) ([]byte, map[string]string) {
 	if meta == nil {
 		meta = make(map[string]string)
 	}
@@ -586,7 +577,7 @@ func (idx *KGAutoIndexer) syncKV(ctx context.Context) error {
 		}
 		value, err := idx.db.Get([]byte(key))
 		if err != nil {
-			idx.count(KGResourceKV, false)
+			idx.count(kg.ResourceKV, false)
 			continue
 		}
 		idx.db.kgAutoIndexKV([]byte(key), value)
@@ -606,7 +597,7 @@ func (idx *KGAutoIndexer) syncObjects(ctx context.Context) error {
 		path := strings.TrimPrefix(key, ObjectRecordPrefix)
 		rec, err := idx.db.getObjectRecord(path)
 		if err != nil || rec.State == ObjectStateDeleted {
-			idx.count(KGResourceObject, false)
+			idx.count(kg.ResourceObject, false)
 			continue
 		}
 		var content []byte
@@ -633,14 +624,14 @@ func (idx *KGAutoIndexer) syncSecrets(ctx context.Context) error {
 		}
 		var rec SecretRecord
 		if json.Unmarshal(raw, &rec) != nil {
-			idx.count(KGResourceSecret, false)
+			idx.count(kg.ResourceSecret, false)
 			continue
 		}
 		var value []byte
 		if idx.cfg.SecretValues {
 			value, err = idx.db.openSecretRecord(&rec)
 			if err != nil {
-				idx.count(KGResourceSecret, false)
+				idx.count(kg.ResourceSecret, false)
 				continue
 			}
 		}
@@ -699,7 +690,7 @@ func (idx *KGAutoIndexer) syncEnvelopes(ctx context.Context) error {
 		id := strings.TrimSuffix(entry.Name(), envelopeSecureExtension)
 		env, err := idx.db.loadEnvelope(id)
 		if err != nil {
-			idx.count(KGResourceEnvelope, false)
+			idx.count(kg.ResourceEnvelope, false)
 			continue
 		}
 		idx.db.kgAutoIndexEnvelope(env)
@@ -719,7 +710,7 @@ func (idx *KGAutoIndexer) syncEntities(ctx context.Context) error {
 		entityID := strings.TrimPrefix(key, entityKeyPrefix)
 		entity, err := idx.db.EntityManager().GetEntity(ctx, entityID, false)
 		if err != nil || entity == nil || entity.Entity == nil {
-			idx.count(KGResourceEntity, false)
+			idx.count(kg.ResourceEntity, false)
 			continue
 		}
 		idx.db.kgAutoIndexEntity(entity.Entity)

@@ -6,17 +6,17 @@ import (
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
-	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 // KGAPI provides HTTP endpoints for the Knowledge Graph subsystem.
 type KGAPI struct {
-	kg *velocity.KnowledgeGraphEngine
+	kg *kg.KnowledgeGraphEngine
 }
 
 // NewKGAPI creates a new KG API handler.
-func NewKGAPI(kg *velocity.KnowledgeGraphEngine) *KGAPI {
-	return &KGAPI{kg: kg}
+func NewKGAPI(engine *kg.KnowledgeGraphEngine) *KGAPI {
+	return &KGAPI{kg: engine}
 }
 
 // RegisterRoutes registers all KG API routes.
@@ -35,7 +35,7 @@ func (a *KGAPI) RegisterRoutes(app *fiber.App) {
 func (a *KGAPI) handleIngest(c fiber.Ctx) error {
 	contentType := c.Get("Content-Type")
 
-	var req velocity.KGIngestRequest
+	var req kg.KGIngestRequest
 
 	if contentType == "application/json" || contentType == "" {
 		if err := json.Unmarshal(c.Body(), &req); err != nil {
@@ -80,7 +80,7 @@ func (a *KGAPI) handleIngest(c fiber.Ctx) error {
 }
 
 func (a *KGAPI) handleIngestBatch(c fiber.Ctx) error {
-	var reqs []*velocity.KGIngestRequest
+	var reqs []*kg.KGIngestRequest
 	if err := json.Unmarshal(c.Body(), &reqs); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON: " + err.Error()})
 	}
@@ -88,8 +88,8 @@ func (a *KGAPI) handleIngestBatch(c fiber.Ctx) error {
 	results, errs := a.kg.IngestBatch(c.Context(), reqs)
 
 	type batchResult struct {
-		Result *velocity.KGIngestResponse `json:"result,omitempty"`
-		Error  string                     `json:"error,omitempty"`
+		Result *kg.KGIngestResponse `json:"result,omitempty"`
+		Error  string               `json:"error,omitempty"`
 	}
 
 	out := make([]batchResult, len(reqs))
@@ -105,7 +105,7 @@ func (a *KGAPI) handleIngestBatch(c fiber.Ctx) error {
 }
 
 func (a *KGAPI) handleSearch(c fiber.Ctx) error {
-	var req velocity.KGSearchRequest
+	var req kg.KGSearchRequest
 	if err := json.Unmarshal(c.Body(), &req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON: " + err.Error()})
 	}

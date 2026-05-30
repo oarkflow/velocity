@@ -3,23 +3,27 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/oarkflow/velocity"
 )
 
 func main() {
+	_ = os.RemoveAll("./velocitydb_data")
+
 	// Initialize database with encryption
 	db, err := velocity.NewWithConfig(velocity.Config{
 		Path:          "./velocitydb_data",
+		EncryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.MasterKeyConfig{
-			Source: velocity.UserDefined,
+			Source: velocity.SystemFile,
 		},
 		MaxUploadSize: 100 * 1024 * 1024,
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	// defer db.Close() // CRITICAL: Always close the database to flush data to disk
+	defer db.Close()
 
 	fmt.Println("=== Velocity DB Object Storage Example ===")
 
@@ -153,21 +157,25 @@ func example3_ViewSingleFile(db *velocity.DB) {
 	filePath := "documents/readme.md"
 
 	fmt.Printf("Attempting to preview: %s\n", filePath)
-	err := db.ViewObject(filePath, "user1")
+	data, meta, err := db.GetObject(filePath, "user1")
 	if err != nil {
-		log.Printf("✗ Error viewing file: %v\n", err)
+		log.Printf("✗ Error reading file for preview: %v\n", err)
 		return
 	}
+	fmt.Printf("✓ Preview data loaded: %s (%s, %d bytes)\n", meta.Path, meta.ContentType, len(data))
+	fmt.Printf("  Content: %s\n", string(data))
 
 	fmt.Println("\n✓ File preview completed successfully")
 
 	// Also demonstrate viewing another file
 	fmt.Println("\nViewing another file...")
-	err = db.ViewObject("data/config.json", "user1")
+	data, meta, err = db.GetObject("data/config.json", "user1")
 	if err != nil {
-		log.Printf("✗ Error viewing file: %v\n", err)
+		log.Printf("✗ Error reading file for preview: %v\n", err)
 		return
 	}
+	fmt.Printf("✓ Preview data loaded: %s (%s, %d bytes)\n", meta.Path, meta.ContentType, len(data))
+	fmt.Printf("  Content: %s\n", string(data))
 
 	fmt.Println("\n✓ All file previews completed")
 }
@@ -195,10 +203,10 @@ func example2_FolderStructure(db *velocity.DB) {
 
 	// Store files in different folders
 	files := map[string]string{
-		"projects/alpha/README.md":    "# Alpha Project\n\nThis is the alpha project.",
-		"projects/alpha/src/main.go":  "package main\n\nfunc main() {\n\tprintln(\"Alpha\")\n}",
-		"projects/beta/README.md":     "# Beta Project\n\nThis is the beta project.",
-		"projects/beta/src/main.go":   "package main\n\nfunc main() {\n\tprintln(\"Beta\")\n}",
+		"projects/alpha/README.md":   "# Alpha Project\n\nThis is the alpha project.",
+		"projects/alpha/src/main.go": "package main\n\nfunc main() {\n\tprintln(\"Alpha\")\n}",
+		"projects/beta/README.md":    "# Beta Project\n\nThis is the beta project.",
+		"projects/beta/src/main.go":  "package main\n\nfunc main() {\n\tprintln(\"Beta\")\n}",
 	}
 
 	for path, content := range files {

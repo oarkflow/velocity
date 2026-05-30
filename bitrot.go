@@ -54,14 +54,14 @@ type BitRotStats struct {
 
 // BitRotResult is the result of scanning a single object
 type BitRotResult struct {
-	Path           string    `json:"path"`
-	Healthy        bool      `json:"healthy"`
-	StoredHash     string    `json:"stored_hash"`
-	ComputedHash   string    `json:"computed_hash"`
-	Algorithm      string    `json:"algorithm"`
-	ScannedAt      time.Time `json:"scanned_at"`
-	ObjectSize     int64     `json:"object_size"`
-	ErrorMessage   string    `json:"error_message,omitempty"`
+	Path         string    `json:"path"`
+	Healthy      bool      `json:"healthy"`
+	StoredHash   string    `json:"stored_hash"`
+	ComputedHash string    `json:"computed_hash"`
+	Algorithm    string    `json:"algorithm"`
+	ScannedAt    time.Time `json:"scanned_at"`
+	ObjectSize   int64     `json:"object_size"`
+	ErrorMessage string    `json:"error_message,omitempty"`
 }
 
 // BitRotScanReport is the result of a full scan
@@ -78,13 +78,13 @@ type BitRotScanReport struct {
 
 // IntegrityRecord stores the integrity hash for an object
 type IntegrityRecord struct {
-	Path         string    `json:"path"`
-	Hash         string    `json:"hash"`
-	Algorithm    string    `json:"algorithm"`
-	ObjectSize   int64     `json:"object_size"`
-	ComputedAt   time.Time `json:"computed_at"`
-	ObjectID     string    `json:"object_id"`
-	VersionID    string    `json:"version_id"`
+	Path       string    `json:"path"`
+	Hash       string    `json:"hash"`
+	Algorithm  string    `json:"algorithm"`
+	ObjectSize int64     `json:"object_size"`
+	ComputedAt time.Time `json:"computed_at"`
+	ObjectID   string    `json:"object_id"`
+	VersionID  string    `json:"version_id"`
 }
 
 // NewBitRotDetector creates a new bit-rot detector

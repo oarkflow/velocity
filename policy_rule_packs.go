@@ -3,12 +3,13 @@ package velocity
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 )
 
 const (
-	PolicyPackGDPR = "gdpr-default"
+	PolicyPackGDPR  = "gdpr-default"
 	PolicyPackHIPAA = "hipaa-default"
-	PolicyPackPCI = "pci-default"
+	PolicyPackPCI   = "pci-default"
 )
 
 // InstallPolicyPack installs a predefined policy pack.
@@ -51,10 +52,10 @@ func (pe *PolicyEngine) InstallDefaultPacks(ctx context.Context) error {
 func gdprDefaultPolicies() []*CompliancePolicy {
 	return []*CompliancePolicy{
 		{
-			PolicyID:    "gdpr-encryption",
-			Name:        "GDPR Encryption for Confidential Data",
-			Framework:   FrameworkGDPR,
-			Enabled:     true,
+			PolicyID:        "gdpr-encryption",
+			Name:            "GDPR Encryption for Confidential Data",
+			Framework:       compliance.FrameworkGDPR,
+			Enabled:         true,
 			EnforcementMode: "enforce",
 			Rules: []PolicyRule{
 				{
@@ -62,18 +63,18 @@ func gdprDefaultPolicies() []*CompliancePolicy {
 					Action:   "deny",
 					Severity: "high",
 					Parameters: map[string]interface{}{
-						"operations":        []interface{}{"write"},
-						"min_data_class":    string(DataClassConfidential),
+						"operations":         []interface{}{"write"},
+						"min_data_class":     string(compliance.DataClassConfidential),
 						"require_encryption": true,
 					},
 				},
 			},
 		},
 		{
-			PolicyID:    "gdpr-mfa-restricted",
-			Name:        "GDPR MFA for Restricted Data",
-			Framework:   FrameworkGDPR,
-			Enabled:     true,
+			PolicyID:        "gdpr-mfa-restricted",
+			Name:            "GDPR MFA for Restricted Data",
+			Framework:       compliance.FrameworkGDPR,
+			Enabled:         true,
 			EnforcementMode: "enforce",
 			Rules: []PolicyRule{
 				{
@@ -82,7 +83,7 @@ func gdprDefaultPolicies() []*CompliancePolicy {
 					Severity: "critical",
 					Parameters: map[string]interface{}{
 						"operations":     []interface{}{"read"},
-						"min_data_class": string(DataClassRestricted),
+						"min_data_class": string(compliance.DataClassRestricted),
 						"require_mfa":    true,
 					},
 				},
@@ -94,10 +95,10 @@ func gdprDefaultPolicies() []*CompliancePolicy {
 func hipaaDefaultPolicies() []*CompliancePolicy {
 	return []*CompliancePolicy{
 		{
-			PolicyID:    "hipaa-phi-encryption",
-			Name:        "HIPAA PHI Encryption",
-			Framework:   FrameworkHIPAA,
-			Enabled:     true,
+			PolicyID:        "hipaa-phi-encryption",
+			Name:            "HIPAA PHI Encryption",
+			Framework:       compliance.FrameworkHIPAA,
+			Enabled:         true,
 			EnforcementMode: "enforce",
 			Rules: []PolicyRule{
 				{
@@ -105,18 +106,18 @@ func hipaaDefaultPolicies() []*CompliancePolicy {
 					Action:   "deny",
 					Severity: "critical",
 					Parameters: map[string]interface{}{
-						"operations":        []interface{}{"write"},
-						"min_data_class":    string(DataClassRestricted),
+						"operations":         []interface{}{"write"},
+						"min_data_class":     string(compliance.DataClassRestricted),
 						"require_encryption": true,
 					},
 				},
 			},
 		},
 		{
-			PolicyID:    "hipaa-minimum-necessary",
-			Name:        "HIPAA Minimum Necessary Access",
-			Framework:   FrameworkHIPAA,
-			Enabled:     true,
+			PolicyID:        "hipaa-minimum-necessary",
+			Name:            "HIPAA Minimum Necessary Access",
+			Framework:       compliance.FrameworkHIPAA,
+			Enabled:         true,
 			EnforcementMode: "monitor",
 			Rules: []PolicyRule{
 				{
@@ -125,7 +126,7 @@ func hipaaDefaultPolicies() []*CompliancePolicy {
 					Severity: "medium",
 					Parameters: map[string]interface{}{
 						"operations":     []interface{}{"read"},
-						"min_data_class": string(DataClassRestricted),
+						"min_data_class": string(compliance.DataClassRestricted),
 					},
 				},
 			},
@@ -136,10 +137,10 @@ func hipaaDefaultPolicies() []*CompliancePolicy {
 func pciDefaultPolicies() []*CompliancePolicy {
 	return []*CompliancePolicy{
 		{
-			PolicyID:    "pci-mfa",
-			Name:        "PCI MFA for Cardholder Data",
-			Framework:   FrameworkPCIDSS,
-			Enabled:     true,
+			PolicyID:        "pci-mfa",
+			Name:            "PCI MFA for Cardholder Data",
+			Framework:       compliance.FrameworkPCIDSS,
+			Enabled:         true,
 			EnforcementMode: "enforce",
 			Rules: []PolicyRule{
 				{
@@ -154,10 +155,10 @@ func pciDefaultPolicies() []*CompliancePolicy {
 			},
 		},
 		{
-			PolicyID:    "pci-encryption",
-			Name:        "PCI Encryption Required",
-			Framework:   FrameworkPCIDSS,
-			Enabled:     true,
+			PolicyID:        "pci-encryption",
+			Name:            "PCI Encryption Required",
+			Framework:       compliance.FrameworkPCIDSS,
+			Enabled:         true,
 			EnforcementMode: "enforce",
 			Rules: []PolicyRule{
 				{
@@ -165,8 +166,8 @@ func pciDefaultPolicies() []*CompliancePolicy {
 					Action:   "deny",
 					Severity: "high",
 					Parameters: map[string]interface{}{
-						"operations":        []interface{}{"write"},
-						"min_data_class":    string(DataClassRestricted),
+						"operations":         []interface{}{"write"},
+						"min_data_class":     string(compliance.DataClassRestricted),
 						"require_encryption": true,
 					},
 				},

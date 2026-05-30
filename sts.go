@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/auth"
 )
 
 // STS store key prefix
@@ -17,7 +19,7 @@ const stsSessionPrefix = "sts:session:"
 // STSCredentials represents temporary security credentials.
 type STSCredentials struct {
 	AccessKeyID     string    `json:"access_key_id"`
-	SecretAccessKey  string    `json:"secret_access_key"`
+	SecretAccessKey string    `json:"secret_access_key"`
 	SessionToken    string    `json:"session_token"`
 	Expiration      time.Time `json:"expiration"`
 }
@@ -26,7 +28,7 @@ type STSCredentials struct {
 type STSSession struct {
 	SessionToken    string    `json:"session_token"`
 	AccessKeyID     string    `json:"access_key_id"`
-	SecretAccessKey  string    `json:"secret_access_key"`
+	SecretAccessKey string    `json:"secret_access_key"`
 	UserID          string    `json:"user_id"`
 	RoleARN         string    `json:"role_arn,omitempty"`
 	SourceIdentity  string    `json:"source_identity,omitempty"`
@@ -38,11 +40,11 @@ type STSSession struct {
 
 // AssumeRoleInput contains parameters for AssumeRole.
 type AssumeRoleInput struct {
-	RoleARN         string        `json:"role_arn"`
-	RoleSessionName string        `json:"role_session_name"`
-	DurationSeconds int           `json:"duration_seconds,omitempty"` // default 3600, max 43200
-	PolicyARNs      []string      `json:"policy_arns,omitempty"`
-	ExternalID      string        `json:"external_id,omitempty"`
+	RoleARN         string   `json:"role_arn"`
+	RoleSessionName string   `json:"role_session_name"`
+	DurationSeconds int      `json:"duration_seconds,omitempty"` // default 3600, max 43200
+	PolicyARNs      []string `json:"policy_arns,omitempty"`
+	ExternalID      string   `json:"external_id,omitempty"`
 }
 
 // AssumeRoleWithWebIdentityInput contains parameters for AssumeRoleWithWebIdentity.
@@ -75,7 +77,7 @@ type AssumeRoleOutput struct {
 // STSService provides Security Token Service functionality.
 type STSService struct {
 	db           *DB
-	iamEngine    *IAMPolicyEngine
+	iamEngine    *auth.IAMPolicyEngine
 	oidcProvider *OIDCProvider
 	ldapProvider *LDAPProvider
 	mu           sync.RWMutex
@@ -98,7 +100,7 @@ func NewSTSService(db *DB, opts ...STSOption) *STSService {
 type STSOption func(*STSService)
 
 // WithIAMEngine sets the IAM policy engine for role validation.
-func WithIAMEngine(engine *IAMPolicyEngine) STSOption {
+func WithIAMEngine(engine *auth.IAMPolicyEngine) STSOption {
 	return func(s *STSService) {
 		s.iamEngine = engine
 	}
@@ -144,15 +146,15 @@ func (s *STSService) AssumeRole(userID string, input *AssumeRoleInput) (*AssumeR
 	}
 
 	session := &STSSession{
-		SessionToken:   creds.SessionToken,
-		AccessKeyID:    creds.AccessKeyID,
+		SessionToken:    creds.SessionToken,
+		AccessKeyID:     creds.AccessKeyID,
 		SecretAccessKey: creds.SecretAccessKey,
-		UserID:         userID,
-		RoleARN:        input.RoleARN,
-		SourceIdentity: input.RoleSessionName,
-		PolicyARNs:     input.PolicyARNs,
-		Expiration:     creds.Expiration,
-		CreatedAt:      time.Now(),
+		UserID:          userID,
+		RoleARN:         input.RoleARN,
+		SourceIdentity:  input.RoleSessionName,
+		PolicyARNs:      input.PolicyARNs,
+		Expiration:      creds.Expiration,
+		CreatedAt:       time.Now(),
 	}
 
 	if err := s.saveSession(session); err != nil {
@@ -197,15 +199,15 @@ func (s *STSService) AssumeRoleWithWebIdentity(input *AssumeRoleWithWebIdentityI
 	}
 
 	session := &STSSession{
-		SessionToken:   creds.SessionToken,
-		AccessKeyID:    creds.AccessKeyID,
+		SessionToken:    creds.SessionToken,
+		AccessKeyID:     creds.AccessKeyID,
 		SecretAccessKey: creds.SecretAccessKey,
-		UserID:         claims.Subject,
-		RoleARN:        input.RoleARN,
-		SourceIdentity: input.RoleSessionName,
-		PolicyARNs:     input.PolicyARNs,
-		Expiration:     creds.Expiration,
-		CreatedAt:      time.Now(),
+		UserID:          claims.Subject,
+		RoleARN:         input.RoleARN,
+		SourceIdentity:  input.RoleSessionName,
+		PolicyARNs:      input.PolicyARNs,
+		Expiration:      creds.Expiration,
+		CreatedAt:       time.Now(),
 	}
 
 	if err := s.saveSession(session); err != nil {
@@ -250,15 +252,15 @@ func (s *STSService) AssumeRoleWithLDAP(input *AssumeRoleWithLDAPInput) (*Assume
 	}
 
 	session := &STSSession{
-		SessionToken:   creds.SessionToken,
-		AccessKeyID:    creds.AccessKeyID,
+		SessionToken:    creds.SessionToken,
+		AccessKeyID:     creds.AccessKeyID,
 		SecretAccessKey: creds.SecretAccessKey,
-		UserID:         ldapUser.DN,
-		RoleARN:        input.RoleARN,
-		SourceIdentity: input.RoleSessionName,
-		PolicyARNs:     input.PolicyARNs,
-		Expiration:     creds.Expiration,
-		CreatedAt:      time.Now(),
+		UserID:          ldapUser.DN,
+		RoleARN:         input.RoleARN,
+		SourceIdentity:  input.RoleSessionName,
+		PolicyARNs:      input.PolicyARNs,
+		Expiration:      creds.Expiration,
+		CreatedAt:       time.Now(),
 	}
 
 	if err := s.saveSession(session); err != nil {
@@ -376,10 +378,10 @@ func (s *STSService) generateCredentials(duration time.Duration) (*STSCredential
 	}
 
 	return &STSCredentials{
-		AccessKeyID:    "AKIA" + strings.ToUpper(accessKey[:16]),
+		AccessKeyID:     "AKIA" + strings.ToUpper(accessKey[:16]),
 		SecretAccessKey: secretKey,
-		SessionToken:   sessionToken,
-		Expiration:     time.Now().Add(duration),
+		SessionToken:    sessionToken,
+		Expiration:      time.Now().Add(duration),
 	}, nil
 }
 

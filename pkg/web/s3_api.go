@@ -12,24 +12,25 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/s3"
 )
 
 // S3API provides S3-compatible HTTP API endpoints backed by the Velocity object store.
 type S3API struct {
 	db           *velocity.DB
-	bucketMgr    *velocity.BucketManager
-	multipartMgr *velocity.MultipartManager
-	sigv4        *velocity.SigV4Auth
-	presigned    *velocity.PresignedURLGenerator
+	bucketMgr    *s3.BucketManager
+	multipartMgr *s3.MultipartManager
+	sigv4        *s3.SigV4Auth
+	presigned    *s3.PresignedURLGenerator
 }
 
 // NewS3API creates a new S3API handler.
 func NewS3API(
 	db *velocity.DB,
-	bucketMgr *velocity.BucketManager,
-	multipartMgr *velocity.MultipartManager,
-	sigv4 *velocity.SigV4Auth,
-	presigned *velocity.PresignedURLGenerator,
+	bucketMgr *s3.BucketManager,
+	multipartMgr *s3.MultipartManager,
+	sigv4 *s3.SigV4Auth,
+	presigned *s3.PresignedURLGenerator,
 ) *S3API {
 	return &S3API{
 		db:           db,
@@ -73,25 +74,25 @@ func (s *S3API) s3AuthMiddleware() fiber.Handler {
 		// Convert Fiber's fasthttp request into a stdlib *http.Request for SigV4.
 		stdReq, err := toStdHTTPRequest(c)
 		if err != nil {
-			return s.sendS3Error(c, velocity.S3ErrInternalError, "Failed to parse request", "", http.StatusInternalServerError)
+			return s.sendS3Error(c, s3.S3ErrInternalError, "Failed to parse request", "", http.StatusInternalServerError)
 		}
 
 		cred, err := s.sigv4.VerifyRequest(stdReq)
 		if err != nil {
 			errMsg := err.Error()
 			if strings.Contains(errMsg, "missing authentication") {
-				return s.sendS3Error(c, velocity.S3ErrAccessDenied, "Missing authentication", "", http.StatusForbidden)
+				return s.sendS3Error(c, s3.S3ErrAccessDenied, "Missing authentication", "", http.StatusForbidden)
 			}
 			if strings.Contains(errMsg, "signature") || strings.Contains(errMsg, "Signature") {
-				return s.sendS3Error(c, velocity.S3ErrSignatureDoesNotMatch, "Signature does not match", "", http.StatusForbidden)
+				return s.sendS3Error(c, s3.S3ErrSignatureDoesNotMatch, "Signature does not match", "", http.StatusForbidden)
 			}
 			if strings.Contains(errMsg, "invalid access key") {
-				return s.sendS3Error(c, velocity.S3ErrInvalidAccessKeyId, "Invalid access key", "", http.StatusForbidden)
+				return s.sendS3Error(c, s3.S3ErrInvalidAccessKeyId, "Invalid access key", "", http.StatusForbidden)
 			}
 			if strings.Contains(errMsg, "expired") {
-				return s.sendS3Error(c, velocity.S3ErrExpiredToken, "Request has expired", "", http.StatusBadRequest)
+				return s.sendS3Error(c, s3.S3ErrExpiredToken, "Request has expired", "", http.StatusBadRequest)
 			}
-			return s.sendS3Error(c, velocity.S3ErrAccessDenied, errMsg, "", http.StatusForbidden)
+			return s.sendS3Error(c, s3.S3ErrAccessDenied, errMsg, "", http.StatusForbidden)
 		}
 
 		// Store credential info for downstream handlers.
@@ -111,24 +112,24 @@ func (s *S3API) handleListBuckets(c fiber.Ctx) error {
 
 	buckets, err := s.bucketMgr.ListBuckets(user)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), "/", http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), "/", http.StatusInternalServerError)
 	}
 
-	entries := make([]velocity.S3BucketEntry, 0, len(buckets))
+	entries := make([]s3.S3BucketEntry, 0, len(buckets))
 	for _, b := range buckets {
-		entries = append(entries, velocity.S3BucketEntry{
+		entries = append(entries, s3.S3BucketEntry{
 			Name:         b.Name,
-			CreationDate: velocity.S3Time{Time: b.CreationDate},
+			CreationDate: s3.S3Time{Time: b.CreationDate},
 		})
 	}
 
-	result := velocity.ListBucketsResult{
-		Xmlns: velocity.S3XMLNamespace,
-		Owner: velocity.S3Owner{
+	result := s3.ListBucketsResult{
+		Xmlns: s3.S3XMLNamespace,
+		Owner: s3.S3Owner{
 			ID:          user,
 			DisplayName: user,
 		},
-		Buckets: velocity.S3BucketList{Bucket: entries},
+		Buckets: s3.S3BucketList{Bucket: entries},
 	}
 
 	return s.sendXML(c, http.StatusOK, result)
@@ -143,7 +144,7 @@ func (s *S3API) handleCreateBucket(c fiber.Ctx) error {
 	// Optionally parse CreateBucketConfiguration from body.
 	body := c.Body()
 	if len(body) > 0 {
-		var cfg velocity.CreateBucketConfiguration
+		var cfg s3.CreateBucketConfiguration
 		if err := xml.Unmarshal(body, &cfg); err == nil && cfg.LocationConstraint != "" {
 			region = cfg.LocationConstraint
 		}
@@ -152,12 +153,12 @@ func (s *S3API) handleCreateBucket(c fiber.Ctx) error {
 	if err := s.bucketMgr.CreateBucket(bucket, user, region); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "BucketAlreadyExists") {
-			return s.sendS3Error(c, velocity.S3ErrBucketAlreadyOwnedByYou, "Your previous request to create the named bucket succeeded and you already own it.", bucket, http.StatusConflict)
+			return s.sendS3Error(c, s3.S3ErrBucketAlreadyOwnedByYou, "Your previous request to create the named bucket succeeded and you already own it.", bucket, http.StatusConflict)
 		}
 		if strings.Contains(msg, "invalid") || strings.Contains(msg, "Invalid") {
-			return s.sendS3Error(c, velocity.S3ErrInvalidBucketName, msg, bucket, http.StatusBadRequest)
+			return s.sendS3Error(c, s3.S3ErrInvalidBucketName, msg, bucket, http.StatusBadRequest)
 		}
-		return s.sendS3Error(c, velocity.S3ErrInternalError, msg, bucket, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, msg, bucket, http.StatusInternalServerError)
 	}
 
 	c.Set("Location", "/"+bucket)
@@ -171,12 +172,12 @@ func (s *S3API) handleDeleteBucket(c fiber.Ctx) error {
 	if err := s.bucketMgr.DeleteBucket(bucket); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "NoSuchBucket") {
-			return s.sendS3Error(c, velocity.S3ErrNoSuchBucket, "The specified bucket does not exist", bucket, http.StatusNotFound)
+			return s.sendS3Error(c, s3.S3ErrNoSuchBucket, "The specified bucket does not exist", bucket, http.StatusNotFound)
 		}
 		if strings.Contains(msg, "BucketNotEmpty") {
-			return s.sendS3Error(c, velocity.S3ErrBucketNotEmpty, "The bucket you tried to delete is not empty", bucket, http.StatusConflict)
+			return s.sendS3Error(c, s3.S3ErrBucketNotEmpty, "The bucket you tried to delete is not empty", bucket, http.StatusConflict)
 		}
-		return s.sendS3Error(c, velocity.S3ErrInternalError, msg, bucket, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, msg, bucket, http.StatusInternalServerError)
 	}
 
 	return c.SendStatus(http.StatusNoContent)
@@ -217,11 +218,11 @@ func (s *S3API) handleBucketGet(c fiber.Ctx) error {
 func (s *S3API) handleGetBucketVersioning(c fiber.Ctx, bucket string) error {
 	state, err := s.bucketMgr.GetBucketVersioning(bucket)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), bucket, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), bucket, http.StatusInternalServerError)
 	}
 
-	result := velocity.VersioningConfiguration{
-		Xmlns:  velocity.S3XMLNamespace,
+	result := s3.VersioningConfiguration{
+		Xmlns:  s3.S3XMLNamespace,
 		Status: state,
 	}
 
@@ -232,7 +233,7 @@ func (s *S3API) handleGetBucketVersioning(c fiber.Ctx, bucket string) error {
 func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 	// Verify bucket exists.
 	if _, err := s.bucketMgr.HeadBucket(bucket); err != nil {
-		return s.sendS3Error(c, velocity.S3ErrNoSuchBucket, "The specified bucket does not exist", bucket, http.StatusNotFound)
+		return s.sendS3Error(c, s3.S3ErrNoSuchBucket, "The specified bucket does not exist", bucket, http.StatusNotFound)
 	}
 
 	prefix := c.Query("prefix", "")
@@ -270,7 +271,7 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 
 	objects, err := s.db.ListObjects(opts)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), bucket, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), bucket, http.StatusInternalServerError)
 	}
 
 	isTruncated := len(objects) > maxKeys
@@ -279,8 +280,8 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 	}
 
 	// Build contents and common prefixes
-	contents := make([]velocity.S3Object, 0, len(objects))
-	commonPrefixes := make([]velocity.CommonPrefix, 0)
+	contents := make([]s3.S3Object, 0, len(objects))
+	commonPrefixes := make([]s3.CommonPrefix, 0)
 	seenPrefixes := make(map[string]bool)
 
 	bucketPrefix := bucket + "/"
@@ -298,7 +299,7 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 				cp := prefix + relKey[:idx+len(delimiter)]
 				if !seenPrefixes[cp] {
 					seenPrefixes[cp] = true
-					commonPrefixes = append(commonPrefixes, velocity.CommonPrefix{Prefix: cp})
+					commonPrefixes = append(commonPrefixes, s3.CommonPrefix{Prefix: cp})
 				}
 				continue
 			}
@@ -308,9 +309,9 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 		if etag == "" {
 			etag = obj.Checksum
 		}
-		contents = append(contents, velocity.S3Object{
+		contents = append(contents, s3.S3Object{
 			Key:          key,
-			LastModified: velocity.S3Time{Time: obj.ModifiedAt},
+			LastModified: s3.S3Time{Time: obj.ModifiedAt},
 			ETag:         etag,
 			Size:         obj.Size,
 			StorageClass: obj.StorageClass,
@@ -322,8 +323,8 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 		nextContinuationToken = contents[len(contents)-1].Key
 	}
 
-	result := velocity.ListObjectsV2Result{
-		Xmlns:                 velocity.S3XMLNamespace,
+	result := s3.ListObjectsV2Result{
+		Xmlns:                 s3.S3XMLNamespace,
 		Name:                  bucket,
 		Prefix:                prefix,
 		Delimiter:             delimiter,
@@ -344,29 +345,29 @@ func (s *S3API) handleListObjectsV2(c fiber.Ctx, bucket string) error {
 func (s *S3API) handleListMultipartUploads(c fiber.Ctx, bucket string) error {
 	uploads, err := s.multipartMgr.ListMultipartUploads(bucket)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), bucket, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), bucket, http.StatusInternalServerError)
 	}
 
-	uploadInfos := make([]velocity.MultipartUploadInfo, 0, len(uploads))
+	uploadInfos := make([]s3.MultipartUploadInfo, 0, len(uploads))
 	for _, u := range uploads {
-		uploadInfos = append(uploadInfos, velocity.MultipartUploadInfo{
+		uploadInfos = append(uploadInfos, s3.MultipartUploadInfo{
 			Key:      u.Key,
 			UploadId: u.UploadID,
-			Initiator: velocity.S3Owner{
+			Initiator: s3.S3Owner{
 				ID:          u.Initiator,
 				DisplayName: u.Initiator,
 			},
-			Owner: velocity.S3Owner{
+			Owner: s3.S3Owner{
 				ID:          u.Initiator,
 				DisplayName: u.Initiator,
 			},
 			StorageClass: u.StorageClass,
-			Initiated:    velocity.S3Time{Time: u.CreatedAt},
+			Initiated:    s3.S3Time{Time: u.CreatedAt},
 		})
 	}
 
-	result := velocity.ListMultipartUploadsResult{
-		Xmlns:      velocity.S3XMLNamespace,
+	result := s3.ListMultipartUploadsResult{
+		Xmlns:      s3.S3XMLNamespace,
 		Bucket:     bucket,
 		MaxUploads: 1000,
 		Uploads:    uploadInfos,
@@ -386,7 +387,7 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 	user := s3User(c)
 
 	if key == "" {
-		return s.sendS3Error(c, velocity.S3ErrInvalidArgument, "Object key is required", bucket, http.StatusBadRequest)
+		return s.sendS3Error(c, s3.S3ErrInvalidArgument, "Object key is required", bucket, http.StatusBadRequest)
 	}
 
 	// Check for a specific version request.
@@ -397,7 +398,7 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 
 	var data []byte
 	var meta *velocity.ObjectMetadata
-	var ranges []velocity.RangeSpec
+	var ranges []s3.RangeSpec
 	var err error
 
 	if versionID != "" {
@@ -408,26 +409,26 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 		}
 		// Apply range if requested.
 		if rangeHeader != "" {
-			ranges, err = velocity.ParseRangeHeader(rangeHeader, int64(len(data)))
+			ranges, err = s3.ParseRangeHeader(rangeHeader, int64(len(data)))
 			if err != nil {
-				return s.sendS3Error(c, velocity.S3ErrInvalidRange, err.Error(), bucket+"/"+key, http.StatusRequestedRangeNotSatisfiable)
+				return s.sendS3Error(c, s3.S3ErrInvalidRange, err.Error(), bucket+"/"+key, http.StatusRequestedRangeNotSatisfiable)
 			}
 			if len(ranges) > 0 {
-				data = velocity.GetObjectRange(data, ranges[0])
+				data = s3.GetObjectRange(data, ranges[0])
 			}
 		}
 	} else {
 		data, meta, ranges, err = s.db.GetObjectWithRange(bucket, key, user, rangeHeader)
 		if err != nil {
 			if strings.Contains(err.Error(), "range") || strings.Contains(err.Error(), "Range") {
-				return s.sendS3Error(c, velocity.S3ErrInvalidRange, err.Error(), bucket+"/"+key, http.StatusRequestedRangeNotSatisfiable)
+				return s.sendS3Error(c, s3.S3ErrInvalidRange, err.Error(), bucket+"/"+key, http.StatusRequestedRangeNotSatisfiable)
 			}
 			return s.mapObjectError(c, err, bucket, key)
 		}
 	}
 
 	// Evaluate conditional headers.
-	etag := velocity.ComputeETag(data)
+	etag := s3.ComputeETag(data)
 	if meta != nil && meta.Hash != "" {
 		etag = meta.Hash
 	}
@@ -436,7 +437,7 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 		lastModified = meta.ModifiedAt
 	}
 
-	cond := velocity.ConditionalCheck{
+	cond := s3.ConditionalCheck{
 		IfMatch:     c.Get("If-Match"),
 		IfNoneMatch: c.Get("If-None-Match"),
 	}
@@ -451,7 +452,7 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 		}
 	}
 
-	shouldContinue, condStatus := velocity.EvaluateConditions(cond, etag, lastModified)
+	shouldContinue, condStatus := s3.EvaluateConditions(cond, etag, lastModified)
 	if !shouldContinue {
 		return c.SendStatus(condStatus)
 	}
@@ -478,7 +479,7 @@ func (s *S3API) handleGetObject(c fiber.Ctx) error {
 			boundary := fmt.Sprintf("velocity-%d", time.Now().UnixNano())
 			var multipart bytes.Buffer
 			for _, r := range ranges {
-				part := velocity.GetObjectRange(data, r)
+				part := s3.GetObjectRange(data, r)
 				fmt.Fprintf(&multipart, "--%s\r\n", boundary)
 				if meta != nil && meta.ContentType != "" {
 					fmt.Fprintf(&multipart, "Content-Type: %s\r\n", meta.ContentType)
@@ -510,7 +511,7 @@ func (s *S3API) handlePutObject(c fiber.Ctx) error {
 	user := s3User(c)
 
 	if key == "" {
-		return s.sendS3Error(c, velocity.S3ErrInvalidArgument, "Object key is required", bucket, http.StatusBadRequest)
+		return s.sendS3Error(c, s3.S3ErrInvalidArgument, "Object key is required", bucket, http.StatusBadRequest)
 	}
 
 	// Check for multipart part upload: PUT ?partNumber=N&uploadId=ID
@@ -522,7 +523,7 @@ func (s *S3API) handlePutObject(c fiber.Ctx) error {
 
 	// Verify bucket exists.
 	if _, err := s.bucketMgr.HeadBucket(bucket); err != nil {
-		return s.sendS3Error(c, velocity.S3ErrNoSuchBucket, "The specified bucket does not exist", bucket, http.StatusNotFound)
+		return s.sendS3Error(c, s3.S3ErrNoSuchBucket, "The specified bucket does not exist", bucket, http.StatusNotFound)
 	}
 
 	// Check for copy source header.
@@ -535,7 +536,7 @@ func (s *S3API) handlePutObject(c fiber.Ctx) error {
 	body := c.Body()
 
 	contentType := c.Get("Content-Type", "application/octet-stream")
-	storageClass := c.Get("x-amz-storage-class", velocity.S3StorageStandard)
+	storageClass := c.Get("x-amz-storage-class", s3.S3StorageStandard)
 
 	// Parse custom metadata from x-amz-meta-* headers.
 	customMeta := make(map[string]string)
@@ -560,10 +561,10 @@ func (s *S3API) handlePutObject(c fiber.Ctx) error {
 
 	meta, err := s.db.StoreObject(path, contentType, user, body, opts)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), path, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), path, http.StatusInternalServerError)
 	}
 
-	etag := velocity.ComputeETag(body)
+	etag := s3.ComputeETag(body)
 	c.Set("ETag", etag)
 	if meta.VersionID != "" {
 		c.Set("x-amz-version-id", meta.VersionID)
@@ -578,18 +579,18 @@ func (s *S3API) handleCopyObject(c fiber.Ctx, copySource, dstBucket, dstKey, use
 	copySource = strings.TrimPrefix(copySource, "/")
 	parts := strings.SplitN(copySource, "/", 2)
 	if len(parts) < 2 {
-		return s.sendS3Error(c, velocity.S3ErrInvalidArgument, "Invalid copy source", copySource, http.StatusBadRequest)
+		return s.sendS3Error(c, s3.S3ErrInvalidArgument, "Invalid copy source", copySource, http.StatusBadRequest)
 	}
 	srcBucket := parts[0]
 	srcKey := parts[1]
 
 	meta, err := s.db.CopyObject(srcBucket, srcKey, dstBucket, dstKey, user)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), copySource, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), copySource, http.StatusInternalServerError)
 	}
 
-	result := velocity.CopyObjectResult{
-		LastModified: velocity.S3Time{Time: meta.ModifiedAt},
+	result := s3.CopyObjectResult{
+		LastModified: s3.S3Time{Time: meta.ModifiedAt},
 		ETag:         meta.Hash,
 	}
 
@@ -603,7 +604,7 @@ func (s *S3API) handleDeleteObject(c fiber.Ctx) error {
 	user := s3User(c)
 
 	if key == "" {
-		return s.sendS3Error(c, velocity.S3ErrInvalidArgument, "Object key is required", bucket, http.StatusBadRequest)
+		return s.sendS3Error(c, s3.S3ErrInvalidArgument, "Object key is required", bucket, http.StatusBadRequest)
 	}
 
 	// Check for multipart abort: DELETE ?uploadId=ID
@@ -678,7 +679,7 @@ func (s *S3API) handlePostObject(c fiber.Ctx) error {
 		return s.handleCompleteMultipartUpload(c, bucket, key, uploadID)
 	}
 
-	return s.sendS3Error(c, velocity.S3ErrInvalidArgument, "Unsupported POST operation", bucket+"/"+key, http.StatusBadRequest)
+	return s.sendS3Error(c, s3.S3ErrInvalidArgument, "Unsupported POST operation", bucket+"/"+key, http.StatusBadRequest)
 }
 
 // ---------------------------------------------------------------------------
@@ -702,11 +703,11 @@ func (s *S3API) handleCreateMultipartUpload(c fiber.Ctx, bucket, key string) err
 
 	upload, err := s.multipartMgr.CreateMultipartUpload(bucket, key, contentType, user, metadata)
 	if err != nil {
-		return s.sendS3Error(c, velocity.S3ErrInternalError, err.Error(), bucket+"/"+key, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, err.Error(), bucket+"/"+key, http.StatusInternalServerError)
 	}
 
-	result := velocity.InitiateMultipartUploadResult{
-		Xmlns:    velocity.S3XMLNamespace,
+	result := s3.InitiateMultipartUploadResult{
+		Xmlns:    s3.S3XMLNamespace,
 		Bucket:   bucket,
 		Key:      key,
 		UploadId: upload.UploadID,
@@ -718,8 +719,8 @@ func (s *S3API) handleCreateMultipartUpload(c fiber.Ctx, bucket, key string) err
 // handleUploadPart handles PUT ?partNumber=N&uploadId=ID.
 func (s *S3API) handleUploadPart(c fiber.Ctx, bucket, key, uploadID, partNumberStr string) error {
 	partNumber, err := strconv.Atoi(partNumberStr)
-	if err != nil || partNumber < 1 || partNumber > velocity.S3MaxPartCount {
-		return s.sendS3Error(c, velocity.S3ErrInvalidArgument, "Invalid part number", bucket+"/"+key, http.StatusBadRequest)
+	if err != nil || partNumber < 1 || partNumber > s3.S3MaxPartCount {
+		return s.sendS3Error(c, s3.S3ErrInvalidArgument, "Invalid part number", bucket+"/"+key, http.StatusBadRequest)
 	}
 
 	body := c.Body()
@@ -729,9 +730,9 @@ func (s *S3API) handleUploadPart(c fiber.Ctx, bucket, key, uploadID, partNumberS
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "NoSuchUpload") {
-			return s.sendS3Error(c, velocity.S3ErrNoSuchUpload, "The specified multipart upload does not exist", uploadID, http.StatusNotFound)
+			return s.sendS3Error(c, s3.S3ErrNoSuchUpload, "The specified multipart upload does not exist", uploadID, http.StatusNotFound)
 		}
-		return s.sendS3Error(c, velocity.S3ErrInternalError, msg, uploadID, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, msg, uploadID, http.StatusInternalServerError)
 	}
 
 	c.Set("ETag", part.ETag)
@@ -742,15 +743,15 @@ func (s *S3API) handleUploadPart(c fiber.Ctx, bucket, key, uploadID, partNumberS
 func (s *S3API) handleCompleteMultipartUpload(c fiber.Ctx, bucket, key, uploadID string) error {
 	body := c.Body()
 
-	var completeReq velocity.CompletedMultipartUpload
+	var completeReq s3.CompletedMultipartUpload
 	if err := xml.Unmarshal(body, &completeReq); err != nil {
-		return s.sendS3Error(c, velocity.S3ErrMalformedXML, "The XML you provided was not well-formed", bucket+"/"+key, http.StatusBadRequest)
+		return s.sendS3Error(c, s3.S3ErrMalformedXML, "The XML you provided was not well-formed", bucket+"/"+key, http.StatusBadRequest)
 	}
 
 	// Convert XML parts to the internal CompletePart type.
-	parts := make([]velocity.CompletePart, len(completeReq.Parts))
+	parts := make([]s3.CompletePart, len(completeReq.Parts))
 	for i, p := range completeReq.Parts {
-		parts[i] = velocity.CompletePart{
+		parts[i] = s3.CompletePart{
 			PartNumber: p.PartNumber,
 			ETag:       p.ETag,
 		}
@@ -760,20 +761,20 @@ func (s *S3API) handleCompleteMultipartUpload(c fiber.Ctx, bucket, key, uploadID
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "NoSuchUpload") {
-			return s.sendS3Error(c, velocity.S3ErrNoSuchUpload, "The specified multipart upload does not exist", uploadID, http.StatusNotFound)
+			return s.sendS3Error(c, s3.S3ErrNoSuchUpload, "The specified multipart upload does not exist", uploadID, http.StatusNotFound)
 		}
 		if strings.Contains(msg, "InvalidPart") {
-			return s.sendS3Error(c, velocity.S3ErrInvalidPart, msg, uploadID, http.StatusBadRequest)
+			return s.sendS3Error(c, s3.S3ErrInvalidPart, msg, uploadID, http.StatusBadRequest)
 		}
-		return s.sendS3Error(c, velocity.S3ErrInternalError, msg, uploadID, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, msg, uploadID, http.StatusInternalServerError)
 	}
 
-	result := velocity.CompleteMultipartUploadResult{
-		Xmlns:    velocity.S3XMLNamespace,
+	result := s3.CompleteMultipartUploadResult{
+		Xmlns:    s3.S3XMLNamespace,
 		Location: fmt.Sprintf("/s3/%s/%s", bucket, key),
 		Bucket:   bucket,
 		Key:      key,
-		ETag:     meta.Hash,
+		ETag:     meta.ETag,
 	}
 
 	return s.sendXML(c, http.StatusOK, result)
@@ -785,9 +786,9 @@ func (s *S3API) handleAbortMultipartUpload(c fiber.Ctx, uploadID string) error {
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "NoSuchUpload") {
-			return s.sendS3Error(c, velocity.S3ErrNoSuchUpload, "The specified multipart upload does not exist", uploadID, http.StatusNotFound)
+			return s.sendS3Error(c, s3.S3ErrNoSuchUpload, "The specified multipart upload does not exist", uploadID, http.StatusNotFound)
 		}
-		return s.sendS3Error(c, velocity.S3ErrInternalError, msg, uploadID, http.StatusInternalServerError)
+		return s.sendS3Error(c, s3.S3ErrInternalError, msg, uploadID, http.StatusInternalServerError)
 	}
 
 	return c.SendStatus(http.StatusNoContent)
@@ -813,7 +814,7 @@ func (s *S3API) sendXML(c fiber.Ctx, status int, v interface{}) error {
 // sendS3Error sends an S3-compatible XML error response.
 func (s *S3API) sendS3Error(c fiber.Ctx, code, message, resource string, httpStatus int) error {
 	requestID := fmt.Sprintf("%d", time.Now().UnixNano())
-	s3err := velocity.NewS3Error(code, message, resource, requestID)
+	s3err := s3.NewS3Error(code, message, resource, requestID)
 
 	xmlBytes, err := xml.Marshal(s3err)
 	if err != nil {
@@ -830,16 +831,16 @@ func (s *S3API) mapObjectError(c fiber.Ctx, err error, bucket, key string) error
 	msg := err.Error()
 
 	if isNotFound(err) {
-		return s.sendS3Error(c, velocity.S3ErrNoSuchKey, "The specified key does not exist.", resource, http.StatusNotFound)
+		return s.sendS3Error(c, s3.S3ErrNoSuchKey, "The specified key does not exist.", resource, http.StatusNotFound)
 	}
 	if isAccessDenied(err) {
-		return s.sendS3Error(c, velocity.S3ErrAccessDenied, "Access Denied", resource, http.StatusForbidden)
+		return s.sendS3Error(c, s3.S3ErrAccessDenied, "Access Denied", resource, http.StatusForbidden)
 	}
 	if strings.Contains(msg, "InvalidVersion") || strings.Contains(msg, "invalid version") {
-		return s.sendS3Error(c, velocity.S3ErrNoSuchVersion, "The specified version does not exist.", resource, http.StatusNotFound)
+		return s.sendS3Error(c, s3.S3ErrNoSuchVersion, "The specified version does not exist.", resource, http.StatusNotFound)
 	}
 
-	return s.sendS3Error(c, velocity.S3ErrInternalError, msg, resource, http.StatusInternalServerError)
+	return s.sendS3Error(c, s3.S3ErrInternalError, msg, resource, http.StatusInternalServerError)
 }
 
 // ---------------------------------------------------------------------------

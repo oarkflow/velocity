@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 )
 
 // AddPolicy adds or updates a compliance policy.
@@ -68,7 +69,7 @@ func (pe *PolicyEngine) LoadPolicies(ctx context.Context) error {
 // EvaluatePolicies evaluates policies for a request.
 func (pe *PolicyEngine) EvaluatePolicies(
 	ctx context.Context,
-	frameworks []ComplianceFramework,
+	frameworks []compliance.Framework,
 	req *ComplianceOperationRequest,
 	tag *ComplianceTag,
 	result *ComplianceValidationResult,
@@ -127,7 +128,7 @@ func ruleMatches(rule PolicyRule, req *ComplianceOperationRequest, tag *Complian
 	}
 
 	if minClass, ok := params["min_data_class"].(string); ok {
-		if dataClassValue(tag.DataClass) < dataClassValue(DataClassification(minClass)) {
+		if dataClassValue(tag.DataClass) < dataClassValue(compliance.DataClassification(minClass)) {
 			return false
 		}
 	}
@@ -159,17 +160,17 @@ func ruleMatches(rule PolicyRule, req *ComplianceOperationRequest, tag *Complian
 	return false
 }
 
-func dataClassValue(class DataClassification) int {
+func dataClassValue(class compliance.DataClassification) int {
 	switch class {
-	case DataClassPublic:
+	case compliance.DataClassPublic:
 		return 1
-	case DataClassInternal:
+	case compliance.DataClassInternal:
 		return 2
-	case DataClassConfidential:
+	case compliance.DataClassConfidential:
 		return 3
-	case DataClassRestricted:
+	case compliance.DataClassRestricted:
 		return 4
-	case DataClassTopSecret:
+	case compliance.DataClassTopSecret:
 		return 5
 	default:
 		return 0

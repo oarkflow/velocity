@@ -65,7 +65,7 @@ type LifecycleRule struct {
 	Filter                      LifecycleRuleFilter          `json:"filter"`
 	Transitions                 []Transition                 `json:"transitions,omitempty"`
 	Expiration                  *Expiration                  `json:"expiration,omitempty"`
-	NoncurrentVersionExpiration *NoncurrentVersionExpiration  `json:"noncurrent_version_expiration,omitempty"`
+	NoncurrentVersionExpiration *NoncurrentVersionExpiration `json:"noncurrent_version_expiration,omitempty"`
 }
 
 // LifecycleConfig holds the full lifecycle configuration for a bucket.
@@ -80,13 +80,13 @@ type LifecycleConfig struct {
 // LifecycleStatus exposes cumulative statistics gathered by the background
 // worker for introspection and monitoring.
 type LifecycleStatus struct {
-	LastRun              time.Time `json:"last_run"`
-	ObjectsTransitioned  int64     `json:"objects_transitioned"`
-	ObjectsExpired       int64     `json:"objects_expired"`
-	TransitionErrors     int64     `json:"transition_errors"`
-	ExpirationErrors     int64     `json:"expiration_errors"`
-	Running              bool      `json:"running"`
-	EvaluationInterval   string    `json:"evaluation_interval"`
+	LastRun             time.Time `json:"last_run"`
+	ObjectsTransitioned int64     `json:"objects_transitioned"`
+	ObjectsExpired      int64     `json:"objects_expired"`
+	TransitionErrors    int64     `json:"transition_errors"`
+	ExpirationErrors    int64     `json:"expiration_errors"`
+	Running             bool      `json:"running"`
+	EvaluationInterval  string    `json:"evaluation_interval"`
 }
 
 // ---------------------------------------------------------------------------

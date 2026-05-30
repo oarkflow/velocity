@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"io"
 	"log"
 	"os"
@@ -191,7 +192,7 @@ func (db *DB) getObjectWithSystemFlag(path, user string, systemOp bool) ([]byte,
 	// Apply masking if required
 	result, _ := db.validateObjectCompliance("read", path, user, meta.Encrypted, meta.CustomMetadata, &meta.CreatedAt, systemOp)
 	if result != nil && result.AppliedTag != nil && db.complianceTagManager != nil {
-		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= DataClassConfidential {
+		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= compliance.DataClassConfidential {
 			masked := db.complianceTagManager.maskingEngine.MaskString(string(data), result.AppliedTag.DataClass)
 			data = []byte(masked)
 		}

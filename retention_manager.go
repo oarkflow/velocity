@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"strings"
 	"time"
 )
@@ -166,7 +167,7 @@ func (rm *RetentionManager) anonymizeObject(ctx context.Context, path string) er
 
 	masked := data
 	if rm.db.complianceTagManager != nil && rm.db.complianceTagManager.maskingEngine != nil {
-		class := DataClassConfidential
+		class := compliance.DataClassConfidential
 		if tag := rm.db.complianceTagManager.GetTag(path); tag != nil {
 			class = tag.DataClass
 		}

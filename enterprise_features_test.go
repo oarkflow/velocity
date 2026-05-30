@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"context"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"strings"
 	"testing"
 	"time"
@@ -50,8 +51,8 @@ func TestCompliancePutGetWithConsentAndMasking(t *testing.T) {
 
 	tag := &ComplianceTag{
 		Path:          "/users/email",
-		Frameworks:    []ComplianceFramework{FrameworkGDPR},
-		DataClass:     DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		EncryptionReq: true,
 		AuditLevel:    "high",
 		CreatedBy:     "test",
@@ -77,8 +78,8 @@ func TestCompliancePutGetWithConsentAndMasking(t *testing.T) {
 	}
 
 	// Grant consent
-	consent := NewConsentManager(db)
-	if err := consent.GrantConsent(ctx, "subject-1", ConsentRecord{
+	consent := compliance.NewConsentManager(db)
+	if err := consent.GrantConsent(ctx, "subject-1", compliance.ConsentRecord{
 		Purpose:         "account_management",
 		GrantedAt:       time.Now(),
 		LegalBasis:      "consent",
@@ -130,8 +131,8 @@ func TestRetentionAnonymizeObject(t *testing.T) {
 
 	if err := ctm.TagPath(ctx, &ComplianceTag{
 		Path:          "retention",
-		Frameworks:    []ComplianceFramework{FrameworkGDPR},
-		DataClass:     DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		EncryptionReq: true,
 		AuditLevel:    "high",
 		CreatedBy:     "test",
@@ -150,8 +151,8 @@ func TestRetentionAnonymizeObject(t *testing.T) {
 	tagMgr := db.ComplianceTagManager()
 	if err := tagMgr.TagPath(ctx, &ComplianceTag{
 		Path:       "retention/user.json",
-		DataClass:  DataClassConfidential,
-		Frameworks: []ComplianceFramework{FrameworkGDPR},
+		DataClass:  compliance.DataClassConfidential,
+		Frameworks: []compliance.Framework{compliance.FrameworkGDPR},
 		CreatedAt:  time.Now(),
 		CreatedBy:  "system",
 	}); err != nil {
@@ -162,7 +163,7 @@ func TestRetentionAnonymizeObject(t *testing.T) {
 	retention := NewRetentionManager(db)
 	if err := retention.AddPolicy(ctx, RetentionPolicy{
 		PolicyID:        "ret-anon",
-		DataType:        string(DataClassConfidential),
+		DataType:        string(compliance.DataClassConfidential),
 		RetentionPeriod: 1 * time.Millisecond, // Very short period
 		DeletionMethod:  "anonymize",
 	}); err != nil {
@@ -201,7 +202,7 @@ func TestKeyRotationWorkflow(t *testing.T) {
 	defer db.Close()
 
 	km := NewDataClassKeyManager(db)
-	version, err := km.RotateKeyWithAudit(ctx, DataClassConfidential, NewAuditLogManager(db))
+	version, err := km.RotateKeyWithAudit(ctx, compliance.DataClassConfidential, NewAuditLogManager(db))
 	if err != nil {
 		t.Fatalf("rotate key: %v", err)
 	}

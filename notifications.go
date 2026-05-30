@@ -54,18 +54,18 @@ type NotificationEvent struct {
 // NotificationConfig describes which events on a bucket should trigger
 // delivery and how to filter them by key prefix/suffix.
 type NotificationConfig struct {
-	ID           string      `json:"id"`
-	Events       []EventType `json:"events"`
-	FilterPrefix string      `json:"filter_prefix,omitempty"`
-	FilterSuffix string      `json:"filter_suffix,omitempty"`
+	ID           string             `json:"id"`
+	Events       []EventType        `json:"events"`
+	FilterPrefix string             `json:"filter_prefix,omitempty"`
+	FilterSuffix string             `json:"filter_suffix,omitempty"`
 	Target       NotificationTarget `json:"target"`
 }
 
 // NotificationTarget describes where to send the event.
 type NotificationTarget struct {
-	Type     TargetType                   `json:"type"`
-	Endpoint string                       `json:"endpoint,omitempty"` // URL for TargetWebhook
-	Callback func(NotificationEvent)      `json:"-"`                 // in-process handler for TargetCallback
+	Type     TargetType              `json:"type"`
+	Endpoint string                  `json:"endpoint,omitempty"` // URL for TargetWebhook
+	Callback func(NotificationEvent) `json:"-"`                  // in-process handler for TargetCallback
 }
 
 // NotificationManager manages bucket event notification configurations,
@@ -76,10 +76,10 @@ type NotificationManager struct {
 	configs map[string][]NotificationConfig // bucket -> configs
 
 	// Background worker
-	eventCh  chan notifyJob
-	running  atomic.Bool
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	eventCh chan notifyJob
+	running atomic.Bool
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
 
 	// Webhook delivery settings
 	WebhookTimeout time.Duration

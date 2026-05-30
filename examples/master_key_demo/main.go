@@ -11,7 +11,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func mai4n() {
+func main() {
 	fmt.Println("=== Velocity Master Key Management Demo ===")
 
 	// Demo 1: System File (Traditional approach)
@@ -59,7 +59,8 @@ func demoSystemFile() {
 
 func demoUserDefined() {
 	config := velocity.Config{
-		Path: "./demo_data/user_db",
+		Path:          "./demo_data/user_db",
+		EncryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.MasterKeyConfig{
 			Source: velocity.UserDefined,
 			UserKeyCache: velocity.UserKeyCacheConfig{
@@ -99,7 +100,8 @@ func demoUserDefined() {
 
 func demoRuntimeChanges() {
 	config := velocity.Config{
-		Path: "./demo_data/runtime_db",
+		Path:            "./demo_data/runtime_db",
+		EncryptionKey:   []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.DefaultMasterKeyConfig(),
 	}
 

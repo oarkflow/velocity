@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"bytes"
@@ -170,7 +170,7 @@ type hnswMeta struct {
 
 // HNSWIndex is an in-memory HNSW graph backed by LSM-tree persistence.
 type HNSWIndex struct {
-	db     *DB
+	db     Store
 	config HNSWConfig
 	ml     float64 // level multiplier: 1/ln(M)
 	rng    *rand.Rand
@@ -182,7 +182,7 @@ type HNSWIndex struct {
 	nodeCount  int
 }
 
-func NewHNSWIndex(db *DB, config HNSWConfig) (*HNSWIndex, error) {
+func NewHNSWIndex(db Store, config HNSWConfig) (*HNSWIndex, error) {
 	config.defaults()
 	if config.Dimension <= 0 {
 		return nil, fmt.Errorf("HNSW dimension must be > 0")

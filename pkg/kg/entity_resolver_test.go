@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"math"

@@ -7,19 +7,21 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/core"
 )
 
 // DecommissionState represents the current phase of node decommissioning.
 type DecommissionState int
 
 const (
-	DecommissionPending    DecommissionState = iota // Plan created, not yet started
-	DecommissionPlanning                            // Building migration plan
-	DecommissionMigrating                           // Actively transferring objects
-	DecommissionDraining                            // Final pass: verifying nothing remains
-	DecommissionCompleted                           // All data migrated, node safe to remove
-	DecommissionFailed                              // Unrecoverable error
-	DecommissionCancelled                           // Cancelled by operator
+	DecommissionPending   DecommissionState = iota // Plan created, not yet started
+	DecommissionPlanning                           // Building migration plan
+	DecommissionMigrating                          // Actively transferring objects
+	DecommissionDraining                           // Final pass: verifying nothing remains
+	DecommissionCompleted                          // All data migrated, node safe to remove
+	DecommissionFailed                             // Unrecoverable error
+	DecommissionCancelled                          // Cancelled by operator
 )
 
 func (s DecommissionState) String() string {
@@ -98,7 +100,7 @@ type DecommissionManager struct {
 
 	mu     sync.Mutex
 	status *DecommissionStatus // nil when idle
-	cancel context.CancelFunc // cancel the active decommission
+	cancel context.CancelFunc  // cancel the active decommission
 
 	maxRetries    int
 	batchPause    time.Duration // small pause between objects to avoid saturation
@@ -314,8 +316,8 @@ func (dm *DecommissionManager) buildPlan(nodeID string) (*DecommissionPlan, erro
 
 // cloneRingWithout creates a new ConsistentHashRing containing every active
 // node except the one being decommissioned.
-func (dm *DecommissionManager) cloneRingWithout(excludeNodeID string) *ConsistentHashRing {
-	ring := NewConsistentHashRing(256)
+func (dm *DecommissionManager) cloneRingWithout(excludeNodeID string) *core.ConsistentHashRing {
+	ring := core.NewConsistentHashRing(256)
 	dm.cluster.mu.RLock()
 	defer dm.cluster.mu.RUnlock()
 

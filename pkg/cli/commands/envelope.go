@@ -41,37 +41,37 @@ func EnvelopeCreateCommand(db *velocity.DB) velocitycli.CommandBuilder {
 				Required: true,
 			},
 			&cli.StringFlag{
-				Name:     "type",
-				Aliases:  []string{"t"},
-				Usage:    "Envelope type (court_evidence, investigation_record, custody_proof, cctv_forensic_archive)",
+				Name:    "type",
+				Aliases: []string{"t"},
+				Usage:   "Envelope type (court_evidence, investigation_record, custody_proof, cctv_forensic_archive)",
 				Value:   "court_evidence",
 			},
 			&cli.StringFlag{
-				Name:     "kind",
-				Aliases:  []string{"k"},
-				Usage:    "Payload kind (file, kv, secret, bundle)",
+				Name:    "kind",
+				Aliases: []string{"k"},
+				Usage:   "Payload kind (file, kv, secret, bundle)",
 				Value:   "kv",
 			},
 			&cli.StringFlag{
-				Name:    "data",
-				Usage:  "JSON data for kv payload",
-				Value:  "{}",
+				Name:  "data",
+				Usage: "JSON data for kv payload",
+				Value: "{}",
 			},
 			&cli.StringFlag{
-				Name:    "object-path",
+				Name:  "object-path",
 				Usage: "Object storage path for file payload",
 			},
 			&cli.StringFlag{
-				Name:    "secret-ref",
+				Name:  "secret-ref",
 				Usage: "Secret reference (e.g., secret:category:name)",
 			},
 			&cli.StringFlag{
-				Name:    "created-by",
+				Name:  "created-by",
 				Usage: "Creator identity",
-				Value:  "system",
+				Value: "system",
 			},
 			&cli.StringFlag{
-				Name:    "case-reference",
+				Name:  "case-reference",
 				Usage: "Case reference number",
 			},
 		).
@@ -90,7 +90,7 @@ func EnvelopeCreateCommand(db *velocity.DB) velocitycli.CommandBuilder {
 			case "file":
 				payload = velocity.EnvelopePayload{
 					Kind:       "file",
-					ObjectPath:  objectPath,
+					ObjectPath: objectPath,
 				}
 			case "secret":
 				payload = velocity.EnvelopePayload{
@@ -115,7 +115,7 @@ func EnvelopeCreateCommand(db *velocity.DB) velocitycli.CommandBuilder {
 				Type:          envType,
 				CreatedBy:     createdBy,
 				CaseReference: caseRef,
-				Payload:      payload,
+				Payload:       payload,
 			}
 
 			env, err := db.CreateEnvelope(ctx, req)
@@ -298,9 +298,9 @@ func EnvelopeBundleCreateCommand(db *velocity.DB) velocitycli.CommandBuilder {
 				Required: true,
 			},
 			&cli.StringFlag{
-				Name:     "type",
-				Aliases:  []string{"t"},
-				Usage:    "Envelope type",
+				Name:    "type",
+				Aliases: []string{"t"},
+				Usage:   "Envelope type",
 				Value:   "investigation_record",
 			},
 			&cli.StringFlag{
@@ -309,9 +309,9 @@ func EnvelopeBundleCreateCommand(db *velocity.DB) velocitycli.CommandBuilder {
 				Usage:   "Resources as JSON array (e.g., '[{\"type\":\"file\",\"name\":\"doc.pdf\",\"path\":\"evidence/doc.pdf\"}]')",
 			},
 			&cli.StringFlag{
-				Name:    "created-by",
-				Usage:  "Creator identity",
-				Value:  "system",
+				Name:  "created-by",
+				Usage: "Creator identity",
+				Value: "system",
 			},
 		).
 		SetAction(func(ctx context.Context, c *cli.Command) error {
@@ -333,10 +333,10 @@ func EnvelopeBundleCreateCommand(db *velocity.DB) velocitycli.CommandBuilder {
 			}
 
 			req := &velocity.EnvelopeRequest{
-				Label:    label,
-				Type:     envType,
+				Label:     label,
+				Type:      envType,
 				CreatedBy: createdBy,
-				Payload:  payload,
+				Payload:   payload,
 			}
 
 			env, err := db.CreateEnvelope(ctx, req)
@@ -374,20 +374,20 @@ func EnvelopeBundleAddCommand(db *velocity.DB) velocitycli.CommandBuilder {
 				Required: true,
 			},
 			&cli.StringFlag{
-				Name:    "path",
-				Usage:  "Object storage path (for file type)",
+				Name:  "path",
+				Usage: "Object storage path (for file type)",
 			},
 			&cli.StringFlag{
-				Name:    "secret-ref",
-				Usage:  "Secret reference (for secret type)",
+				Name:  "secret-ref",
+				Usage: "Secret reference (for secret type)",
 			},
 			&cli.StringFlag{
-				Name:    "key",
-				Usage:  "Key (for kv type)",
+				Name:  "key",
+				Usage: "Key (for kv type)",
 			},
 			&cli.StringFlag{
-				Name:    "value",
-				Usage:  "Value (for kv type)",
+				Name:  "value",
+				Usage: "Value (for kv type)",
 			},
 		).
 		SetAction(func(ctx context.Context, c *cli.Command) error {
@@ -405,12 +405,12 @@ func EnvelopeBundleAddCommand(db *velocity.DB) velocitycli.CommandBuilder {
 			}
 
 			resource := velocity.EnvelopeResource{
-				ID:     fmt.Sprintf("res-%d", len(env.Payload.Resources)+1),
-				Type:   resType,
-				Name:   name,
-				Path:   path,
+				ID:        fmt.Sprintf("res-%d", len(env.Payload.Resources)+1),
+				Type:      resType,
+				Name:      name,
+				Path:      path,
 				SecretRef: secretRef,
-				Key:    key,
+				Key:       key,
 			}
 
 			if value != "" {
@@ -489,7 +489,7 @@ func EnvelopeBundleResolveCommand(db *velocity.DB) velocitycli.CommandBuilder {
 			},
 			&cli.StringFlag{
 				Name:    "resource-id",
-				Aliases:  []string{"r"},
+				Aliases: []string{"r"},
 				Usage:   "Specific resource ID (optional)",
 			},
 		).

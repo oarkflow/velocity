@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"regexp"
 	"strings"
 	"sync"
@@ -12,13 +13,13 @@ import (
 
 // DataClassificationEngine automatically classifies sensitive data
 type DataClassificationEngine struct {
-	db           *DB
-	scanners     []DataScanner
-	piiPatterns  []*PIIPattern
-	phiPatterns  []*PHIDetectionPattern
-	pciPatterns  []*PCIPattern
-	config       *ClassificationConfig
-	mu           sync.RWMutex
+	db          *DB
+	scanners    []DataScanner
+	piiPatterns []*PIIPattern
+	phiPatterns []*PHIDetectionPattern
+	pciPatterns []*PCIPattern
+	config      *ClassificationConfig
+	mu          sync.RWMutex
 }
 
 // DataScanner interface for data scanning
@@ -29,19 +30,19 @@ type DataScanner interface {
 
 // PIIPattern defines Personally Identifiable Information patterns
 type PIIPattern struct {
-	Name       string   `json:"name"`
-	Type       string   `json:"type"` // ssn, email, phone, passport, etc.
+	Name       string `json:"name"`
+	Type       string `json:"type"` // ssn, email, phone, passport, etc.
 	Regex      *regexp.Regexp
 	RegexStr   string   `json:"regex"`
-	Confidence float64  `json:"confidence"` // 0.0 to 1.0
-	Action     string   `json:"action"` // encrypt, mask, redact, block, alert
+	Confidence float64  `json:"confidence"`          // 0.0 to 1.0
+	Action     string   `json:"action"`              // encrypt, mask, redact, block, alert
 	Countries  []string `json:"countries,omitempty"` // Geographic scope
 }
 
 // PHIDetectionPattern defines Protected Health Information patterns
 type PHIDetectionPattern struct {
-	Name       string  `json:"name"`
-	Type       string  `json:"type"` // mrn, npi, icd, medication, diagnosis
+	Name       string `json:"name"`
+	Type       string `json:"type"` // mrn, npi, icd, medication, diagnosis
 	Regex      *regexp.Regexp
 	RegexStr   string  `json:"regex"`
 	Confidence float64 `json:"confidence"`
@@ -50,25 +51,25 @@ type PHIDetectionPattern struct {
 
 // PCIPattern defines Payment Card Industry patterns
 type PCIPattern struct {
-	Name       string  `json:"name"`
-	Type       string  `json:"type"` // card_number, cvv, expiry
+	Name       string `json:"name"`
+	Type       string `json:"type"` // card_number, cvv, expiry
 	Regex      *regexp.Regexp
-	RegexStr   string  `json:"regex"`
-	Confidence float64 `json:"confidence"`
-	Action     string  `json:"action"`
+	RegexStr   string            `json:"regex"`
+	Confidence float64           `json:"confidence"`
+	Action     string            `json:"action"`
 	Validator  func(string) bool // Luhn algorithm for cards
 }
 
 // ClassificationConfig defines classification behavior
 type ClassificationConfig struct {
-	Enabled         bool                   `json:"enabled"`
-	AutoEncrypt     bool                   `json:"auto_encrypt"`     // Automatically encrypt detected PII/PHI
-	AutoMask        bool                   `json:"auto_mask"`        // Mask sensitive data in logs
-	BlockOnDetect   bool                   `json:"block_on_detect"`  // Block operations on unclassified sensitive data
-	AlertOnDetect   bool                   `json:"alert_on_detect"`  // Alert security team
-	ScanOnWrite     bool                   `json:"scan_on_write"`    // Scan data on write operations
-	ScanThreshold   float64                `json:"scan_threshold"`   // Confidence threshold (0.0-1.0)
-	DefaultClass    DataClassification     `json:"default_class"`
+	Enabled       bool                          `json:"enabled"`
+	AutoEncrypt   bool                          `json:"auto_encrypt"`    // Automatically encrypt detected PII/PHI
+	AutoMask      bool                          `json:"auto_mask"`       // Mask sensitive data in logs
+	BlockOnDetect bool                          `json:"block_on_detect"` // Block operations on unclassified sensitive data
+	AlertOnDetect bool                          `json:"alert_on_detect"` // Alert security team
+	ScanOnWrite   bool                          `json:"scan_on_write"`   // Scan data on write operations
+	ScanThreshold float64                       `json:"scan_threshold"`  // Confidence threshold (0.0-1.0)
+	DefaultClass  compliance.DataClassification `json:"default_class"`
 }
 
 // NewDataClassificationEngine creates a new classification engine
@@ -87,7 +88,7 @@ func NewDataClassificationEngine(db *DB) *DataClassificationEngine {
 			AlertOnDetect: true,
 			ScanOnWrite:   true,
 			ScanThreshold: 0.7, // 70% confidence
-			DefaultClass:  DataClassInternal,
+			DefaultClass:  compliance.DataClassInternal,
 		},
 	}
 
@@ -102,11 +103,11 @@ func NewDataClassificationEngine(db *DB) *DataClassificationEngine {
 // initializePIIPatterns sets up PII detection patterns
 func (dce *DataClassificationEngine) initializePIIPatterns() {
 	patterns := []struct {
-		name    string
-		typ     string
-		regex   string
-		conf    float64
-		action  string
+		name      string
+		typ       string
+		regex     string
+		conf      float64
+		action    string
 		countries []string
 	}{
 		// US Social Security Number
@@ -265,7 +266,7 @@ func (dce *DataClassificationEngine) ClassifyData(ctx context.Context, data []by
 	}
 
 	result := &ClassificationResult{
-		Classification: DataClassPublic,
+		Classification: compliance.DataClassPublic,
 		Confidence:     0.0,
 		Matches:        make([]*DataMatch, 0),
 		Actions:        make([]string, 0),
@@ -291,7 +292,7 @@ func (dce *DataClassificationEngine) ClassifyData(ctx context.Context, data []by
 			// Update classification if higher confidence
 			if pattern.Confidence > result.Confidence {
 				result.Confidence = pattern.Confidence
-				result.Classification = DataClassRestricted
+				result.Classification = compliance.DataClassRestricted
 				result.Actions = append(result.Actions, pattern.Action)
 			}
 		}
@@ -314,7 +315,7 @@ func (dce *DataClassificationEngine) ClassifyData(ctx context.Context, data []by
 
 			if pattern.Confidence > result.Confidence {
 				result.Confidence = pattern.Confidence
-				result.Classification = DataClassRestricted
+				result.Classification = compliance.DataClassRestricted
 				result.Actions = append(result.Actions, pattern.Action)
 			}
 		}
@@ -342,7 +343,7 @@ func (dce *DataClassificationEngine) ClassifyData(ctx context.Context, data []by
 
 			if pattern.Confidence > result.Confidence {
 				result.Confidence = pattern.Confidence
-				result.Classification = DataClassRestricted
+				result.Classification = compliance.DataClassRestricted
 				result.Actions = append(result.Actions, pattern.Action)
 			}
 		}
@@ -369,11 +370,11 @@ type DataMatch struct {
 
 // ClassificationResult contains classification results
 type ClassificationResult struct {
-	Classification DataClassification `json:"classification"`
-	Confidence     float64             `json:"confidence"`
-	Matches        []*DataMatch        `json:"matches"`
-	Actions        []string            `json:"actions"`
-	ScanTime       int64               `json:"scan_time_ms"`
+	Classification compliance.DataClassification `json:"classification"`
+	Confidence     float64                       `json:"confidence"`
+	Matches        []*DataMatch                  `json:"matches"`
+	Actions        []string                      `json:"actions"`
+	ScanTime       int64                         `json:"scan_time_ms"`
 }
 
 // MaskData masks sensitive data based on classification
@@ -456,7 +457,7 @@ func (dce *DataClassificationEngine) EnforceDataPolicy(ctx context.Context, data
 	}
 
 	// Auto-encrypt if configured
-	if dce.config.AutoEncrypt && result.Classification == DataClassRestricted {
+	if dce.config.AutoEncrypt && result.Classification == compliance.DataClassRestricted {
 		// Data should be encrypted (handled by caller)
 		return nil
 	}
@@ -488,14 +489,14 @@ func (dce *DataClassificationEngine) sendSecurityAlert(result *ClassificationRes
 
 // SecurityAlert represents a security alert
 type SecurityAlert struct {
-	Timestamp      time.Time          `json:"timestamp"`
-	Type           string             `json:"type"`
-	Severity       string             `json:"severity"`
-	Classification DataClassification `json:"classification"`
-	MatchCount     int                `json:"match_count"`
-	Operation      string             `json:"operation"`
-	Confidence     float64            `json:"confidence"`
-	Details        string             `json:"details,omitempty"`
+	Timestamp      time.Time                     `json:"timestamp"`
+	Type           string                        `json:"type"`
+	Severity       string                        `json:"severity"`
+	Classification compliance.DataClassification `json:"classification"`
+	MatchCount     int                           `json:"match_count"`
+	Operation      string                        `json:"operation"`
+	Confidence     float64                       `json:"confidence"`
+	Details        string                        `json:"details,omitempty"`
 }
 
 // GetClassificationStats returns classification statistics

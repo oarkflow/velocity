@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"math"
@@ -42,12 +42,7 @@ func TestEncodeDecodeFloat32s(t *testing.T) {
 }
 
 func TestHNSWIndex_InsertAndSearch(t *testing.T) {
-	dir := t.TempDir()
-	db, err := New(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := newTestStore()
 
 	idx, err := NewHNSWIndex(db, HNSWConfig{
 		M:              8,
@@ -94,12 +89,7 @@ func TestHNSWIndex_InsertAndSearch(t *testing.T) {
 }
 
 func TestHNSWIndex_Delete(t *testing.T) {
-	dir := t.TempDir()
-	db, err := New(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := newTestStore()
 
 	idx, err := NewHNSWIndex(db, HNSWConfig{
 		M: 8, EfConstruction: 50, EfSearch: 30, Dimension: 2,
@@ -122,12 +112,7 @@ func TestHNSWIndex_Delete(t *testing.T) {
 }
 
 func TestHNSWIndex_DimensionMismatch(t *testing.T) {
-	dir := t.TempDir()
-	db, err := New(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
+	db := newTestStore()
 
 	idx, err := NewHNSWIndex(db, HNSWConfig{Dimension: 3})
 	if err != nil {

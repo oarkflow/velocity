@@ -24,23 +24,23 @@ func (db *DB) ClearMasterKeyCache() {
 func (db *DB) RefreshMasterKey() error {
 	// Clear cache to force re-prompt
 	db.masterKeyManager.ClearCache()
-	
+
 	// Get new key
 	key, err := db.masterKeyManager.GetMasterKey(nil)
 	if err != nil {
 		return fmt.Errorf("failed to refresh master key: %w", err)
 	}
-	
+
 	// Update crypto provider
 	newCrypto, err := newCryptoProvider(key)
 	if err != nil {
 		return fmt.Errorf("failed to create crypto provider: %w", err)
 	}
-	
+
 	db.mutex.Lock()
 	db.crypto = newCrypto
 	db.mutex.Unlock()
-	
+
 	return nil
 }
 
@@ -60,7 +60,7 @@ func (db *DB) SetMasterKeySource(source MasterKeySource) {
 func (db *DB) GetKeyCacheInfo() (bool, time.Time, time.Time) {
 	db.masterKeyManager.cacheMutex.RLock()
 	defer db.masterKeyManager.cacheMutex.RUnlock()
-	
+
 	hasCachedKey := db.masterKeyManager.cachedKey != nil
 	return hasCachedKey, db.masterKeyManager.cacheExpiry, db.masterKeyManager.lastAccess
 }
@@ -68,7 +68,7 @@ func (db *DB) GetKeyCacheInfo() (bool, time.Time, time.Time) {
 // SetUserKeyCacheConfig updates user key cache settings
 func (db *DB) SetUserKeyCacheConfig(config UserKeyCacheConfig) {
 	db.masterKeyManager.config.UserKeyCache = config
-	
+
 	// If caching is disabled, clear existing cache
 	if !config.Enabled {
 		db.masterKeyManager.ClearCache()

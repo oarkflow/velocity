@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/s3"
 	"log"
 	"net/url"
 	"os"
@@ -30,11 +31,11 @@ func main() {
 	}
 	defer db.Close()
 
-	buckets := velocity.NewBucketManager(db)
+	buckets := s3.NewBucketManager(db, db)
 	if err := buckets.CreateBucket("cases", "investigator", "us-east-1"); err != nil {
 		log.Fatal(err)
 	}
-	if err := buckets.SetBucketEncryption("cases", &velocity.BucketEncryption{SSEAlgorithm: "AES256"}); err != nil {
+	if err := buckets.SetBucketEncryption("cases", &s3.BucketEncryption{SSEAlgorithm: "AES256"}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -57,7 +58,7 @@ func main() {
 		Reader:      bytes.NewReader([]byte("sealed evidence payload")),
 		Options: &velocity.ObjectOptions{
 			Encrypt:      true,
-			StorageClass: velocity.S3StorageStandard,
+			StorageClass: s3.S3StorageStandard,
 			Tags:         map[string]string{"case": "A-100", "kind": "report"},
 		},
 		EnforceBucket: true,
@@ -122,12 +123,12 @@ func main() {
 	}
 	fmt.Printf("envelope references valid: %v\n", report.Valid)
 
-	creds := velocity.NewS3CredentialStore(db)
+	creds := s3.NewS3CredentialStore(db, db)
 	cred, err := creds.GenerateCredentials("investigator", "demo presigned access")
 	if err != nil {
 		log.Fatal(err)
 	}
-	presigner := velocity.NewPresignedURLGenerator(creds, "us-east-1", "http://localhost:8080")
+	presigner := s3.NewPresignedURLGenerator(creds, "us-east-1", "http://localhost:8080")
 	signedURL, err := presigner.GeneratePresignedGetURL(cred.AccessKeyID, "cases", "evidence/report.txt", 15*time.Minute)
 	if err != nil {
 		log.Fatal(err)

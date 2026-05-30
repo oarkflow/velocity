@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 func main() {
@@ -22,12 +23,12 @@ func main() {
 	}()
 
 	// Initialize the Knowledge Graph engine (BM25-only mode, no embedding endpoint)
-	kg := db.KnowledgeGraph(velocity.KGConfig{
+	engine := db.KnowledgeGraph(kg.KGConfig{
 		ChunkMaxWords: 128,
 		ChunkOverlap:  32,
 		IngestWorkers: 4,
 	})
-	if kg == nil {
+	if engine == nil {
 		panic("failed to create KG engine")
 	}
 
@@ -39,7 +40,7 @@ func main() {
 	// --- Ingest Documents ---
 	fmt.Println("--- Ingesting Documents ---")
 
-	docs := []velocity.KGIngestRequest{
+	docs := []kg.KGIngestRequest{
 		{
 			Source:    "annual-report-2024.txt",
 			MediaType: "text/plain",
@@ -107,7 +108,7 @@ for more information.</p>
 	}
 
 	for _, doc := range docs {
-		resp, err := kg.Ingest(ctx, &doc)
+		resp, err := engine.Ingest(ctx, &doc)
 		if err != nil {
 			fmt.Printf("  ERROR ingesting %s: %v\n", doc.Source, err)
 			continue
@@ -135,7 +136,7 @@ for more information.</p>
 
 	for _, q := range queries {
 		fmt.Printf("  Query: %q\n", q.query)
-		resp, err := kg.Search(ctx, &velocity.KGSearchRequest{
+		resp, err := engine.Search(ctx, &kg.KGSearchRequest{
 			Query: q.query,
 			Limit: q.limit,
 		})
@@ -157,14 +158,14 @@ for more information.</p>
 
 	// --- Get Document ---
 	fmt.Println("--- Document Retrieval ---")
-	resp, _ := kg.Ingest(ctx, &velocity.KGIngestRequest{
+	resp, _ := engine.Ingest(ctx, &kg.KGIngestRequest{
 		Source:    "test-retrieval.txt",
 		Content:   []byte("This is a test document for retrieval demonstration."),
 		MediaType: "text/plain",
 		Title:     "Test Document",
 	})
 	if resp != nil {
-		doc, err := kg.GetDocument(resp.DocID)
+		doc, err := engine.GetDocument(resp.DocID)
 		if err != nil {
 			fmt.Printf("  ERROR: %v\n", err)
 		} else {
@@ -176,7 +177,7 @@ for more information.</p>
 
 	// --- Analytics ---
 	fmt.Println("--- Corpus Analytics ---")
-	analytics := kg.GetAnalytics()
+	analytics := engine.GetAnalytics()
 	fmt.Printf("  Total documents: %d\n", analytics.TotalDocuments)
 	fmt.Printf("  Total chunks:    %d\n", analytics.TotalChunks)
 	fmt.Printf("  Total entities:  %d\n", analytics.TotalEntities)
@@ -184,7 +185,7 @@ for more information.</p>
 
 	// --- Metadata Filtering ---
 	fmt.Println("--- Search with Metadata Filters ---")
-	filteredResp, err := kg.Search(ctx, &velocity.KGSearchRequest{
+	filteredResp, err := engine.Search(ctx, &kg.KGSearchRequest{
 		Query:   "cloud",
 		Limit:   5,
 		Filters: map[string]string{"department": "product"},
@@ -203,13 +204,13 @@ for more information.</p>
 	// --- Delete Document ---
 	fmt.Println("--- Delete Document ---")
 	if resp != nil {
-		err = kg.DeleteDocument(resp.DocID)
+		err = engine.DeleteDocument(resp.DocID)
 		if err != nil {
 			fmt.Printf("  ERROR: %v\n", err)
 		} else {
 			fmt.Printf("  Deleted document: %s\n", resp.DocID[:12]+"...")
 		}
-		_, err = kg.GetDocument(resp.DocID)
+		_, err = engine.GetDocument(resp.DocID)
 		if err != nil {
 			fmt.Printf("  Verified: document no longer exists\n")
 		}
@@ -218,7 +219,7 @@ for more information.</p>
 
 	// --- Vector Search Info ---
 	fmt.Println("--- Vector Search Status ---")
-	if kg.HasVectorSearch() {
+	if engine.HasVectorSearch() {
 		fmt.Println("  Vector search: ENABLED")
 	} else {
 		fmt.Println("  Vector search: DISABLED (no embedding endpoint configured)")

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 func openAutoKGSQLDB(t *testing.T, name string) (*sql.DB, string) {
@@ -26,7 +27,7 @@ func openAutoKGSQLDB(t *testing.T, name string) (*sql.DB, string) {
 	t.Cleanup(func() { _ = sdb.Close() })
 	engineDBForPath(t, path).EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
 		Enabled:       true,
-		Resources:     []velocity.KGResourceType{velocity.KGResourceSQLRow},
+		Resources:     []kg.ResourceType{kg.ResourceSQLRow},
 		SecretValues:  true,
 		Existing:      false,
 		Async:         false,
@@ -46,12 +47,12 @@ func engineDBForPath(t *testing.T, path string) *velocity.DB {
 	return state.db
 }
 
-func waitSQLKGHits(t *testing.T, db *velocity.DB, query string, want int) *velocity.KGSearchResponse {
+func waitSQLKGHits(t *testing.T, db *velocity.DB, query string, want int) *kg.KGSearchResponse {
 	t.Helper()
-	var resp *velocity.KGSearchResponse
+	var resp *kg.KGSearchResponse
 	var err error
 	for i := 0; i < 30; i++ {
-		resp, err = db.KnowledgeGraph().Search(context.Background(), &velocity.KGSearchRequest{Query: query, Limit: 10})
+		resp, err = db.KnowledgeGraph().Search(context.Background(), &kg.KGSearchRequest{Query: query, Limit: 10})
 		if err == nil && resp.TotalHits >= want {
 			return resp
 		}
@@ -81,7 +82,7 @@ func TestSQLKnowledgeGraphAutoIndex_InsertUpdateDelete(t *testing.T) {
 	if _, err := sdb.Exec(`DELETE FROM patients WHERE id = ?`, 1); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	resp, err := vdb.KnowledgeGraph().Search(context.Background(), &velocity.KGSearchRequest{Query: "updated kg", Limit: 10})
+	resp, err := vdb.KnowledgeGraph().Search(context.Background(), &kg.KGSearchRequest{Query: "updated kg", Limit: 10})
 	if err != nil {
 		t.Fatalf("search after delete: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestSQLKnowledgeGraphAutoIndex_RollbackDoesNotIndex(t *testing.T) {
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}
-	resp, err := vdb.KnowledgeGraph().Search(context.Background(), &velocity.KGSearchRequest{Query: "rollback kg token", Limit: 10})
+	resp, err := vdb.KnowledgeGraph().Search(context.Background(), &kg.KGSearchRequest{Query: "rollback kg token", Limit: 10})
 	if err != nil {
 		t.Fatalf("search rollback: %v", err)
 	}

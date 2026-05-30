@@ -199,7 +199,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 Go:
 
 ```go
-bucketMgr := velocity.NewBucketManager(db)
+import "github.com/oarkflow/velocity/pkg/s3"
+
+bucketMgr := s3.NewBucketManager(db, db)
 _ = bucketMgr.CreateBucket("archive", "alice", "us-east-1")
 
 _ = db.PutObjectTagging("archive", "reports/q1.txt", map[string]string{
@@ -302,14 +304,16 @@ go run ./examples/envelope_audit_chain_demo
 Go:
 
 ```go
+import "github.com/oarkflow/velocity/pkg/compliance"
+
 ctx := context.Background()
 ctm := velocity.NewComplianceTagManager(db)
 db.SetComplianceTagManager(ctm)
 
 err := ctm.TagPath(ctx, &velocity.ComplianceTag{
 	Path:          "/patients",
-	Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA, velocity.FrameworkGDPR},
-	DataClass:     velocity.DataClassRestricted,
+	Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA, compliance.FrameworkGDPR},
+	DataClass:     compliance.DataClassRestricted,
 	Owner:         "privacy",
 	Custodian:     "platform",
 	RetentionDays: 2555,
@@ -362,7 +366,21 @@ go run ./examples/enterprise_compliance_demo
 go test -run 'TestComplianceTagManager|TestCompliancePutGetWithConsentAndMasking|TestRetentionAnonymizeObject|TestDataResidencyBlocksObjectWrite|TestBreachIncidentOnCriticalViolation' .
 ```
 
-There is no shipped `./velocity compliance ...` command in `cmd/velocity` today. The richer `pkg/cli` framework also does not currently include a compliance command builder.
+The shipped `cmd/velocity` binary includes the minimal `compliance tag`, `compliance get`, and `compliance check` commands. The richer `pkg/cli` framework does not currently include a compliance command builder.
+
+Consent manager:
+
+```go
+consents := compliance.NewConsentManager(db)
+_ = consents.GrantConsent(ctx, "subject-1", compliance.ConsentRecord{
+	Purpose:         "account_management",
+	GrantedAt:       time.Now(),
+	LegalBasis:      "consent",
+	ProcessingScope: []string{"email"},
+	Active:          true,
+})
+ctm.SetConsentManager(consents)
+```
 
 ## Retention, Residency, And Lineage
 
@@ -372,7 +390,7 @@ Go:
 retention := velocity.NewRetentionManager(db)
 _ = retention.AddPolicy(ctx, velocity.RetentionPolicy{
 	PolicyID:        "restricted-7y",
-	DataType:        string(velocity.DataClassRestricted),
+	DataType:        string(compliance.DataClassRestricted),
 	RetentionPeriod: 7 * 365 * 24 * time.Hour,
 	DeletionMethod:  "cryptographic_erase",
 	ReviewInterval:  90 * 24 * time.Hour,
@@ -382,7 +400,7 @@ residency := velocity.NewDataResidencyManager(db)
 _ = residency.AddPolicy(ctx, &velocity.DataResidencyPolicy{
 	PathPrefix: "/patients",
 	Regions:    []string{"US"},
-	Framework:  string(velocity.FrameworkHIPAA),
+	Framework:  string(compliance.FrameworkHIPAA),
 	Enabled:    true,
 })
 allowed, policy, _ := residency.ValidateResidency(ctx, "/patients/123", "EU")
@@ -471,8 +489,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 Go:
 
 ```go
-kg := db.KnowledgeGraph()
-resp, err := kg.Ingest(context.Background(), &velocity.KGIngestRequest{
+import "github.com/oarkflow/velocity/pkg/kg"
+
+graph := db.KnowledgeGraph()
+resp, err := graph.Ingest(context.Background(), &kg.KGIngestRequest{
 	Source:    "note-1",
 	Title:     "Velocity note",
 	MediaType: "text/plain",
@@ -482,7 +502,7 @@ if err != nil {
 	log.Fatal(err)
 }
 
-search, _ := kg.Search(context.Background(), &velocity.KGSearchRequest{
+search, _ := graph.Search(context.Background(), &kg.KGSearchRequest{
 	Query: "Velocity search",
 	Limit: 5,
 })

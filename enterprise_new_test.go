@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	. "github.com/oarkflow/velocity/pkg/auth"
+	"github.com/oarkflow/velocity/pkg/s3"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,7 +24,7 @@ func openTestDB(t *testing.T) *DB {
 
 func createTestBuckets(t *testing.T, db *DB, names ...string) {
 	t.Helper()
-	bm := NewBucketManager(db)
+	bm := s3.NewBucketManager(db, db)
 	for _, name := range names {
 		if err := bm.CreateBucket(name, "test-owner", "us-east-1"); err != nil {
 			t.Fatalf("CreateBucket(%q): %v", name, err)

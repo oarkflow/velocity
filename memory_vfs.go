@@ -26,15 +26,15 @@ type MemoryVFS struct {
 
 // MemoryFile represents a file stored entirely in memory
 type MemoryFile struct {
-	Path         string
-	Data         []byte
-	Size         int64
-	ModTime      time.Time
-	IsDir        bool
-	Children     map[string]*MemoryFile // For directory entries
-	ContentType  string
-	AccessCount  int
-	mu           sync.RWMutex
+	Path        string
+	Data        []byte
+	Size        int64
+	ModTime     time.Time
+	IsDir       bool
+	Children    map[string]*MemoryFile // For directory entries
+	ContentType string
+	AccessCount int
+	mu          sync.RWMutex
 }
 
 // NewMemoryVFS creates a new in-memory virtual filesystem

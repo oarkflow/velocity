@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/auth"
 )
 
 // LDAP store key prefix
@@ -41,15 +43,15 @@ const (
 // LDAPConfig holds LDAP/Active Directory configuration.
 type LDAPConfig struct {
 	Name         string            `json:"name"`
-	ServerURL    string            `json:"server_url"`    // e.g. ldap://ldap.example.com:389 or ldaps://...
-	BindDN       string            `json:"bind_dn"`       // e.g. cn=admin,dc=example,dc=com
+	ServerURL    string            `json:"server_url"` // e.g. ldap://ldap.example.com:389 or ldaps://...
+	BindDN       string            `json:"bind_dn"`    // e.g. cn=admin,dc=example,dc=com
 	BindPassword string            `json:"bind_password"`
-	BaseDN       string            `json:"base_dn"`       // e.g. dc=example,dc=com
-	UserFilter   string            `json:"user_filter"`   // e.g. (uid=%s) or (sAMAccountName=%s)
-	GroupFilter  string            `json:"group_filter"`  // e.g. (member=%s)
+	BaseDN       string            `json:"base_dn"`      // e.g. dc=example,dc=com
+	UserFilter   string            `json:"user_filter"`  // e.g. (uid=%s) or (sAMAccountName=%s)
+	GroupFilter  string            `json:"group_filter"` // e.g. (member=%s)
 	TLS          bool              `json:"tls"`
 	TLSInsecure  bool              `json:"tls_insecure"`
-	RoleMapping  map[string]string `json:"role_mapping"`  // LDAP group DN -> Velocity role
+	RoleMapping  map[string]string `json:"role_mapping"` // LDAP group DN -> Velocity role
 	Timeout      time.Duration     `json:"timeout"`
 }
 
@@ -217,8 +219,8 @@ func (p *LDAPProvider) SearchUser(username string) (*LDAPUser, error) {
 }
 
 // MapToVelocityUser converts an LDAP user to the Velocity user model.
-func (p *LDAPProvider) MapToVelocityUser(ldapUser *LDAPUser) *User {
-	return &User{
+func (p *LDAPProvider) MapToVelocityUser(ldapUser *LDAPUser) *auth.User {
+	return &auth.User{
 		ID:       ldapUser.DN,
 		Username: ldapUser.Username,
 		Email:    ldapUser.Email,
@@ -468,7 +470,7 @@ func (p *LDAPProvider) buildUser(attrs map[string]string) *LDAPUser {
 		}
 	}
 	if len(user.Roles) == 0 {
-		user.Roles = []string{RoleUser}
+		user.Roles = []string{auth.RoleUser}
 	}
 
 	return user

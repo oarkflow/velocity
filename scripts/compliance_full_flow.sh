@@ -69,6 +69,7 @@ import (
 	"strings"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"github.com/oarkflow/velocity/pkg/sqldriver"
 )
 
@@ -89,8 +90,8 @@ func main() {
 	ctm := db.ComplianceTagManager()
 
 	must(ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceKV, Path: "/patients/1"}, &velocity.ComplianceTag{
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+		DataClass:     compliance.DataClassRestricted,
 		EncryptionReq: true,
 		CreatedBy:     "script",
 	}))
@@ -110,13 +111,13 @@ func main() {
 	fmt.Printf("KV read is masked: %t\n", strings.Contains(string(value), "*"))
 
 	must(ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceBucket, Bucket: "reports"}, &velocity.ComplianceTag{
-		Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:  velocity.DataClassInternal,
+		Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:  compliance.DataClassInternal,
 		CreatedBy:  "script",
 	}))
 	must(ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceFolder, Path: "reports/2026"}, &velocity.ComplianceTag{
-		Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:  velocity.DataClassConfidential,
+		Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:  compliance.DataClassConfidential,
 		CreatedBy:  "script",
 	}))
 	_, err = db.StoreObject("reports/2026/q1.txt", "text/plain", "alice", []byte("board report alice@example.test"), &velocity.ObjectOptions{Encrypt: true})
@@ -135,16 +136,16 @@ func main() {
 	fmt.Printf("Object operation allowed by inherited bucket/folder tags: %t\n", objectResult.Allowed)
 
 	must(ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSecret, SecretName: "api-key"}, &velocity.ComplianceTag{
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		EncryptionReq: true,
 		CreatedBy:     "script",
 	}))
 	secret, err := db.CreateSecret(ctx, velocity.SecretRequest{Name: "api-key", Value: []byte("sk-live-demo"), Owner: "alice"})
 	must(err)
 	must(ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSecretVersion, SecretName: "api-key", SecretVersion: secret.Version}, &velocity.ComplianceTag{
-		Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:  velocity.DataClassConfidential,
+		Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:  compliance.DataClassConfidential,
 		CreatedBy:  "script",
 	}))
 	_, _, err = db.GetSecretValue(ctx, velocity.SecretRef{Name: "api-key", Version: secret.Version})
@@ -156,18 +157,18 @@ func main() {
 	must(err)
 	sqlCTM := sqlSeed.ComplianceTagManager()
 	must(sqlCTM.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLSchema, SQLSchema: "main"}, &velocity.ComplianceTag{
-		Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:  velocity.DataClassInternal,
+		Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:  compliance.DataClassInternal,
 		CreatedBy:  "script",
 	}))
 	must(sqlCTM.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLTable, SQLTable: "patients"}, &velocity.ComplianceTag{
-		Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:  velocity.DataClassInternal,
+		Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:  compliance.DataClassInternal,
 		CreatedBy:  "script",
 	}))
 	must(sqlCTM.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLColumn, SQLTable: "patients", SQLColumn: "ssn"}, &velocity.ComplianceTag{
-		Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:  velocity.DataClassRestricted,
+		Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:  compliance.DataClassRestricted,
 		CreatedBy:  "script",
 	}))
 	must(sqlSeed.Close())

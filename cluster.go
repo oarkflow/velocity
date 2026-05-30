@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/core"
 )
 
 // NodeState represents the state of a cluster node
@@ -53,7 +55,7 @@ type ClusterManager struct {
 	config    ClusterConfig
 	localNode *ClusterNode
 	nodes     map[string]*ClusterNode
-	ring      *ConsistentHashRing
+	ring      *core.ConsistentHashRing
 	transport *NodeTransport
 	mu        sync.RWMutex
 	db        *DB
@@ -85,7 +87,7 @@ func NewClusterManager(db *DB, config ClusterConfig) *ClusterManager {
 		config:    config,
 		localNode: localNode,
 		nodes:     map[string]*ClusterNode{config.NodeID: localNode},
-		ring:      NewConsistentHashRing(256),
+		ring:      core.NewConsistentHashRing(256),
 		db:        db,
 		stopCh:    make(chan struct{}),
 	}

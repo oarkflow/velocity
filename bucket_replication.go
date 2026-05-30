@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/s3"
 )
 
 const (
@@ -25,25 +27,25 @@ const (
 type ReplicationStatus string
 
 const (
-	ReplicationStatusPending   ReplicationStatus = "PENDING"
-	ReplicationStatusComplete  ReplicationStatus = "COMPLETE"
-	ReplicationStatusFailed    ReplicationStatus = "FAILED"
-	ReplicationStatusReplica   ReplicationStatus = "REPLICA"
-	ReplicationStatusNone      ReplicationStatus = ""
+	ReplicationStatusPending  ReplicationStatus = "PENDING"
+	ReplicationStatusComplete ReplicationStatus = "COMPLETE"
+	ReplicationStatusFailed   ReplicationStatus = "FAILED"
+	ReplicationStatusReplica  ReplicationStatus = "REPLICA"
+	ReplicationStatusNone     ReplicationStatus = ""
 )
 
 // ReplicationRule defines a single bucket-level replication rule
 type ReplicationRule struct {
-	ID                string                `json:"id"`
-	Status            ReplicationRuleStatus `json:"status"`
-	Priority          int                   `json:"priority"`
-	SourceBucket      string                `json:"source_bucket"`
-	DestinationBucket string                `json:"destination_bucket"`
-	Prefix            string                `json:"prefix,omitempty"`
-	TagFilter         map[string]string     `json:"tag_filter,omitempty"`
-	StorageClassOverride string             `json:"storage_class_override,omitempty"`
-	CreatedAt         time.Time             `json:"created_at"`
-	ModifiedAt        time.Time             `json:"modified_at"`
+	ID                   string                `json:"id"`
+	Status               ReplicationRuleStatus `json:"status"`
+	Priority             int                   `json:"priority"`
+	SourceBucket         string                `json:"source_bucket"`
+	DestinationBucket    string                `json:"destination_bucket"`
+	Prefix               string                `json:"prefix,omitempty"`
+	TagFilter            map[string]string     `json:"tag_filter,omitempty"`
+	StorageClassOverride string                `json:"storage_class_override,omitempty"`
+	CreatedAt            time.Time             `json:"created_at"`
+	ModifiedAt           time.Time             `json:"modified_at"`
 }
 
 // BucketReplicationConfig holds all replication rules for a source bucket
@@ -54,8 +56,8 @@ type BucketReplicationConfig struct {
 
 // ObjectReplicationStatus records the replication state of an object per rule
 type ObjectReplicationStatus struct {
-	ObjectPath   string                       `json:"object_path"`
-	RuleStatuses map[string]RuleObjectStatus  `json:"rule_statuses"` // rule ID -> status
+	ObjectPath   string                      `json:"object_path"`
+	RuleStatuses map[string]RuleObjectStatus `json:"rule_statuses"` // rule ID -> status
 }
 
 // RuleObjectStatus is the per-rule replication outcome for one object
@@ -94,7 +96,7 @@ func (brm *BucketReplicationManager) PutReplicationConfig(config *BucketReplicat
 	}
 
 	// Verify source bucket exists
-	if !brm.db.Has([]byte(bucketMetaPrefix + config.SourceBucket)) {
+	if !brm.db.Has([]byte(s3.BucketMetaPrefix + config.SourceBucket)) {
 		return fmt.Errorf("NoSuchBucket: source bucket %q does not exist", config.SourceBucket)
 	}
 
@@ -138,7 +140,7 @@ func (brm *BucketReplicationManager) PutReplicationConfig(config *BucketReplicat
 		}
 
 		// Verify destination bucket exists
-		if !brm.db.Has([]byte(bucketMetaPrefix + rule.DestinationBucket)) {
+		if !brm.db.Has([]byte(s3.BucketMetaPrefix + rule.DestinationBucket)) {
 			return fmt.Errorf("NoSuchBucket: destination bucket %q does not exist", rule.DestinationBucket)
 		}
 

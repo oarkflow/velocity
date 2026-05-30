@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"context"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"testing"
 )
 
@@ -21,8 +22,8 @@ func TestSystemOperationBypass(t *testing.T) {
 	// Tag path with strict requirements
 	if err := ctm.TagPath(ctx, &ComplianceTag{
 		Path:          "/test",
-		Frameworks:    []ComplianceFramework{FrameworkGDPR, FrameworkHIPAA},
-		DataClass:     DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR, compliance.FrameworkHIPAA},
+		DataClass:     compliance.DataClassConfidential,
 		EncryptionReq: true,
 		AuditLevel:    "high",
 		CreatedBy:     "test",

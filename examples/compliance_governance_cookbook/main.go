@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"os"
 	"time"
 
@@ -21,8 +22,8 @@ func main() {
 	tags := velocity.NewComplianceTagManager(db)
 	check(tags.TagPath(ctx, &velocity.ComplianceTag{
 		Path:          "/records/customers",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR, velocity.FrameworkSOC2},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR, compliance.FrameworkSOC2},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "privacy",
 		Custodian:     "platform",
 		RetentionDays: 365,
@@ -32,8 +33,8 @@ func main() {
 	}))
 	check(tags.TagPath(ctx, &velocity.ComplianceTag{
 		Path:          "/records/customers/card.txt",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkPCIDSS},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkPCIDSS},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "payments",
 		EncryptionReq: true,
 		CreatedBy:     "cookbook",
@@ -59,8 +60,8 @@ func main() {
 	check(err)
 	masked := classifier.MaskData([]byte("Jane jane@example.test 4111111111111111"), classification)
 
-	consent := velocity.NewConsentManager(db)
-	check(consent.GrantConsent(ctx, "subject-1", velocity.ConsentRecord{
+	consent := compliance.NewConsentManager(db)
+	check(consent.GrantConsent(ctx, "subject-1", compliance.ConsentRecord{
 		ConsentID:       "marketing-v1",
 		Purpose:         "marketing",
 		LegalBasis:      "consent",
@@ -73,12 +74,12 @@ func main() {
 	retention := velocity.NewRetentionManager(db)
 	check(retention.AddPolicy(ctx, velocity.RetentionPolicy{
 		PolicyID:        "restricted-short",
-		DataType:        string(velocity.DataClassRestricted),
+		DataType:        string(compliance.DataClassRestricted),
 		RetentionPeriod: time.Millisecond,
 		DeletionMethod:  "anonymize",
 		ReviewInterval:  time.Hour,
 	}))
-	exceeds, _, err := retention.EvaluateRetention(ctx, string(velocity.DataClassRestricted), time.Hour)
+	exceeds, _, err := retention.EvaluateRetention(ctx, string(compliance.DataClassRestricted), time.Hour)
 	check(err)
 
 	residency := velocity.NewDataResidencyManager(db)
@@ -86,7 +87,7 @@ func main() {
 		PolicyID:   "eu-customers",
 		PathPrefix: "/records/customers",
 		Regions:    []string{"EU"},
-		Framework:  string(velocity.FrameworkGDPR),
+		Framework:  string(compliance.FrameworkGDPR),
 		Enabled:    true,
 	}))
 	residencyOK, _, err := residency.ValidateResidency(ctx, "/records/customers/card.txt", "EU")
@@ -95,8 +96,8 @@ func main() {
 	audit := velocity.NewAuditLogManager(db)
 	check(audit.LogEvent(velocity.AuditEvent{
 		Actor: "alice", Action: "write", Resource: "object", ResourceID: "/records/customers/card.txt",
-		Result: "denied", Classification: velocity.DataClassRestricted,
-		ComplianceTags: []velocity.ComplianceFramework{velocity.FrameworkGDPR, velocity.FrameworkPCIDSS},
+		Result: "denied", Classification: compliance.DataClassRestricted,
+		ComplianceTags: []compliance.Framework{compliance.FrameworkGDPR, compliance.FrameworkPCIDSS},
 		Severity:       "high",
 	}))
 	check(audit.SealBlock())

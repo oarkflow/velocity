@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"context"
@@ -58,7 +58,7 @@ func (e *KnowledgeGraphEngine) SearchResourceGraph(ctx context.Context, req *KGR
 		node := KGResourceGraphNode{
 			ID:           source,
 			Source:       source,
-			ResourceType: KGResourceType(hit.Metadata["resource_type"]),
+			ResourceType: ResourceType(hit.Metadata["resource_type"]),
 			ResourceID:   resourceIDFromHit(hit),
 			Title:        hit.Title,
 			Snippet:      hit.Text,

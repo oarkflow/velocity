@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/auth"
 )
 
 // OIDC store key prefix
@@ -28,7 +30,7 @@ const oidcProviderPrefix = "oidc:provider:"
 // OIDCConfig holds configuration for an OpenID Connect provider.
 type OIDCConfig struct {
 	Name         string            `json:"name"`
-	ProviderURL  string            `json:"provider_url"`  // e.g. https://accounts.google.com
+	ProviderURL  string            `json:"provider_url"` // e.g. https://accounts.google.com
 	ClientID     string            `json:"client_id"`
 	ClientSecret string            `json:"client_secret"`
 	RedirectURL  string            `json:"redirect_url"`
@@ -634,7 +636,7 @@ func (p *OIDCProvider) MapClaimsToUser(claims *OIDCClaims) *OIDCUser {
 	}
 
 	if len(user.Roles) == 0 {
-		user.Roles = []string{RoleUser}
+		user.Roles = []string{auth.RoleUser}
 	}
 
 	return user

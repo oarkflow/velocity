@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/s3"
 	"os"
 	"strings"
 	"time"
@@ -18,12 +19,12 @@ func main() {
 	check(err)
 	defer db.Close()
 
-	buckets := velocity.NewBucketManager(db)
+	buckets := s3.NewBucketManager(db, db)
 	check(buckets.CreateBucket("source-bucket", "alice", "us-east-1"))
 	check(buckets.CreateBucket("archive-bucket", "alice", "us-east-1"))
 	check(buckets.SetBucketVersioning("source-bucket", "Enabled"))
-	check(buckets.SetBucketEncryption("source-bucket", &velocity.BucketEncryption{SSEAlgorithm: "AES256"}))
-	check(buckets.SetBucketQuota("source-bucket", &velocity.BucketQuota{MaxSizeBytes: 1 << 20, MaxObjects: 100}))
+	check(buckets.SetBucketEncryption("source-bucket", &s3.BucketEncryption{SSEAlgorithm: "AES256"}))
+	check(buckets.SetBucketQuota("source-bucket", &s3.BucketQuota{MaxSizeBytes: 1 << 20, MaxObjects: 100}))
 
 	locker := velocity.NewObjectLockManager(db)
 	check(locker.SetBucketObjectLock("source-bucket", velocity.ObjectLockConfig{
@@ -37,7 +38,7 @@ func main() {
 	_, err = db.PutObject(context.Background(), velocity.PutObjectRequest{
 		Bucket: "source-bucket", Key: "docs/a.txt", User: "alice", ContentType: "text/plain",
 		Reader: stringsReader("hello from s3 cookbook"), Size: int64(len("hello from s3 cookbook")),
-		Options:       &velocity.ObjectOptions{Tags: map[string]string{"class": "demo"}, StorageClass: velocity.S3StorageStandard},
+		Options:       &velocity.ObjectOptions{Tags: map[string]string{"class": "demo"}, StorageClass: s3.S3StorageStandard},
 		EnforceBucket: true,
 	})
 	check(err)
@@ -66,10 +67,10 @@ func main() {
 	ranged, _, ranges, err := db.GetObjectWithRange("source-bucket", "docs/a.txt", "alice", "bytes=0-4")
 	check(err)
 
-	creds := velocity.NewS3CredentialStore(db)
+	creds := s3.NewS3CredentialStore(db, db)
 	cred, err := creds.GenerateCredentials("alice", "cookbook")
 	check(err)
-	presigner := velocity.NewPresignedURLGenerator(creds, "us-east-1", "http://localhost:8080")
+	presigner := s3.NewPresignedURLGenerator(creds, "us-east-1", "http://localhost:8080")
 	getURL, err := presigner.GeneratePresignedGetURL(cred.AccessKeyID, "source-bucket", "docs/a.txt", 15*time.Minute)
 	check(err)
 	putURL, err := presigner.GeneratePresignedPutURL(cred.AccessKeyID, "source-bucket", "docs/new.txt", "text/plain", time.Hour)

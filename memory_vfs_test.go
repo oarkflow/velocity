@@ -336,8 +336,8 @@ func TestViewFolderSecure_Integration(t *testing.T) {
 
 	// Add test files
 	testFiles := map[string]string{
-		testFolder + "/file1.txt": "Content 1",
-		testFolder + "/file2.txt": "Content 2",
+		testFolder + "/file1.txt":     "Content 1",
+		testFolder + "/file2.txt":     "Content 2",
 		testFolder + "/sub/file3.txt": "Content 3",
 	}
 
@@ -362,11 +362,11 @@ func TestViewFolderSecure_Integration(t *testing.T) {
 
 	// Create memory VFS and load objects
 	opts := vfs.Options{
-		MaxFileSize:      1024 * 1024,
-		MaxTotalSize:     500 * 1024 * 1024,
+		MaxFileSize:       1024 * 1024,
+		MaxTotalSize:      500 * 1024 * 1024,
 		EnableCompression: false,
 		MaxAccessPerFile:  1000,
-		AnomalyThreshold: 75,
+		AnomalyThreshold:  75,
 	}
 
 	memVFS := NewMemoryVFS(testFolder, opts)
@@ -459,11 +459,11 @@ func TestViewObjectSecure_Integration(t *testing.T) {
 
 	// Create memory VFS and load object
 	opts := vfs.Options{
-		MaxFileSize:      100 * 1024 * 1024,
-		MaxTotalSize:     100 * 1024 * 1024,
+		MaxFileSize:       100 * 1024 * 1024,
+		MaxTotalSize:      100 * 1024 * 1024,
 		EnableCompression: false,
 		MaxAccessPerFile:  1000,
-		AnomalyThreshold: 75,
+		AnomalyThreshold:  75,
 	}
 
 	memVFS := NewMemoryVFS("preview", opts)

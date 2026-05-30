@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"context"
@@ -18,11 +18,11 @@ type KGReranker interface {
 
 // KGSearchEngine performs hybrid BM25 + vector search with RRF fusion.
 type KGSearchEngine struct {
-	db         *DB
+	db         Store
 	hnsw       *HNSWIndex
 	embedder   KGEmbedder
 	reranker   KGReranker
-	em         *EntityManager
+	em         EntityStore
 	cacheMu    sync.RWMutex
 	chunkCache map[string]KGChunk
 	docCache   map[string]KGDocument
@@ -34,7 +34,7 @@ type KGSearchEngine struct {
 	chunkNorm  map[string]string
 }
 
-func NewKGSearchEngine(db *DB, hnsw *HNSWIndex, embedder KGEmbedder, em *EntityManager) *KGSearchEngine {
+func NewKGSearchEngine(db Store, hnsw *HNSWIndex, embedder KGEmbedder, em EntityStore) *KGSearchEngine {
 	return &KGSearchEngine{
 		db:         db,
 		hnsw:       hnsw,
@@ -273,7 +273,7 @@ func (s *KGSearchEngine) bm25Search(req *KGSearchRequest, limit int) []kgTextCan
 	if err := s.ensureTextIndex(); err != nil {
 		return nil
 	}
-	plan := parseFullTextQuery(SearchQuery{FullText: req.Query, MatchMode: req.MatchMode, PrefixMatch: req.PrefixMatch})
+	plan := parseFullTextQuery(req.Query, req.MatchMode, req.PrefixMatch)
 	if !plan.active() {
 		return nil
 	}

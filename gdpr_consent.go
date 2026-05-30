@@ -1,9 +1,13 @@
 package velocity
 
-import "context"
+import (
+	"context"
+
+	"github.com/oarkflow/velocity/pkg/compliance"
+)
 
 // GrantConsent records consent for a GDPR subject.
-func (gc *GDPRController) GrantConsent(ctx context.Context, subjectID string, record ConsentRecord) error {
+func (gc *GDPRController) GrantConsent(ctx context.Context, subjectID string, record compliance.ConsentRecord) error {
 	if gc.consentMgr == nil {
 		return nil
 	}
@@ -19,7 +23,7 @@ func (gc *GDPRController) WithdrawConsent(ctx context.Context, subjectID, consen
 }
 
 // ListConsents lists all consents for a subject.
-func (gc *GDPRController) ListConsents(ctx context.Context, subjectID string) ([]ConsentRecord, error) {
+func (gc *GDPRController) ListConsents(ctx context.Context, subjectID string) ([]compliance.ConsentRecord, error) {
 	if gc.consentMgr == nil {
 		return nil, nil
 	}
@@ -27,7 +31,7 @@ func (gc *GDPRController) ListConsents(ctx context.Context, subjectID string) ([
 }
 
 // HasActiveConsent checks if a subject has an active consent for a purpose.
-func (gc *GDPRController) HasActiveConsent(ctx context.Context, subjectID, purpose string) (bool, *ConsentRecord, error) {
+func (gc *GDPRController) HasActiveConsent(ctx context.Context, subjectID, purpose string) (bool, *compliance.ConsentRecord, error) {
 	if gc.consentMgr == nil {
 		return false, nil, nil
 	}

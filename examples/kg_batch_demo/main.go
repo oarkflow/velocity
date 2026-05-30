@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 func main() {
@@ -26,12 +27,12 @@ func main() {
 		os.RemoveAll(path)
 	}()
 
-	kg := db.KnowledgeGraph(velocity.KGConfig{
+	engine := db.KnowledgeGraph(kg.KGConfig{
 		ChunkMaxWords: 64,
 		ChunkOverlap:  16,
 		IngestWorkers: 8,
 	})
-	if kg == nil {
+	if engine == nil {
 		panic("failed to create KG engine")
 	}
 
@@ -61,7 +62,7 @@ func main() {
 	numDocs := 100
 	fmt.Printf("Generating %d synthetic documents...\n", numDocs)
 
-	var reqs []*velocity.KGIngestRequest
+	var reqs []*kg.KGIngestRequest
 	rng := rand.New(rand.NewSource(42))
 
 	for i := 0; i < numDocs; i++ {
@@ -87,7 +88,7 @@ func main() {
 			rng.Intn(99999),
 		)
 
-		reqs = append(reqs, &velocity.KGIngestRequest{
+		reqs = append(reqs, &kg.KGIngestRequest{
 			Source:    fmt.Sprintf("doc-%04d.txt", i),
 			Content:   []byte(content),
 			MediaType: "text/plain",
@@ -103,7 +104,7 @@ func main() {
 	fmt.Printf("Batch ingesting %d documents with %d workers...\n", numDocs, 8)
 	start := time.Now()
 
-	results, errs := kg.IngestBatch(ctx, reqs)
+	results, errs := engine.IngestBatch(ctx, reqs)
 
 	ingestDuration := time.Since(start)
 	successCount := 0
@@ -140,7 +141,7 @@ func main() {
 
 	for _, query := range searchQueries {
 		start := time.Now()
-		resp, err := kg.Search(ctx, &velocity.KGSearchRequest{
+		resp, err := engine.Search(ctx, &kg.KGSearchRequest{
 			Query: query,
 			Limit: 10,
 		})
@@ -156,7 +157,7 @@ func main() {
 
 	// Analytics
 	fmt.Println("--- Final Analytics ---")
-	analytics := kg.GetAnalytics()
+	analytics := engine.GetAnalytics()
 	fmt.Printf("  Documents: %d\n", analytics.TotalDocuments)
 	fmt.Printf("  Chunks:    %d\n", analytics.TotalChunks)
 	fmt.Printf("  Entities:  %d\n", analytics.TotalEntities)

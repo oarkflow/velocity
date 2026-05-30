@@ -70,6 +70,24 @@ Protected routes:
 
 ## S3-Compatible API
 
+S3 implementation types live in `github.com/oarkflow/velocity/pkg/s3`; root `DB` supplies the object/KV interfaces those managers need.
+
+Go:
+
+```go
+import "github.com/oarkflow/velocity/pkg/s3"
+
+creds := s3.NewS3CredentialStore(db, db)
+sigv4 := s3.NewSigV4Auth(creds, "us-east-1")
+buckets := s3.NewBucketManager(db, db)
+multipart := s3.NewMultipartManager(db)
+versioning := s3.NewBucketVersioning(db)
+_ = sigv4
+_ = buckets
+_ = multipart
+_ = versioning
+```
+
 S3 routes are mounted under `/s3` and protected by SigV4 auth middleware:
 
 - Buckets: list, create, delete, head.
@@ -88,4 +106,3 @@ S3 routes are mounted under `/s3` and protected by SigV4 auth middleware:
 - `examples/hardened_object_workflow/main.go`
 - `examples/s3_demo/main.go`
 - `examples/s3_bucket_cookbook/main.go`
-

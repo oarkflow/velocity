@@ -14,8 +14,10 @@ For an executable shell walkthrough that tags every supported resource type and 
 
 Source types include:
 
-- `ComplianceFramework`
-- `DataClassification`
+- `compliance.Framework`
+- `compliance.DataClassification`
+- `compliance.ConsentRecord`
+- `compliance.NewConsentManager`
 - GDPR controller
 - HIPAA controller
 - NIST controller
@@ -34,8 +36,8 @@ err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{
 	SQLTable: "patients",
 	SQLColumn: "ssn",
 }, &velocity.ComplianceTag{
-	Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-	DataClass:     velocity.DataClassRestricted,
+	Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+	DataClass:     compliance.DataClassRestricted,
 	EncryptionReq: true,
 	CreatedBy:     "admin",
 })
@@ -83,8 +85,8 @@ db.SetComplianceTagManager(ctm)
 
 err = ctm.TagPath(ctx, &velocity.ComplianceTag{
 	Path:          "/patients",
-	Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA, velocity.FrameworkGDPR},
-	DataClass:     velocity.DataClassRestricted,
+	Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA, compliance.FrameworkGDPR},
+	DataClass:     compliance.DataClassRestricted,
 	Owner:         "privacy",
 	Custodian:     "platform",
 	RetentionDays: 2555,
@@ -188,9 +190,11 @@ Available building blocks include:
 Go:
 
 ```go
+import "github.com/oarkflow/velocity/pkg/compliance"
+
 gdpr := velocity.NewGDPRController(db)
 
-consent := velocity.ConsentRecord{
+consent := compliance.ConsentRecord{
 	ConsentID:       "consent-123",
 	Purpose:         "treatment",
 	GrantedAt:       time.Now(),
@@ -206,6 +210,19 @@ if err != nil {
 	log.Fatal(err)
 }
 fmt.Println(ok, activeConsent.ConsentID)
+```
+
+Standalone consent manager:
+
+```go
+consents := compliance.NewConsentManager(db)
+_ = consents.GrantConsent(ctx, "patient-123", compliance.ConsentRecord{
+	Purpose:         "research",
+	GrantedAt:       time.Now(),
+	LegalBasis:      "consent",
+	ProcessingScope: []string{"analytics"},
+	Active:          true,
+})
 ```
 
 Command:
@@ -315,13 +332,13 @@ Retention Go:
 retention := velocity.NewRetentionManager(db)
 _ = retention.AddPolicy(ctx, velocity.RetentionPolicy{
 	PolicyID:        "restricted-7y",
-	DataType:        string(velocity.DataClassRestricted),
+	DataType:        string(compliance.DataClassRestricted),
 	RetentionPeriod: 7 * 365 * 24 * time.Hour,
 	DeletionMethod:  "cryptographic_erase",
 	ReviewInterval:  90 * 24 * time.Hour,
 })
 
-expired, policy, err := retention.EvaluateRetention(ctx, string(velocity.DataClassRestricted), 8*365*24*time.Hour)
+expired, policy, err := retention.EvaluateRetention(ctx, string(compliance.DataClassRestricted), 8*365*24*time.Hour)
 if err != nil {
 	log.Fatal(err)
 }
@@ -335,7 +352,7 @@ residency := velocity.NewDataResidencyManager(db)
 _ = residency.AddPolicy(ctx, &velocity.DataResidencyPolicy{
 	PathPrefix: "/patients",
 	Regions:    []string{"US"},
-	Framework:  string(velocity.FrameworkHIPAA),
+	Framework:  string(compliance.FrameworkHIPAA),
 	Enabled:    true,
 })
 
@@ -350,7 +367,7 @@ Masking and lineage Go:
 
 ```go
 masking := velocity.NewDataMaskingEngine()
-masked := masking.MaskString("alice@example.test SSN 123-45-6789", velocity.DataClassRestricted)
+masked := masking.MaskString("alice@example.test SSN 123-45-6789", compliance.DataClassRestricted)
 fmt.Println(masked)
 
 lineage := velocity.NewLineageManager(db)

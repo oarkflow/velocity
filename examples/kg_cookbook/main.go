@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 type textExtractor struct{}
@@ -19,9 +20,9 @@ func (textExtractor) Extract(content []byte, mediaType string) (string, error) {
 
 type ruleNER struct{}
 
-func (ruleNER) Extract(text string) []velocity.KGEntity {
+func (ruleNER) Extract(text string) []kg.KGEntity {
 	if strings.Contains(text, "Ada") {
-		return []velocity.KGEntity{{Surface: "Ada", Canonical: "ada lovelace", Type: "PERSON", Confidence: 0.99}}
+		return []kg.KGEntity{{Surface: "Ada", Canonical: "ada lovelace", Type: "PERSON", Confidence: 0.99}}
 	}
 	return nil
 }
@@ -53,7 +54,7 @@ func (e deterministicEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 
 type reverseReranker struct{}
 
-func (reverseReranker) Rerank(ctx context.Context, query string, hits []velocity.KGSearchHit) ([]velocity.KGSearchHit, error) {
+func (reverseReranker) Rerank(ctx context.Context, query string, hits []kg.KGSearchHit) ([]kg.KGSearchHit, error) {
 	for i, j := 0, len(hits)-1; i < j; i, j = i+1, j-1 {
 		hits[i], hits[j] = hits[j], hits[i]
 	}
@@ -70,20 +71,19 @@ func main() {
 	defer db.Close()
 
 	embedder := deterministicEmbedder{dim: 8}
-	hnsw, err := velocity.NewHNSWIndex(db, velocity.HNSWConfig{M: 8, EfConstruction: 40, EfSearch: 20, Dimension: embedder.Dimension()})
+	hnsw, err := kg.NewHNSWIndex(db, kg.HNSWConfig{M: 8, EfConstruction: 40, EfSearch: 20, Dimension: embedder.Dimension()})
 	check(err)
-	entities := velocity.NewEntityManager(db)
-	pipeline := velocity.NewKGIngestPipeline(
+	pipeline := kg.NewKGIngestPipeline(
 		db,
-		velocity.WithExtractor(textExtractor{}),
-		velocity.WithChunker(velocity.NewSlidingWindowChunker(12, 3)),
-		velocity.WithNER(ruleNER{}),
-		velocity.WithEmbedder(embedder),
-		velocity.WithHNSW(hnsw),
-		velocity.WithIngestConfig(velocity.IngestConfig{Workers: 2, BatchSize: 4, SkipDuplicate: true}),
+		kg.WithExtractor(textExtractor{}),
+		kg.WithChunker(kg.NewSlidingWindowChunker(12, 3)),
+		kg.WithNER(ruleNER{}),
+		kg.WithEmbedder(embedder),
+		kg.WithHNSW(hnsw),
+		kg.WithIngestConfig(kg.IngestConfig{Workers: 2, BatchSize: 4, SkipDuplicate: true}),
 	)
 
-	resp, err := pipeline.Ingest(ctx, &velocity.KGIngestRequest{
+	resp, err := pipeline.Ingest(ctx, &kg.KGIngestRequest{
 		Source:    "memory://ada",
 		MediaType: "text/plain",
 		Title:     "Ada Notes",
@@ -92,12 +92,12 @@ func main() {
 	})
 	check(err)
 
-	search := velocity.NewKGSearchEngine(db, hnsw, embedder, entities)
+	search := kg.NewKGSearchEngine(db, hnsw, embedder, nil)
 	search.SetReranker(reverseReranker{})
-	keyword := mustKGSearch(ctx, search, &velocity.KGSearchRequest{Query: "analytical engine", Mode: velocity.KGSearchModeKeyword, Limit: 3})
-	semantic := mustKGSearch(ctx, search, &velocity.KGSearchRequest{Query: "vector retrieval", Mode: velocity.KGSearchModeSemantic, EnableVector: true, Limit: 3})
-	hybrid := mustKGSearch(ctx, search, &velocity.KGSearchRequest{
-		Query: "search retrieval", Mode: velocity.KGSearchModeHybrid, EnableVector: true, EnableGraph: true,
+	keyword := mustKGSearch(ctx, search, &kg.KGSearchRequest{Query: "analytical engine", Mode: kg.KGSearchModeKeyword, Limit: 3})
+	semantic := mustKGSearch(ctx, search, &kg.KGSearchRequest{Query: "vector retrieval", Mode: kg.KGSearchModeSemantic, EnableVector: true, Limit: 3})
+	hybrid := mustKGSearch(ctx, search, &kg.KGSearchRequest{
+		Query: "search retrieval", Mode: kg.KGSearchModeHybrid, EnableVector: true, EnableGraph: true,
 		GraphDepth: 1, Filters: map[string]string{"topic": "computing"}, BM25Weight: 0.7, VectorWeight: 0.3, Limit: 3,
 	})
 
@@ -109,7 +109,7 @@ func main() {
 	fmt.Printf("keyword=%d semantic=%d hybrid=%d graph_nodes=%d corpus_docs=%d\n", keyword.TotalHits, semantic.TotalHits, hybrid.TotalHits, hybrid.GraphNodes, stats.Documents)
 }
 
-func mustKGSearch(ctx context.Context, engine *velocity.KGSearchEngine, req *velocity.KGSearchRequest) *velocity.KGSearchResponse {
+func mustKGSearch(ctx context.Context, engine *kg.KGSearchEngine, req *kg.KGSearchRequest) *kg.KGSearchResponse {
 	resp, err := engine.Search(ctx, req)
 	check(err)
 	return resp

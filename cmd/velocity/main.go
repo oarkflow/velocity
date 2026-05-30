@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"log"
 	"mime"
 	"net/http"
@@ -124,9 +125,9 @@ func handleCompliance(db *velocity.DB, ctx context.Context, args []string) error
 		if err != nil {
 			return err
 		}
-		dataClass := velocity.DataClassification(flags["class"])
+		dataClass := compliance.DataClassification(flags["class"])
 		if dataClass == "" {
-			dataClass = velocity.DataClassInternal
+			dataClass = compliance.DataClassInternal
 		}
 		tag := &velocity.ComplianceTag{
 			Frameworks:    frameworks,
@@ -207,29 +208,29 @@ func complianceRefFromFlags(flags map[string]string) (velocity.ComplianceResourc
 	return ref, nil
 }
 
-func parseComplianceFrameworks(raw string) ([]velocity.ComplianceFramework, error) {
+func parseComplianceFrameworks(raw string) ([]compliance.Framework, error) {
 	if raw == "" {
 		return nil, fmt.Errorf("--framework is required")
 	}
 	parts := strings.Split(raw, ",")
-	frameworks := make([]velocity.ComplianceFramework, 0, len(parts))
+	frameworks := make([]compliance.Framework, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		switch strings.ToUpper(part) {
 		case "HIPAA":
-			frameworks = append(frameworks, velocity.FrameworkHIPAA)
+			frameworks = append(frameworks, compliance.FrameworkHIPAA)
 		case "GDPR":
-			frameworks = append(frameworks, velocity.FrameworkGDPR)
+			frameworks = append(frameworks, compliance.FrameworkGDPR)
 		case "NIST", "NIST_800_53":
-			frameworks = append(frameworks, velocity.FrameworkNIST)
+			frameworks = append(frameworks, compliance.FrameworkNIST)
 		case "FIPS", "FIPS_140_2":
-			frameworks = append(frameworks, velocity.FrameworkFIPS)
+			frameworks = append(frameworks, compliance.FrameworkFIPS)
 		case "PCI", "PCI_DSS":
-			frameworks = append(frameworks, velocity.FrameworkPCIDSS)
+			frameworks = append(frameworks, compliance.FrameworkPCIDSS)
 		case "SOC2", "SOC2_TYPE2":
-			frameworks = append(frameworks, velocity.FrameworkSOC2)
+			frameworks = append(frameworks, compliance.FrameworkSOC2)
 		case "ISO27001", "ISO_27001":
-			frameworks = append(frameworks, velocity.FrameworkISO27001)
+			frameworks = append(frameworks, compliance.FrameworkISO27001)
 		default:
 			return nil, fmt.Errorf("unknown framework: %s", part)
 		}

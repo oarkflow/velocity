@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/oarkflow/convert"
+	"github.com/oarkflow/velocity/pkg/kg"
+	"github.com/oarkflow/velocity/pkg/storage"
 )
 
 // Configuration constants
@@ -61,7 +63,7 @@ type DB struct {
 	flushMu           sync.Mutex
 	compacting        atomic.Bool
 	flushing          atomic.Bool // Prevent concurrent flushes
-	cache             *LRUCache
+	cache             *storage.LRUCache
 	crypto            *CryptoProvider
 
 	complianceTagManager *ComplianceTagManager
@@ -106,7 +108,7 @@ type DB struct {
 	skipCloseFlush bool // Skip clean-close memtable flush and rely on WAL replay
 
 	// Knowledge Graph engine
-	kg          *KnowledgeGraphEngine
+	kg          *kg.KnowledgeGraphEngine
 	kgAutoIndex *KGAutoIndexer
 }
 
@@ -203,7 +205,7 @@ type Config struct {
 	SQLQueryCacheMaxRows        int
 
 	KnowledgeGraphAutoIndexEnabled       bool
-	KnowledgeGraphAutoIndexResources     []KGResourceType
+	KnowledgeGraphAutoIndexResources     []kg.ResourceType
 	KnowledgeGraphAutoIndexSecretValues  bool
 	KnowledgeGraphAutoIndexExisting      bool
 	KnowledgeGraphAutoIndexAsync         bool
@@ -1727,18 +1729,18 @@ func (db *DB) compactLevel(level int) {
 }
 
 // KnowledgeGraph returns the Knowledge Graph engine, creating it on first call.
-func (db *DB) KnowledgeGraph(config ...KGConfig) *KnowledgeGraphEngine {
+func (db *DB) KnowledgeGraph(config ...kg.KGConfig) *kg.KnowledgeGraphEngine {
 	if db.kg != nil {
 		return db.kg
 	}
-	cfg := KGConfig{}
+	cfg := kg.KGConfig{}
 	if len(config) > 0 {
 		cfg = config[0]
 	}
-	kg, err := NewKnowledgeGraphEngine(db, cfg)
+	engine, err := kg.NewKnowledgeGraphEngine(db, cfg, kgEntityAdapter{db: db})
 	if err != nil {
 		return nil
 	}
-	db.kg = kg
+	db.kg = engine
 	return db.kg
 }

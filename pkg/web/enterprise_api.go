@@ -7,6 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/auth"
 )
 
 // MetricsRenderer renders metrics in Prometheus exposition format.
@@ -31,7 +32,7 @@ type LifecycleService interface {
 // EnterpriseAPI provides enterprise-grade HTTP endpoints for IAM, auth,
 // STS, metrics, notifications, lifecycle, integrity, and cluster management.
 type EnterpriseAPI struct {
-	iam           *velocity.IAMPolicyEngine
+	iam           *auth.IAMPolicyEngine
 	oidc          *velocity.OIDCProvider
 	ldap          *velocity.LDAPProvider
 	sts           *velocity.STSService
@@ -44,7 +45,7 @@ type EnterpriseAPI struct {
 
 // NewEnterpriseAPI creates a new EnterpriseAPI with all enterprise subsystems.
 func NewEnterpriseAPI(
-	iam *velocity.IAMPolicyEngine,
+	iam *auth.IAMPolicyEngine,
 	oidc *velocity.OIDCProvider,
 	ldap *velocity.LDAPProvider,
 	sts *velocity.STSService,
@@ -138,7 +139,7 @@ func (e *EnterpriseAPI) handleCreatePolicy(c fiber.Ctx) error {
 		return jsonError(c, fiber.StatusServiceUnavailable, "IAM engine not configured")
 	}
 
-	var policy velocity.IAMPolicy
+	var policy auth.IAMPolicy
 	if err := c.Bind().Body(&policy); err != nil {
 		return jsonError(c, fiber.StatusBadRequest, "invalid request body")
 	}
@@ -213,8 +214,8 @@ func (e *EnterpriseAPI) handleAttachPolicy(c fiber.Ctx) error {
 	}
 
 	var req struct {
-		Type       string `json:"type"`        // "user" or "group"
-		ID         string `json:"id"`          // user ID or group ID
+		Type       string `json:"type"` // "user" or "group"
+		ID         string `json:"id"`   // user ID or group ID
 		PolicyName string `json:"policy_name"`
 	}
 	if err := c.Bind().Body(&req); err != nil {
@@ -276,7 +277,7 @@ func (e *EnterpriseAPI) handleEvaluateAccess(c fiber.Ctx) error {
 		return jsonError(c, fiber.StatusServiceUnavailable, "IAM engine not configured")
 	}
 
-	var req velocity.IAMEvalRequest
+	var req auth.IAMEvalRequest
 	if err := c.Bind().Body(&req); err != nil {
 		return jsonError(c, fiber.StatusBadRequest, "invalid request body")
 	}
@@ -395,7 +396,7 @@ func (e *EnterpriseAPI) handleAssumeRole(c fiber.Ctx) error {
 	}
 
 	var req struct {
-		UserID string                  `json:"user_id"`
+		UserID string                   `json:"user_id"`
 		Input  velocity.AssumeRoleInput `json:"input"`
 	}
 	if err := c.Bind().Body(&req); err != nil {
@@ -619,10 +620,10 @@ func (e *EnterpriseAPI) handleClusterStatus(c fiber.Ctx) error {
 	healthy := e.cluster.IsHealthy()
 
 	return jsonOK(c, fiber.Map{
-		"healthy":      healthy,
-		"node_count":   nodeCount,
-		"local_node":   local,
-		"timestamp":    time.Now().UTC(),
+		"healthy":    healthy,
+		"node_count": nodeCount,
+		"local_node": local,
+		"timestamp":  time.Now().UTC(),
 	})
 }
 

@@ -5,38 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"sync"
 	"time"
-)
-
-// ComplianceFramework identifies regulatory frameworks
-type ComplianceFramework string
-
-const (
-	FrameworkHIPAA    ComplianceFramework = "HIPAA"
-	FrameworkGDPR     ComplianceFramework = "GDPR"
-	FrameworkNIST     ComplianceFramework = "NIST_800_53"
-	FrameworkFIPS     ComplianceFramework = "FIPS_140_2"
-	FrameworkPCIDSS   ComplianceFramework = "PCI_DSS"
-	FrameworkSOC2     ComplianceFramework = "SOC2_TYPE2"
-	FrameworkISO27001 ComplianceFramework = "ISO_27001"
-)
-
-// DataClassification defines sensitivity levels
-type DataClassification string
-
-const (
-	DataClassPublic       DataClassification = "public"
-	DataClassInternal     DataClassification = "internal"
-	DataClassConfidential DataClassification = "confidential"
-	DataClassRestricted   DataClassification = "restricted" // PII, PHI
-	DataClassTopSecret    DataClassification = "top_secret" // Government
 )
 
 // ComplianceManager manages regulatory compliance
 type ComplianceManager struct {
 	db         *DB
-	frameworks map[ComplianceFramework]*FrameworkConfig
+	frameworks map[compliance.Framework]*FrameworkConfig
 	gdpr       *GDPRController
 	hipaa      *HIPAAController
 	nist       *NISTController
@@ -46,13 +23,13 @@ type ComplianceManager struct {
 
 // FrameworkConfig defines framework-specific configuration
 type FrameworkConfig struct {
-	Framework       ComplianceFramework `json:"framework"`
-	Enabled         bool                `json:"enabled"`
-	Controls        []ComplianceControl `json:"controls"`
-	AuditFreq       time.Duration       `json:"audit_frequency"`
-	LastAudit       time.Time           `json:"last_audit"`
-	NextAudit       time.Time           `json:"next_audit"`
-	ComplianceScore float64             `json:"compliance_score"` // 0-100
+	Framework       compliance.Framework `json:"framework"`
+	Enabled         bool                 `json:"enabled"`
+	Controls        []ComplianceControl  `json:"controls"`
+	AuditFreq       time.Duration        `json:"audit_frequency"`
+	LastAudit       time.Time            `json:"last_audit"`
+	NextAudit       time.Time            `json:"next_audit"`
+	ComplianceScore float64              `json:"compliance_score"` // 0-100
 }
 
 // ComplianceControl represents a specific control requirement
@@ -73,7 +50,7 @@ type ComplianceControl struct {
 func NewComplianceManager(db *DB) *ComplianceManager {
 	cm := &ComplianceManager{
 		db:         db,
-		frameworks: make(map[ComplianceFramework]*FrameworkConfig),
+		frameworks: make(map[compliance.Framework]*FrameworkConfig),
 		gdpr:       NewGDPRController(db),
 		hipaa:      NewHIPAAController(db),
 		nist:       NewNISTController(db),
@@ -89,8 +66,8 @@ func NewComplianceManager(db *DB) *ComplianceManager {
 // initializeFrameworks sets up compliance frameworks
 func (cm *ComplianceManager) initializeFrameworks() {
 	// GDPR Framework
-	cm.frameworks[FrameworkGDPR] = &FrameworkConfig{
-		Framework:       FrameworkGDPR,
+	cm.frameworks[compliance.FrameworkGDPR] = &FrameworkConfig{
+		Framework:       compliance.FrameworkGDPR,
 		Enabled:         true,
 		Controls:        cm.getGDPRControls(),
 		AuditFreq:       30 * 24 * time.Hour, // Monthly
@@ -98,8 +75,8 @@ func (cm *ComplianceManager) initializeFrameworks() {
 	}
 
 	// HIPAA Framework
-	cm.frameworks[FrameworkHIPAA] = &FrameworkConfig{
-		Framework:       FrameworkHIPAA,
+	cm.frameworks[compliance.FrameworkHIPAA] = &FrameworkConfig{
+		Framework:       compliance.FrameworkHIPAA,
 		Enabled:         true,
 		Controls:        cm.getHIPAAControls(),
 		AuditFreq:       90 * 24 * time.Hour, // Quarterly
@@ -107,8 +84,8 @@ func (cm *ComplianceManager) initializeFrameworks() {
 	}
 
 	// NIST 800-53 Framework
-	cm.frameworks[FrameworkNIST] = &FrameworkConfig{
-		Framework:       FrameworkNIST,
+	cm.frameworks[compliance.FrameworkNIST] = &FrameworkConfig{
+		Framework:       compliance.FrameworkNIST,
 		Enabled:         true,
 		Controls:        cm.getNISTControls(),
 		AuditFreq:       365 * 24 * time.Hour, // Annually
@@ -124,7 +101,7 @@ func (cm *ComplianceManager) initializeFrameworks() {
 type GDPRController struct {
 	db            *DB
 	dataSubjects  map[string]*GDPRDataSubject
-	consentMgr    *ConsentManager
+	consentMgr    *compliance.ConsentManager
 	retentionMgr  *RetentionManager
 	breachHandler *BreachNotificationSystem
 	mu            sync.RWMutex
@@ -135,7 +112,7 @@ func NewGDPRController(db *DB) *GDPRController {
 	return &GDPRController{
 		db:            db,
 		dataSubjects:  make(map[string]*GDPRDataSubject),
-		consentMgr:    NewConsentManager(db),
+		consentMgr:    compliance.NewConsentManager(db),
 		retentionMgr:  NewRetentionManager(db),
 		breachHandler: NewBreachNotificationSystem(db),
 	}
@@ -143,27 +120,15 @@ func NewGDPRController(db *DB) *GDPRController {
 
 // GDPRDataSubject represents a data subject (individual)
 type GDPRDataSubject struct {
-	SubjectID         string                 `json:"subject_id"`
-	Email             string                 `json:"email"`
-	ConsentRecords    []ConsentRecord        `json:"consent_records"`
-	DataProcessing    []ProcessingActivity   `json:"data_processing"`
-	RetentionPolicies []RetentionPolicy      `json:"retention_policies"`
-	RightRequests     []DataSubjectRequest   `json:"right_requests"`
-	CreatedAt         time.Time              `json:"created_at"`
-	UpdatedAt         time.Time              `json:"updated_at"`
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
-}
-
-// ConsentRecord tracks consent for data processing
-type ConsentRecord struct {
-	ConsentID       string     `json:"consent_id"`
-	Purpose         string     `json:"purpose"`
-	GrantedAt       time.Time  `json:"granted_at"`
-	WithdrawnAt     *time.Time `json:"withdrawn_at,omitempty"`
-	LegalBasis      string     `json:"legal_basis"` // consent, contract, legal_obligation, vital_interests, public_task, legitimate_interests
-	ProcessingScope []string   `json:"processing_scope"`
-	Version         string     `json:"version"`
-	Active          bool       `json:"active"`
+	SubjectID         string                     `json:"subject_id"`
+	Email             string                     `json:"email"`
+	ConsentRecords    []compliance.ConsentRecord `json:"consent_records"`
+	DataProcessing    []ProcessingActivity       `json:"data_processing"`
+	RetentionPolicies []RetentionPolicy          `json:"retention_policies"`
+	RightRequests     []DataSubjectRequest       `json:"right_requests"`
+	CreatedAt         time.Time                  `json:"created_at"`
+	UpdatedAt         time.Time                  `json:"updated_at"`
+	Metadata          map[string]interface{}     `json:"metadata,omitempty"`
 }
 
 // ProcessingActivity records data processing operations
@@ -299,12 +264,12 @@ func (gc *GDPRController) RequestRightToPortability(ctx context.Context, subject
 
 // GDPRDataExport represents exported data for a subject
 type GDPRDataExport struct {
-	SubjectID      string                 `json:"subject_id"`
-	ExportedAt     time.Time              `json:"exported_at"`
-	DataSubject    *GDPRDataSubject       `json:"data_subject"`
-	PersonalData   map[string]interface{} `json:"personal_data"`
-	ProcessingLogs []ProcessingActivity   `json:"processing_logs"`
-	ConsentHistory []ConsentRecord        `json:"consent_history"`
+	SubjectID      string                     `json:"subject_id"`
+	ExportedAt     time.Time                  `json:"exported_at"`
+	DataSubject    *GDPRDataSubject           `json:"data_subject"`
+	PersonalData   map[string]interface{}     `json:"personal_data"`
+	ProcessingLogs []ProcessingActivity       `json:"processing_logs"`
+	ConsentHistory []compliance.ConsentRecord `json:"consent_history"`
 }
 
 // Helper methods
@@ -511,14 +476,14 @@ func NewPolicyEngine(db *DB) *PolicyEngine {
 
 // CompliancePolicy defines a compliance policy
 type CompliancePolicy struct {
-	PolicyID        string              `json:"policy_id"`
-	Name            string              `json:"name"`
-	Framework       ComplianceFramework `json:"framework"`
-	Enabled         bool                `json:"enabled"`
-	Rules           []PolicyRule        `json:"rules"`
-	EnforcementMode string              `json:"enforcement_mode"` // enforce, monitor
-	CreatedAt       time.Time           `json:"created_at"`
-	UpdatedAt       time.Time           `json:"updated_at"`
+	PolicyID        string               `json:"policy_id"`
+	Name            string               `json:"name"`
+	Framework       compliance.Framework `json:"framework"`
+	Enabled         bool                 `json:"enabled"`
+	Rules           []PolicyRule         `json:"rules"`
+	EnforcementMode string               `json:"enforcement_mode"` // enforce, monitor
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
 }
 
 // PolicyRule defines a specific policy rule
@@ -531,11 +496,9 @@ type PolicyRule struct {
 }
 
 // Retention and breach notification systems
-type ConsentManager struct{ db *DB }
 type RetentionManager struct{ db *DB }
 type BreachNotificationSystem struct{ db *DB }
 
-func NewConsentManager(db *DB) *ConsentManager     { return &ConsentManager{db: db} }
 func NewRetentionManager(db *DB) *RetentionManager { return &RetentionManager{db: db} }
 func NewBreachNotificationSystem(db *DB) *BreachNotificationSystem {
 	return &BreachNotificationSystem{db: db}

@@ -16,8 +16,8 @@ import (
 // BackupSignature provides tamper-proof verification
 type BackupSignature struct {
 	Algorithm   string    `json:"algorithm"`
-	Hash        string    `json:"hash"`         // SHA-512 of content
-	HMAC        string    `json:"hmac"`         // HMAC-SHA512 signature
+	Hash        string    `json:"hash"` // SHA-512 of content
+	HMAC        string    `json:"hmac"` // HMAC-SHA512 signature
 	SignedAt    time.Time `json:"signed_at"`
 	SignedBy    string    `json:"signed_by"`
 	Fingerprint string    `json:"fingerprint"` // Device/system fingerprint
@@ -26,9 +26,9 @@ type BackupSignature struct {
 
 // AuditRecord tracks all backup/restore operations
 type AuditRecord struct {
-	ID          string                 `json:"id"`           // Unique operation ID
-	Operation   string                 `json:"operation"`    // backup, restore, export, import
-	Type        string                 `json:"type"`         // full, partial, selective
+	ID          string                 `json:"id"`        // Unique operation ID
+	Operation   string                 `json:"operation"` // backup, restore, export, import
+	Type        string                 `json:"type"`      // full, partial, selective
 	User        string                 `json:"user"`
 	Timestamp   time.Time              `json:"timestamp"`
 	FilePath    string                 `json:"file_path"`

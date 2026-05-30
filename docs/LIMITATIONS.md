@@ -10,8 +10,9 @@ This page records important source-discovered caveats.
 
 ## CLI Surface Mismatch
 
-- `cmd/velocity` is a small manual CLI for data, secret, object, and envelope operations.
+- `cmd/velocity` is a small manual CLI for data, secret, object, envelope, and minimal compliance tag/get/check operations.
 - `pkg/cli` contains a richer command registry and command builders for backup/data/envelope/folder/object/secret, but this framework is not evidently connected to `cmd/velocity`.
+- `pkg/cli` does not currently include a compliance command builder even though `cmd/velocity` has a manual compliance command family.
 - Documentation should treat `pkg/cli` as a framework/library surface until a binary entrypoint wires it in.
 
 ## HTTP/API Caveats
@@ -40,4 +41,3 @@ Many enterprise, compliance, metrics, notification, lifecycle, cluster, replicat
 ## Documentation Boundary
 
 This docs set reflects the current source tree. It does not claim external certification for compliance frameworks, S3 completeness, SQL standard completeness, or production readiness in every deployment shape.
-

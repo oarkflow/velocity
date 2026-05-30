@@ -9,11 +9,14 @@ Go apps
   -> velocity.DB
       -> memtable + WAL + SSTables + cache + crypto
       -> search indexes
-      -> object/envelope/secret/compliance/KG managers
+      -> object/envelope/secret/compliance/KG integrations
 
 database/sql
   -> pkg/sqldriver
       -> velocity.DB
+
+auth/compliance/S3/KG packages
+  -> small interfaces satisfied by velocity.DB
 
 HTTP/TCP/S3
   -> pkg/web
@@ -49,11 +52,22 @@ Search is maintained alongside KV writes when enabled or when using indexed APIs
 
 `pkg/sqldriver` registers driver name `velocity`. It implements connections, statements, transactions, execution, and query rows over the embedded DB. The executor parses SQL with `github.com/oarkflow/sqlparser`, stores table metadata and rows in Velocity, and layers constraint enforcement, indexes, row locks, and query cache behavior.
 
+## Package Boundaries
+
+The root package owns `DB` methods and engine internals because Go requires methods on `*DB` to be declared in the root package. Feature managers that can work through narrow interfaces live in subpackages:
+
+- `pkg/auth`: IAM, RBAC, MFA, access reviews, and segregation-of-duties.
+- `pkg/compliance`: shared framework/classification types and consent management.
+- `pkg/core`: reusable core primitives such as consistent hashing.
+- `pkg/kg`: knowledge graph implementation and query/search internals.
+- `pkg/s3`: S3/bucket managers, bucket versioning, credentials, SigV4, multipart, presigning, and helper types.
+- `pkg/storage`: storage helpers such as cache.
+
 ## Object Storage
 
 Native object storage stores object metadata and content beneath DB-managed paths and object directories. It supports stream operations, version metadata, ACLs, tags, custom metadata, folders, thumbnails, hard delete, repair, object lock, and retention.
 
-The S3 layer maps AWS-style bucket/object operations onto the same underlying object and bucket managers.
+The `pkg/s3` layer maps AWS-style bucket/object operations onto the same underlying object store through interfaces implemented by `DB`.
 
 ## Web Server
 
@@ -61,11 +75,10 @@ The S3 layer maps AWS-style bucket/object operations onto the same underlying ob
 
 ## Enterprise And Governance
 
-Enterprise managers include IAM policies, OIDC/LDAP identity providers, STS, metrics, notifications, lifecycle/tiering, integrity, cluster state, replication, load balancing, and decommissioning.
+Enterprise managers include IAM policies and RBAC in `pkg/auth`, plus OIDC/LDAP identity providers, STS, metrics, notifications, lifecycle/tiering, integrity, cluster state, replication, load balancing, and decommissioning.
 
-Compliance managers handle tagging, classification, consent, retention, legal holds, reports, violations, data residency, data masking, breach notifications, and audit trails.
+Compliance managers handle tagging, classification, consent, retention, legal holds, reports, violations, data residency, data masking, breach notifications, and audit trails. Consent is package-owned in `pkg/compliance`; retention enforcement remains root-owned because it uses internal object paths and compliance tag state.
 
 ## Knowledge Graph
 
 The KG subsystem extracts content, chunks documents, runs NER, resolves entities, stores entity relations, indexes vectors through HNSW, and exposes search/analytics/graph APIs.
-

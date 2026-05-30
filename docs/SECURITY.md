@@ -34,15 +34,28 @@ HTTP APIs use JWT bearer auth after `POST /auth/login`. Tokens require a non-emp
 
 Additional security subsystems include:
 
-- RBAC roles and permissions.
-- IAM policy engine.
+- RBAC roles and permissions in `pkg/auth`.
+- IAM policy engine in `pkg/auth`.
 - STS temporary credentials.
 - OIDC provider.
 - LDAP provider.
-- MFA manager with TOTP/HOTP and backup codes.
+- MFA manager with TOTP/HOTP and backup codes in `pkg/auth`.
 - Break-glass manager.
-- Segregation of duties manager.
-- Access reviews.
+- Segregation of duties manager in `pkg/auth`.
+- Access reviews in `pkg/auth`.
+
+Go:
+
+```go
+import "github.com/oarkflow/velocity/pkg/auth"
+
+rbac := auth.NewRBACManager(db)
+iam := auth.NewIAMPolicyEngine(db)
+mfa := auth.NewMFAManager(db)
+_ = rbac
+_ = iam
+_ = mfa
+```
 
 ## Object Access
 
@@ -72,4 +85,3 @@ Security-relevant audit features include:
 ## Test-Backed Security Caveats
 
 The repo contains pentest-style tests in `pkg/web/pentest_security_test.go` that identify high-risk behaviors such as default JWT secret concerns, object version enumeration/IDOR risks, ACL update IDOR risks, route shadowing concerns, missing username claim handling, and search abuse surfaces. Treat [Limitations](LIMITATIONS.md) as required reading before exposing the server in a hostile environment.
-

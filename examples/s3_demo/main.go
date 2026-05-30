@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/auth"
+	"github.com/oarkflow/velocity/pkg/core"
+	"github.com/oarkflow/velocity/pkg/s3"
 	"log"
 	"os"
 	"strings"
@@ -36,7 +39,7 @@ func main() {
 	// =====================================================================
 	fmt.Println("\n=== S3 Credentials ===")
 
-	credStore := velocity.NewS3CredentialStore(db)
+	credStore := s3.NewS3CredentialStore(db, db)
 
 	cred, err := credStore.GenerateCredentials("demo-user", "Demo access key")
 	if err != nil {
@@ -66,7 +69,7 @@ func main() {
 	// =====================================================================
 	fmt.Println("\n=== Bucket Operations ===")
 
-	bm := velocity.NewBucketManager(db)
+	bm := s3.NewBucketManager(db, db)
 
 	// Create buckets
 	if err := bm.CreateBucket("my-data-bucket", "demo-user", "us-east-1"); err != nil {
@@ -164,7 +167,7 @@ func main() {
 	fmt.Printf("Object tags: %v\n", tags)
 
 	// Compute ETag
-	etag := velocity.ComputeETag(objData)
+	etag := s3.ComputeETag(objData)
 	fmt.Printf("ETag: %s\n", etag)
 
 	// =====================================================================
@@ -172,7 +175,7 @@ func main() {
 	// =====================================================================
 	fmt.Println("\n=== Multipart Upload ===")
 
-	mm := velocity.NewMultipartManager(db)
+	mm := s3.NewMultipartManager(db)
 
 	// Create multipart upload
 	upload, err := mm.CreateMultipartUpload("my-data-bucket", "large-file.bin", "application/octet-stream", "demo-user", map[string]string{"upload-type": "demo"})
@@ -212,7 +215,7 @@ func main() {
 	fmt.Printf("Listed %d parts for upload\n", len(parts))
 
 	// Complete multipart upload
-	completeParts := []velocity.CompletePart{
+	completeParts := []s3.CompletePart{
 		{PartNumber: 1, ETag: part1.ETag},
 		{PartNumber: 2, ETag: part2.ETag},
 		{PartNumber: 3, ETag: part3.ETag},
@@ -321,15 +324,15 @@ func main() {
 	// =====================================================================
 	fmt.Println("\n=== IAM Policies ===")
 
-	iam := velocity.NewIAMPolicyEngine(db)
+	iam := auth.NewIAMPolicyEngine(db)
 
 	// Create an Allow policy
-	allowPolicy := &velocity.IAMPolicy{
+	allowPolicy := &auth.IAMPolicy{
 		Name: "s3-read-policy",
-		Statements: []velocity.IAMStatement{
+		Statements: []auth.IAMStatement{
 			{
 				Sid:       "AllowGetObject",
-				Effect:    velocity.IAMEffectAllow,
+				Effect:    auth.IAMEffectAllow,
 				Principal: []string{"demo-user"},
 				Action:    []string{"s3:GetObject", "s3:ListBucket"},
 				Resource:  []string{"arn:velocity:s3:::my-data-bucket/*"},
@@ -343,12 +346,12 @@ func main() {
 	fmt.Println("Created IAM allow policy: s3-read-policy")
 
 	// Create a Deny policy
-	denyPolicy := &velocity.IAMPolicy{
+	denyPolicy := &auth.IAMPolicy{
 		Name: "deny-delete-policy",
-		Statements: []velocity.IAMStatement{
+		Statements: []auth.IAMStatement{
 			{
 				Sid:       "DenyDeleteObject",
-				Effect:    velocity.IAMEffectDeny,
+				Effect:    auth.IAMEffectDeny,
 				Principal: []string{"demo-user"},
 				Action:    []string{"s3:DeleteObject"},
 				Resource:  []string{"arn:velocity:s3:::my-data-bucket/*"},
@@ -377,7 +380,7 @@ func main() {
 	fmt.Printf("Policies for demo-user: %v\n", userPolicies)
 
 	// Evaluate access - GetObject (should be allowed)
-	getResult := iam.EvaluateAccess(&velocity.IAMEvalRequest{
+	getResult := iam.EvaluateAccess(&auth.IAMEvalRequest{
 		Principal: "demo-user",
 		Action:    "s3:GetObject",
 		Resource:  "arn:velocity:s3:::my-data-bucket/documents/hello.txt",
@@ -385,7 +388,7 @@ func main() {
 	fmt.Printf("Evaluate s3:GetObject: allowed=%v, reason=%s\n", getResult.Allowed, getResult.Reason)
 
 	// Evaluate access - DeleteObject (should be denied)
-	deleteResult := iam.EvaluateAccess(&velocity.IAMEvalRequest{
+	deleteResult := iam.EvaluateAccess(&auth.IAMEvalRequest{
 		Principal: "demo-user",
 		Action:    "s3:DeleteObject",
 		Resource:  "arn:velocity:s3:::my-data-bucket/documents/hello.txt",
@@ -394,7 +397,7 @@ func main() {
 		deleteResult.Allowed, deleteResult.ExplicitDeny, deleteResult.Reason)
 
 	// Evaluate access - PutObject (should be denied - no matching policy)
-	putResult := iam.EvaluateAccess(&velocity.IAMEvalRequest{
+	putResult := iam.EvaluateAccess(&auth.IAMEvalRequest{
 		Principal: "demo-user",
 		Action:    "s3:PutObject",
 		Resource:  "arn:velocity:s3:::my-data-bucket/documents/hello.txt",
@@ -461,7 +464,7 @@ func main() {
 	// =====================================================================
 	fmt.Println("\n=== Consistent Hash Ring ===")
 
-	ring := velocity.NewConsistentHashRing(150)
+	ring := core.NewConsistentHashRing(150)
 
 	// Add nodes
 	ring.AddNode("node-1")
@@ -593,7 +596,7 @@ func main() {
 	// =====================================================================
 	fmt.Println("\n=== Presigned URLs ===")
 
-	presigner := velocity.NewPresignedURLGenerator(credStore, "us-east-1", "http://localhost:8080")
+	presigner := s3.NewPresignedURLGenerator(credStore, "us-east-1", "http://localhost:8080")
 
 	// Generate presigned GET URL
 	getURL, err := presigner.GeneratePresignedGetURL(cred.AccessKeyID, "my-data-bucket", "documents/hello.txt", 15*time.Minute)

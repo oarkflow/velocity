@@ -10,12 +10,13 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func mai1n() {
+func main() {
 	// Initialize database
 	db, err := velocity.NewWithConfig(velocity.Config{
-		Path: "./folder_demo_db",
+		Path:          "./folder_demo_db",
+		EncryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.MasterKeyConfig{
-			Source: velocity.UserDefined,
+			Source: velocity.SystemFile,
 		},
 		MaxUploadSize: 100 * 1024 * 1024,
 	})

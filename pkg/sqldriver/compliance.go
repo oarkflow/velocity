@@ -3,6 +3,7 @@ package sqldriver
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"strings"
 	"time"
 
@@ -77,7 +78,7 @@ func (e *ExecutorV2) maskSQLRowForCompliance(table string, row Row, context Row,
 			continue
 		}
 		class := e.sqlColumnClass(ctm, table, column, context)
-		if !velocity.DataClassAtLeast(class, velocity.DataClassConfidential) {
+		if !velocity.DataClassAtLeast(class, compliance.DataClassConfidential) {
 			continue
 		}
 		out[column] = ctm.MaskStringForClass(fmt.Sprint(value), class)
@@ -85,8 +86,8 @@ func (e *ExecutorV2) maskSQLRowForCompliance(table string, row Row, context Row,
 	return out
 }
 
-func (e *ExecutorV2) sqlColumnClass(ctm *velocity.ComplianceTagManager, table, column string, row Row) velocity.DataClassification {
-	class := velocity.DataClassPublic
+func (e *ExecutorV2) sqlColumnClass(ctm *velocity.ComplianceTagManager, table, column string, row Row) compliance.DataClassification {
+	class := compliance.DataClassPublic
 	refs := []velocity.ComplianceResourceRef{
 		{Type: velocity.ComplianceResourceSQLTable, SQLTable: table},
 		{Type: velocity.ComplianceResourceSQLColumn, SQLTable: table, SQLColumn: column},

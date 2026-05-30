@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"strings"
 	"sync"
 	"time"
@@ -11,27 +12,27 @@ import (
 
 // ComplianceViolation represents a compliance rule violation
 type ComplianceViolation struct {
-	ViolationID    string    `json:"violation_id"`
-	Timestamp      time.Time `json:"timestamp"`
-	Actor          string    `json:"actor"`
-	ActorRole      string    `json:"actor_role"`
-	Path           string    `json:"path"`
-	Operation      string    `json:"operation"`
-	Rules          []string  `json:"rules"`           // Violated rules
-	Frameworks     []string  `json:"frameworks"`      // Affected frameworks
-	Severity       string    `json:"severity"`        // critical, high, medium, low
-	DataClass      string    `json:"data_class"`      // Data classification
-	IPAddress      string    `json:"ip_address"`
-	MFAStatus      string    `json:"mfa_status"`      // verified, not_verified, not_required
-	EncryptionUsed bool      `json:"encryption_used"`
-	Resolved       bool      `json:"resolved"`
+	ViolationID    string     `json:"violation_id"`
+	Timestamp      time.Time  `json:"timestamp"`
+	Actor          string     `json:"actor"`
+	ActorRole      string     `json:"actor_role"`
+	Path           string     `json:"path"`
+	Operation      string     `json:"operation"`
+	Rules          []string   `json:"rules"`      // Violated rules
+	Frameworks     []string   `json:"frameworks"` // Affected frameworks
+	Severity       string     `json:"severity"`   // critical, high, medium, low
+	DataClass      string     `json:"data_class"` // Data classification
+	IPAddress      string     `json:"ip_address"`
+	MFAStatus      string     `json:"mfa_status"` // verified, not_verified, not_required
+	EncryptionUsed bool       `json:"encryption_used"`
+	Resolved       bool       `json:"resolved"`
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
-	ResolvedBy     string    `json:"resolved_by,omitempty"`
-	ResolutionNote string    `json:"resolution_note,omitempty"`
-	Impact         string    `json:"impact"`          // Description of impact
-	Remediation    string    `json:"remediation"`     // Recommended remediation
-	ReportedToSOC  bool      `json:"reported_to_soc"` // Escalated to security team
-	TicketID       string    `json:"ticket_id,omitempty"` // External ticket reference
+	ResolvedBy     string     `json:"resolved_by,omitempty"`
+	ResolutionNote string     `json:"resolution_note,omitempty"`
+	Impact         string     `json:"impact"`              // Description of impact
+	Remediation    string     `json:"remediation"`         // Recommended remediation
+	ReportedToSOC  bool       `json:"reported_to_soc"`     // Escalated to security team
+	TicketID       string     `json:"ticket_id,omitempty"` // External ticket reference
 }
 
 // ViolationsManager manages compliance violations
@@ -248,12 +249,12 @@ func (vm *ViolationsManager) GetViolationStats(ctx context.Context, filter *Viol
 	}
 
 	stats := &ViolationStats{
-		Total:          len(violations),
-		BySeverity:     make(map[string]int),
-		ByActor:        make(map[string]int),
-		ByFramework:    make(map[string]int),
-		ByDataClass:    make(map[string]int),
-		TopViolators:   make([]ActorViolation, 0),
+		Total:           len(violations),
+		BySeverity:      make(map[string]int),
+		ByActor:         make(map[string]int),
+		ByFramework:     make(map[string]int),
+		ByDataClass:     make(map[string]int),
+		TopViolators:    make([]ActorViolation, 0),
 		UnresolvedCount: 0,
 	}
 
@@ -411,23 +412,23 @@ func (vm *ViolationsManager) ExportViolations(filter *ViolationFilter) ([]byte, 
 	return json.MarshalIndent(violations, "", "  ")
 }
 
-func frameworksToCompliance(frameworks []string) []ComplianceFramework {
-	result := make([]ComplianceFramework, 0, len(frameworks))
+func frameworksToCompliance(frameworks []string) []compliance.Framework {
+	result := make([]compliance.Framework, 0, len(frameworks))
 	for _, fw := range frameworks {
-		result = append(result, ComplianceFramework(fw))
+		result = append(result, compliance.Framework(fw))
 	}
 	return result
 }
 
 // ViolationFilter defines criteria for filtering violations
 type ViolationFilter struct {
-	Actor      string
-	Severity   string
-	Framework  string
-	Resolved   *bool
-	StartTime  time.Time
-	EndTime    time.Time
-	DataClass  string
+	Actor     string
+	Severity  string
+	Framework string
+	Resolved  *bool
+	StartTime time.Time
+	EndTime   time.Time
+	DataClass string
 }
 
 // ViolationStats provides statistics about violations

@@ -3,6 +3,7 @@ package sqldriver
 import (
 	"context"
 	"database/sql"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,8 +40,8 @@ func TestSQLComplianceTableAndSchemaTagsBlockWrites(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openComplianceSQLDB(t, "table_block", func(ctm *velocity.ComplianceTagManager) {
 		if err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLTable, SQLTable: "patients"}, &velocity.ComplianceTag{
-			Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-			DataClass:     velocity.DataClassRestricted,
+			Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+			DataClass:     compliance.DataClassRestricted,
 			EncryptionReq: true,
 			CreatedBy:     "test",
 		}); err != nil {
@@ -56,8 +57,8 @@ func TestSQLComplianceTableAndSchemaTagsBlockWrites(t *testing.T) {
 
 	db2, _ := openComplianceSQLDB(t, "schema_block", func(ctm *velocity.ComplianceTagManager) {
 		if err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLSchema, SQLSchema: "main"}, &velocity.ComplianceTag{
-			Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-			DataClass:     velocity.DataClassRestricted,
+			Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+			DataClass:     compliance.DataClassRestricted,
 			EncryptionReq: true,
 			CreatedBy:     "test",
 		}); err != nil {
@@ -76,8 +77,8 @@ func TestSQLComplianceColumnMaskAndBlock(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openComplianceSQLDB(t, "column_mask", func(ctm *velocity.ComplianceTagManager) {
 		if err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLColumn, SQLTable: "patients", SQLColumn: "ssn"}, &velocity.ComplianceTag{
-			Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-			DataClass:  velocity.DataClassRestricted,
+			Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+			DataClass:  compliance.DataClassRestricted,
 			CreatedBy:  "test",
 		}); err != nil {
 			t.Fatalf("tag column: %v", err)
@@ -99,8 +100,8 @@ func TestSQLComplianceColumnMaskAndBlock(t *testing.T) {
 
 	blocked, _ := openComplianceSQLDB(t, "column_block", func(ctm *velocity.ComplianceTagManager) {
 		if err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLColumn, SQLTable: "cards", SQLColumn: "pan"}, &velocity.ComplianceTag{
-			Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-			DataClass:     velocity.DataClassRestricted,
+			Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+			DataClass:     compliance.DataClassRestricted,
 			EncryptionReq: true,
 			CreatedBy:     "test",
 		}); err != nil {
@@ -119,8 +120,8 @@ func TestSQLComplianceRowTagMasksSelectedValues(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openComplianceSQLDB(t, "row_mask", func(ctm *velocity.ComplianceTagManager) {
 		if err := ctm.TagResource(ctx, velocity.ComplianceResourceRef{Type: velocity.ComplianceResourceSQLRow, SQLTable: "patients", SQLRowKey: "1"}, &velocity.ComplianceTag{
-			Frameworks: []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-			DataClass:  velocity.DataClassConfidential,
+			Frameworks: []compliance.Framework{compliance.FrameworkSOC2},
+			DataClass:  compliance.DataClassConfidential,
 			CreatedBy:  "test",
 		}); err != nil {
 			t.Fatalf("tag row: %v", err)

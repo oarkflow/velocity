@@ -36,23 +36,23 @@ type HealingStats struct {
 
 // HealResult is the result of healing a single object
 type HealResult struct {
-	Path          string    `json:"path"`
-	Healed        bool      `json:"healed"`
-	Method        string    `json:"method"` // "erasure", "backup", "none"
-	ShardsRepaired int      `json:"shards_repaired"`
-	ErrorMessage  string    `json:"error_message,omitempty"`
-	HealedAt      time.Time `json:"healed_at"`
+	Path           string    `json:"path"`
+	Healed         bool      `json:"healed"`
+	Method         string    `json:"method"` // "erasure", "backup", "none"
+	ShardsRepaired int       `json:"shards_repaired"`
+	ErrorMessage   string    `json:"error_message,omitempty"`
+	HealedAt       time.Time `json:"healed_at"`
 }
 
 // HealReport is the result of healing all objects
 type HealReport struct {
-	StartedAt      time.Time    `json:"started_at"`
-	CompletedAt    time.Time    `json:"completed_at"`
+	StartedAt      time.Time     `json:"started_at"`
+	CompletedAt    time.Time     `json:"completed_at"`
 	Duration       time.Duration `json:"duration"`
-	ObjectsChecked int          `json:"objects_checked"`
-	ObjectsHealed  int          `json:"objects_healed"`
-	HealFailures   int          `json:"heal_failures"`
-	Results        []HealResult `json:"results,omitempty"`
+	ObjectsChecked int           `json:"objects_checked"`
+	ObjectsHealed  int           `json:"objects_healed"`
+	HealFailures   int           `json:"heal_failures"`
+	Results        []HealResult  `json:"results,omitempty"`
 }
 
 // NewHealingManager creates a new healing manager

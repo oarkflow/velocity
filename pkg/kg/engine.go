@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"context"
@@ -27,26 +27,30 @@ type KGConfig struct {
 
 // KnowledgeGraphEngine is the top-level orchestrator for the KG subsystem.
 type KnowledgeGraphEngine struct {
-	db       *DB
+	db       Store
 	pipeline *KGIngestPipeline
 	search   *KGSearchEngine
 	hnsw     *HNSWIndex
 	embedder KGEmbedder
 	ner      KGNEREngine
-	em       *EntityManager
+	em       EntityStore
 	config   KGConfig
 }
 
 // NewKnowledgeGraphEngine creates a new KG engine wired to the given DB.
-func NewKnowledgeGraphEngine(db *DB, config KGConfig) (*KnowledgeGraphEngine, error) {
+func NewKnowledgeGraphEngine(db Store, config KGConfig, entities ...EntityStore) (*KnowledgeGraphEngine, error) {
 	if db == nil {
 		return nil, fmt.Errorf("db is required")
+	}
+	em := EntityStore(noopEntityStore{})
+	if len(entities) > 0 && entities[0] != nil {
+		em = entities[0]
 	}
 
 	engine := &KnowledgeGraphEngine{
 		db:     db,
 		ner:    NewRuleBasedNER(),
-		em:     NewEntityManager(db),
+		em:     em,
 		config: config,
 	}
 
@@ -74,6 +78,7 @@ func NewKnowledgeGraphEngine(db *DB, config KGConfig) (*KnowledgeGraphEngine, er
 	opts := []IngestOption{
 		WithChunker(chunker),
 		WithNER(engine.ner),
+		WithEntityStore(engine.em),
 		WithIngestConfig(IngestConfig{
 			Workers:       config.IngestWorkers,
 			SkipDuplicate: true,
@@ -91,9 +96,7 @@ func NewKnowledgeGraphEngine(db *DB, config KGConfig) (*KnowledgeGraphEngine, er
 	engine.search = NewKGSearchEngine(db, engine.hnsw, engine.embedder, engine.em)
 
 	// Register BM25 schema for KG chunks
-	db.SetSearchSchemaForPrefix(kgChunkSearchPrefix, &SearchSchema{
-		Fields: []SearchSchemaField{{Name: "$value", Searchable: true}},
-	})
+	db.RegisterChunkSearchPrefix(kgChunkSearchPrefix)
 
 	return engine, nil
 }

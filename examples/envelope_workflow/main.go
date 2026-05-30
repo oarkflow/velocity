@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/oarkflow/velocity"
@@ -15,12 +16,17 @@ import (
 
 func main() {
 	fmt.Println("=== Velocity Secure Envelope System Demo ===")
+	_ = os.RemoveAll("./sender_db")
+	_ = os.RemoveAll("./recipient_db")
+	_ = os.Remove("evidence_envelope.json")
+	transferKey := []byte("0123456789abcdef0123456789abcdef")
 
 	// SENDER SIDE: Initialize sender's database
 	fmt.Println("📤 SENDER: Creating Court Evidence Envelope")
 	fmt.Println("==========================================================")
 	senderDB, err := velocity.NewWithConfig(velocity.Config{
-		Path: "./sender_db",
+		Path:          "./sender_db",
+		EncryptionKey: transferKey,
 		MasterKeyConfig: velocity.MasterKeyConfig{
 			Source: velocity.SystemFile,
 		},
@@ -37,7 +43,8 @@ func main() {
 	fmt.Println("\n📥 RECIPIENT: Importing Evidence Envelope")
 	fmt.Println("==========================================================")
 	recipientDB, err := velocity.NewWithConfig(velocity.Config{
-		Path: "./recipient_db",
+		Path:          "./recipient_db",
+		EncryptionKey: transferKey,
 		MasterKeyConfig: velocity.MasterKeyConfig{
 			Source: velocity.SystemFile,
 		},
@@ -71,21 +78,21 @@ func senderCreateEvidence(db *velocity.DB) string {
 	evidenceData := map[string]interface{}{
 		"case_number": "CR-2026-001234",
 		"evidence_id": "ITEM-789",
-		"description":  "CCTV footage from crime scene",
-		"location":     "123 Main Street, Camera #5",
-		"timestamp":    "2026-01-20T14:30:00Z",
-		"file_hash":    "sha256:abc123def456...",
+		"description": "CCTV footage from crime scene",
+		"location":    "123 Main Street, Camera #5",
+		"timestamp":   "2026-01-20T14:30:00Z",
+		"file_hash":   "sha256:abc123def456...",
 	}
 	evidenceJSON, _ := json.Marshal(evidenceData)
 
 	// Step 2: Define time-lock policy (evidence locked until court date)
-	courtDate := time.Now().Add(30 * 24 * time.Hour) // 30 days from now
+	courtDate := time.Now().Add(-1 * time.Minute) // already unlocked so the demo can run end-to-end
 	timeLockPolicy := velocity.TimeLockPolicy{
-		Mode:             "legal_delay",
-		UnlockNotBefore:  courtDate,
-		MinDelaySeconds:  7 * 24 * 3600, // Minimum 7 days
-		LegalCondition:   "Court order required for early access",
-		EscrowSigners:    []string{"judge@court.gov", "prosecutor@da.gov"},
+		Mode:            "legal_delay",
+		UnlockNotBefore: courtDate,
+		MinDelaySeconds: 7 * 24 * 3600, // Minimum 7 days
+		LegalCondition:  "Court order required for early access",
+		EscrowSigners:   []string{"judge@court.gov", "prosecutor@da.gov"},
 	}
 
 	// Step 3: Create fingerprint policy for access control
@@ -114,14 +121,14 @@ func senderCreateEvidence(db *velocity.DB) string {
 
 	// Step 6: Create the envelope request
 	request := &velocity.EnvelopeRequest{
-		Label:          "CCTV Evidence - Case CR-2026-001234",
-		Type:           velocity.EnvelopeTypeCCTVArchive,
-		EvidenceClass:  "digital_video",
-		CreatedBy:      "officer-smith-badge-5678",
-		CaseReference:  "CR-2026-001234",
+		Label:                "CCTV Evidence - Case CR-2026-001234",
+		Type:                 velocity.EnvelopeTypeCCTVArchive,
+		EvidenceClass:        "digital_video",
+		CreatedBy:            "officer-smith-badge-5678",
+		CaseReference:        "CR-2026-001234",
 		FingerprintSignature: "fp:officer-smith-5678",
-		IntakeLocation: "Evidence Room 3, Police HQ",
-		Notes:          "Original CCTV footage secured at scene",
+		IntakeLocation:       "Evidence Room 3, Police HQ",
+		Notes:                "Original CCTV footage secured at scene",
 		Payload: velocity.EnvelopePayload{
 			Kind:         "file",
 			ObjectPath:   "evidence/cctv/case-001234/camera5.mp4",
@@ -241,21 +248,21 @@ func senderCreateAndExportEvidence(db *velocity.DB) string {
 	evidenceData := map[string]interface{}{
 		"case_number": "CR-2026-001234",
 		"evidence_id": "ITEM-789",
-		"description":  "CCTV footage from crime scene",
-		"location":     "123 Main Street, Camera #5",
-		"timestamp":    "2026-01-20T14:30:00Z",
-		"file_hash":    "sha256:abc123def456...",
+		"description": "CCTV footage from crime scene",
+		"location":    "123 Main Street, Camera #5",
+		"timestamp":   "2026-01-20T14:30:00Z",
+		"file_hash":   "sha256:abc123def456...",
 	}
 	evidenceJSON, _ := json.Marshal(evidenceData)
 
 	// Step 2: Define time-lock policy (evidence locked until court date)
-	courtDate := time.Now().Add(30 * 24 * time.Hour) // 30 days from now
+	courtDate := time.Now().Add(-1 * time.Minute) // already unlocked so the demo can run end-to-end
 	timeLockPolicy := velocity.TimeLockPolicy{
-		Mode:             "legal_delay",
-		UnlockNotBefore:  courtDate,
-		MinDelaySeconds:  7 * 24 * 3600, // Minimum 7 days
-		LegalCondition:   "Court order required for early access",
-		EscrowSigners:    []string{"judge@court.gov", "prosecutor@da.gov"},
+		Mode:            "legal_delay",
+		UnlockNotBefore: courtDate,
+		MinDelaySeconds: 7 * 24 * 3600, // Minimum 7 days
+		LegalCondition:  "Court order required for early access",
+		EscrowSigners:   []string{"judge@court.gov", "prosecutor@da.gov"},
 	}
 
 	// Step 3: Create fingerprint policy for access control
@@ -284,14 +291,14 @@ func senderCreateAndExportEvidence(db *velocity.DB) string {
 
 	// Step 6: Create the envelope request
 	request := &velocity.EnvelopeRequest{
-		Label:          "CCTV Evidence - Case CR-2026-001234",
-		Type:           velocity.EnvelopeTypeCCTVArchive,
-		EvidenceClass:  "digital_video",
-		CreatedBy:      "officer-smith-badge-5678",
-		CaseReference:  "CR-2026-001234",
+		Label:                "CCTV Evidence - Case CR-2026-001234",
+		Type:                 velocity.EnvelopeTypeCCTVArchive,
+		EvidenceClass:        "digital_video",
+		CreatedBy:            "officer-smith-badge-5678",
+		CaseReference:        "CR-2026-001234",
 		FingerprintSignature: "fp:officer-smith-5678",
-		IntakeLocation: "Evidence Room 3, Police HQ",
-		Notes:          "Original CCTV footage secured at scene",
+		IntakeLocation:       "Evidence Room 3, Police HQ",
+		Notes:                "Original CCTV footage secured at scene",
 		Payload: velocity.EnvelopePayload{
 			Kind:         "file",
 			ObjectPath:   "evidence/cctv/case-001234/camera5.mp4",
@@ -345,7 +352,7 @@ func senderCreateAndExportEvidence(db *velocity.DB) string {
 
 // recipientAccessEvidence demonstrates how a recipient accesses an envelope
 func recipientAccessEvidence(db *velocity.DB, envelopeID string) {
-	ctx := context.Background()
+	ctx := demoEnvelopeAccessContext("detective-john-doe")
 
 	// Step 1: Load the envelope
 	envelope, err := db.LoadEnvelope(ctx, envelopeID)
@@ -465,7 +472,7 @@ func legalAuthorityUnlock(db *velocity.DB, envelopeID string) {
 
 // auditorReview demonstrates full custody chain review
 func auditorReview(db *velocity.DB, envelopeID string) {
-	ctx := context.Background()
+	ctx := demoEnvelopeAccessContext("prosecutor-jane-smith")
 
 	envelope, err := db.LoadEnvelope(ctx, envelopeID)
 	if err != nil {
@@ -524,4 +531,16 @@ func auditorReview(db *velocity.DB, envelopeID string) {
 	fmt.Printf("   Ledger Root: %s\n", envelope.Integrity.LedgerRoot[:24]+"...")
 	fmt.Printf("   Audit Root: %s\n", envelope.Integrity.AuditRoot[:24]+"...")
 	fmt.Printf("   Last Update: %s\n", envelope.Integrity.LastLedgerUpdate.Format("2006-01-02 15:04:05"))
+}
+
+func demoEnvelopeAccessContext(actor string) context.Context {
+	return velocity.WithEnvelopeActor(
+		velocity.WithEnvelopeAccessContext(context.Background(), velocity.EnvelopeAccessContext{
+			Fingerprint: "fp:" + actor,
+			TrustLevel:  "high",
+			MFAVerified: true,
+			RequestID:   "demo-" + actor,
+		}),
+		actor,
+	)
 }

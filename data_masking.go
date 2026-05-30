@@ -2,17 +2,18 @@ package velocity
 
 import (
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"regexp"
 	"strings"
 )
 
 // MaskingRule defines a masking rule for sensitive fields.
 type MaskingRule struct {
-	RuleID    string             `json:"rule_id"`
-	Pattern   *regexp.Regexp     `json:"-"`
-	PatternStr string            `json:"pattern"`
-	Strategy  string             `json:"strategy"` // full, partial, redact
-	DataClass DataClassification `json:"data_class"`
+	RuleID     string                        `json:"rule_id"`
+	Pattern    *regexp.Regexp                `json:"-"`
+	PatternStr string                        `json:"pattern"`
+	Strategy   string                        `json:"strategy"` // full, partial, redact
+	DataClass  compliance.DataClassification `json:"data_class"`
 }
 
 // DataMaskingEngine masks content based on rules.
@@ -39,7 +40,7 @@ func (dme *DataMaskingEngine) AddRule(rule *MaskingRule) error {
 }
 
 // MaskString masks data using matching rules.
-func (dme *DataMaskingEngine) MaskString(data string, class DataClassification) string {
+func (dme *DataMaskingEngine) MaskString(data string, class compliance.DataClassification) string {
 	masked := data
 	for _, rule := range dme.rules {
 		if rule.DataClass != "" && rule.DataClass != class {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"time"
 )
 
@@ -19,7 +20,7 @@ func NewDataClassKeyManager(db *DB) *DataClassKeyManager {
 }
 
 // GetKeyForClass returns a derived key for a data class.
-func (km *DataClassKeyManager) GetKeyForClass(class DataClassification) ([]byte, int, error) {
+func (km *DataClassKeyManager) GetKeyForClass(class compliance.DataClassification) ([]byte, int, error) {
 	version, err := km.getVersion(class)
 	if err != nil {
 		return nil, 0, err
@@ -29,7 +30,7 @@ func (km *DataClassKeyManager) GetKeyForClass(class DataClassification) ([]byte,
 }
 
 // RotateKey increments key version for a data class.
-func (km *DataClassKeyManager) RotateKey(class DataClassification) (int, error) {
+func (km *DataClassKeyManager) RotateKey(class compliance.DataClassification) (int, error) {
 	version, err := km.getVersion(class)
 	if err != nil {
 		return 0, err
@@ -41,7 +42,7 @@ func (km *DataClassKeyManager) RotateKey(class DataClassification) (int, error) 
 	return version, nil
 }
 
-func (km *DataClassKeyManager) getVersion(class DataClassification) (int, error) {
+func (km *DataClassKeyManager) getVersion(class compliance.DataClassification) (int, error) {
 	key := []byte(fmt.Sprintf("dataclass:key:%s:version", class))
 	data, err := km.db.Get(key)
 	if err != nil {
@@ -59,12 +60,12 @@ func (km *DataClassKeyManager) getVersion(class DataClassification) (int, error)
 	return v, nil
 }
 
-func (km *DataClassKeyManager) setVersion(class DataClassification, version int) error {
+func (km *DataClassKeyManager) setVersion(class compliance.DataClassification, version int) error {
 	key := []byte(fmt.Sprintf("dataclass:key:%s:version", class))
 	return km.db.Put(key, []byte(fmt.Sprintf("%d", version)))
 }
 
-func (km *DataClassKeyManager) deriveKey(class DataClassification, version int) []byte {
+func (km *DataClassKeyManager) deriveKey(class compliance.DataClassification, version int) []byte {
 	// Use master key material with class+version for deterministic derivation
 	seed := fmt.Sprintf("%s:%d", class, version)
 	master := km.db.masterKey
@@ -76,7 +77,7 @@ func (km *DataClassKeyManager) deriveKey(class DataClassification, version int) 
 }
 
 // RotateKeyWithAudit rotates a data-class key and logs to audit trail.
-func (km *DataClassKeyManager) RotateKeyWithAudit(ctx context.Context, class DataClassification, audit *AuditLogManager) (int, error) {
+func (km *DataClassKeyManager) RotateKeyWithAudit(ctx context.Context, class compliance.DataClassification, audit *AuditLogManager) (int, error) {
 	version, err := km.RotateKey(class)
 	if err != nil {
 		return 0, err
@@ -94,7 +95,7 @@ func (km *DataClassKeyManager) RotateKeyWithAudit(ctx context.Context, class Dat
 }
 
 // KeyID returns a stable identifier for the derived key.
-func (km *DataClassKeyManager) KeyID(class DataClassification, version int) string {
+func (km *DataClassKeyManager) KeyID(class compliance.DataClassification, version int) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", class, version)))
 	return hex.EncodeToString(sum[:8])
 }

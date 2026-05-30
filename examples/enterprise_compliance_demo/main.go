@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/auth"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"log"
 	"time"
 
@@ -30,23 +32,23 @@ func main() {
 	ctm := db.ComplianceTagManager()
 
 	// RBAC + SoD + Access Reviews
-	rbac := velocity.NewRBACManager(db)
-	sod := velocity.NewSoDManager()
-	sod.AddPolicy(velocity.SoDPolicy{
+	rbac := auth.NewRBACManager(db)
+	sod := auth.NewSoDManager()
+	sod.AddPolicy(auth.SoDPolicy{
 		PolicyID:          "sod-finance-admin",
 		Name:              "Finance/Admin Separation",
-		IncompatibleRoles: []string{velocity.RoleSystemAdmin, "finance_admin"},
+		IncompatibleRoles: []string{auth.RoleSystemAdmin, "finance_admin"},
 		Enabled:           true,
 	})
 	rbac.SetSoDManager(sod)
 
-	reviews := velocity.NewAccessReviewManager(db)
+	reviews := auth.NewAccessReviewManager(db)
 	rbac.SetAccessReviewManager(reviews)
 
-	_ = rbac.AddUser(&velocity.User{
+	_ = rbac.AddUser(&auth.User{
 		ID:       "u-100",
 		Username: "bank-admin",
-		Roles:    []string{velocity.RoleSystemAdmin},
+		Roles:    []string{auth.RoleSystemAdmin},
 		Active:   true,
 	})
 
@@ -88,7 +90,7 @@ func main() {
 	retention := velocity.NewRetentionManager(db)
 	_ = retention.AddPolicy(ctx, velocity.RetentionPolicy{
 		PolicyID:        "pii-1y",
-		DataType:        string(velocity.DataClassConfidential),
+		DataType:        string(compliance.DataClassConfidential),
 		RetentionPeriod: 365 * 24 * time.Hour,
 		DeletionMethod:  "anonymize",
 	})
@@ -98,8 +100,8 @@ func main() {
 	}
 
 	// Consent management (GDPR)
-	consentMgr := velocity.NewConsentManager(db)
-	_ = consentMgr.GrantConsent(ctx, "subject-123", velocity.ConsentRecord{
+	consentMgr := compliance.NewConsentManager(db)
+	_ = consentMgr.GrantConsent(ctx, "subject-123", compliance.ConsentRecord{
 		Purpose:         "account_management",
 		GrantedAt:       time.Now(),
 		LegalBasis:      "consent",
@@ -112,13 +114,13 @@ func main() {
 
 	// Key rotation workflows
 	krw := velocity.NewKeyRotationWorkflow(db)
-	_, _ = krw.RotateClassKey(ctx, velocity.DataClassConfidential)
+	_, _ = krw.RotateClassKey(ctx, compliance.DataClassConfidential)
 
 	// Tag paths with compliance requirements
 	_ = ctm.TagPath(ctx, &velocity.ComplianceTag{
 		Path:          "/customers",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		EncryptionReq: true,
 		AuditLevel:    "high",
 		CreatedBy:     "dpo",
@@ -126,8 +128,8 @@ func main() {
 
 	_ = ctm.TagPath(ctx, &velocity.ComplianceTag{
 		Path:          "/eu/transactions",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkPCIDSS},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkPCIDSS},
+		DataClass:     compliance.DataClassRestricted,
 		EncryptionReq: true,
 		AuditLevel:    "high",
 		CreatedBy:     "security",

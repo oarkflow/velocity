@@ -9,8 +9,8 @@ import (
 )
 
 type DefaultFlagValidator struct {
-	mu             sync.RWMutex
-	validators     map[string]func(interface{}) error
+	mu              sync.RWMutex
+	validators      map[string]func(interface{}) error
 	flagPermissions map[string]Permission
 }
 

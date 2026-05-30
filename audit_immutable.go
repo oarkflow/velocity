@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"os"
 	"sync"
 	"time"
@@ -25,26 +26,26 @@ type ImmutableAuditLog struct {
 
 // AuditEvent represents a single auditable action
 type AuditEvent struct {
-	EventID        string                 `json:"event_id"`
-	Timestamp      time.Time              `json:"timestamp"`
-	Actor          string                 `json:"actor"`
-	ActorRole      string                 `json:"actor_role,omitempty"`
-	Action         string                 `json:"action"`
-	Resource       string                 `json:"resource"`
-	ResourceID     string                 `json:"resource_id,omitempty"`
-	Result         string                 `json:"result"` // success, failure, denied
-	IPAddress      string                 `json:"ip_address,omitempty"`
-	SessionID      string                 `json:"session_id,omitempty"`
-	DataHash       string                 `json:"data_hash,omitempty"` // Hash of affected data
-	BeforeState    string                 `json:"before_state,omitempty"`
-	AfterState     string                 `json:"after_state,omitempty"`
-	Reason         string                 `json:"reason,omitempty"`
-	Classification DataClassification     `json:"classification"`
-	ComplianceTags []ComplianceFramework  `json:"compliance_tags,omitempty"`
-	Severity       string                 `json:"severity"`               // low, medium, high, critical
-	MerkleProof    []string               `json:"merkle_proof,omitempty"` // Proof of inclusion
-	EventHash      string                 `json:"event_hash"`             // SHA-256 of event data
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	EventID        string                        `json:"event_id"`
+	Timestamp      time.Time                     `json:"timestamp"`
+	Actor          string                        `json:"actor"`
+	ActorRole      string                        `json:"actor_role,omitempty"`
+	Action         string                        `json:"action"`
+	Resource       string                        `json:"resource"`
+	ResourceID     string                        `json:"resource_id,omitempty"`
+	Result         string                        `json:"result"` // success, failure, denied
+	IPAddress      string                        `json:"ip_address,omitempty"`
+	SessionID      string                        `json:"session_id,omitempty"`
+	DataHash       string                        `json:"data_hash,omitempty"` // Hash of affected data
+	BeforeState    string                        `json:"before_state,omitempty"`
+	AfterState     string                        `json:"after_state,omitempty"`
+	Reason         string                        `json:"reason,omitempty"`
+	Classification compliance.DataClassification `json:"classification"`
+	ComplianceTags []compliance.Framework        `json:"compliance_tags,omitempty"`
+	Severity       string                        `json:"severity"`               // low, medium, high, critical
+	MerkleProof    []string                      `json:"merkle_proof,omitempty"` // Proof of inclusion
+	EventHash      string                        `json:"event_hash"`             // SHA-256 of event data
+	Metadata       map[string]interface{}        `json:"metadata,omitempty"`
 }
 
 // BlockMetadata contains block-level information
@@ -373,7 +374,7 @@ type AuditQuery struct {
 	Result         string
 	StartTime      time.Time
 	EndTime        time.Time
-	Classification DataClassification
+	Classification compliance.DataClassification
 	Severity       string
 	Limit          int
 }

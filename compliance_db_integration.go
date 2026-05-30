@@ -3,6 +3,7 @@ package velocity
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"strings"
 	"time"
 )
@@ -85,7 +86,7 @@ func (db *DB) GetWithCompliance(ctx context.Context, req *ComplianceOperationReq
 
 	// Apply masking if required
 	if db.complianceTagManager != nil && result != nil && result.AppliedTag != nil {
-		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= DataClassConfidential {
+		if db.complianceTagManager.maskingEngine != nil && result.AppliedTag.DataClass >= compliance.DataClassConfidential {
 			masked := db.complianceTagManager.maskingEngine.MaskString(string(data), result.AppliedTag.DataClass)
 			return []byte(masked), nil
 		}
@@ -152,20 +153,20 @@ func (db *DB) classifyAndTag(ctx context.Context, path string, data []byte) (*Cl
 	return result, nil
 }
 
-func inferFrameworks(result *ClassificationResult) []ComplianceFramework {
+func inferFrameworks(result *ClassificationResult) []compliance.Framework {
 	if result == nil {
 		return nil
 	}
-	frameworks := make([]ComplianceFramework, 0)
-	seen := map[ComplianceFramework]struct{}{}
+	frameworks := make([]compliance.Framework, 0)
+	seen := map[compliance.Framework]struct{}{}
 	for _, match := range result.Matches {
 		switch strings.ToLower(match.Type) {
 		case "phi":
-			seen[FrameworkHIPAA] = struct{}{}
+			seen[compliance.FrameworkHIPAA] = struct{}{}
 		case "pci":
-			seen[FrameworkPCIDSS] = struct{}{}
+			seen[compliance.FrameworkPCIDSS] = struct{}{}
 		case "pii":
-			seen[FrameworkGDPR] = struct{}{}
+			seen[compliance.FrameworkGDPR] = struct{}{}
 		}
 	}
 	for fw := range seen {

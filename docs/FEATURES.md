@@ -47,7 +47,7 @@ For a runnable smoke flow across the complete feature set, use:
 - Folders with create, delete, recursive delete, list, copy/rename helpers, and browser preview integration.
 - Object versioning, delete markers, object lock, retention, checksum validation, and repair.
 - File compatibility layer with thumbnails and metadata.
-- Bucket manager, bucket versioning, replication config, lifecycle/tiering, notifications, and quotas.
+- `pkg/s3` bucket manager, bucket versioning, credential store, SigV4 verification, multipart manager, presigned URLs, range helpers, replication config, lifecycle/tiering, notifications, and quotas.
 - S3-compatible `/s3` API with buckets, objects, range and conditional reads, copy, multipart upload, tagging, ACL-shaped data, and SigV4 authentication.
 - Presigned URL generation and tamper validation.
 
@@ -57,18 +57,19 @@ For a runnable smoke flow across the complete feature set, use:
 - Master key manager with system-file, user-defined, existing-key detection, cache expiry, cache clearing, and Shamir share workflows.
 - FIPS crypto helper paths, PBKDF2/Argon2id derivation, secure zeroing, and compliance validation tests.
 - Hardened secrets API with create, rotate, retrieve, envelope reference validation, sealed records, and metadata.
-- RBAC, IAM policies, STS temporary credentials, OIDC, LDAP, MFA, break-glass workflows, segregation of duties, and access reviews.
+- `pkg/auth` RBAC, IAM policies, MFA, segregation of duties, and access reviews; root STS temporary credentials, OIDC, LDAP, and break-glass workflows.
 - Audit trails, immutable audit chain, backup signatures, HMAC verification, and forensic exports.
 
 ## Compliance
 
 - GDPR, HIPAA, NIST, FIPS, PCI-style tag validation, and multi-framework compliance tags.
-- Consent, retention, legal hold, breach notification, data residency, data masking, classification, and lineage managers.
+- `pkg/compliance` framework/classification types and consent manager; root compliance tag, retention, legal hold, breach notification, data residency, data masking, classification, and lineage managers.
 - Compliance report generation, violation tracking, alerting, policy packs, and audit summaries.
 - Compliance-aware `Put`, `Get`, and `Delete` wrappers.
 
 ## Knowledge Graph
 
+- Core implementation package under `pkg/kg`, with `db.KnowledgeGraph(...)` as the embedded `velocity` integration point.
 - Document ingestion with text extraction from plain text, HTML, and JSON.
 - Sliding-window chunking.
 - Rule-based NER for emails, URLs, dates, money, organizations, people, and custom rules.
@@ -81,7 +82,7 @@ For a runnable smoke flow across the complete feature set, use:
 
 ## APIs And Interfaces
 
-- Embedded Go APIs in the root package.
+- Embedded Go APIs in the root package plus feature packages such as `pkg/auth`, `pkg/compliance`, `pkg/kg`, `pkg/s3`, `pkg/sqldriver`, and `pkg/storage`.
 - Minimal CLI in `cmd/velocity`.
 - Richer command framework in `pkg/cli`.
 - Fiber HTTP API in `pkg/web`.

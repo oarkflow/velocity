@@ -9,21 +9,21 @@ import (
 
 // BreakGlassRequest represents emergency access request.
 type BreakGlassRequest struct {
-	RequestID   string    `json:"request_id"`
-	Actor       string    `json:"actor"`
-	Reason      string    `json:"reason"`
-	Resource    string    `json:"resource"`
-	RequestedAt time.Time `json:"requested_at"`
+	RequestID   string     `json:"request_id"`
+	Actor       string     `json:"actor"`
+	Reason      string     `json:"reason"`
+	Resource    string     `json:"resource"`
+	RequestedAt time.Time  `json:"requested_at"`
 	ApprovedAt  *time.Time `json:"approved_at,omitempty"`
-	ApprovedBy  string    `json:"approved_by,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	Status      string    `json:"status"` // pending, approved, active, revoked, expired
+	ApprovedBy  string     `json:"approved_by,omitempty"`
+	ExpiresAt   time.Time  `json:"expires_at"`
+	Status      string     `json:"status"` // pending, approved, active, revoked, expired
 }
 
 // BreakGlassManager manages emergency access requests.
 type BreakGlassManager struct {
-	db         *DB
-	auditMgr   *AuditLogManager
+	db       *DB
+	auditMgr *AuditLogManager
 }
 
 // NewBreakGlassManager creates a new break-glass manager.

@@ -1,4 +1,4 @@
-package velocity
+package kg
 
 import (
 	"context"
@@ -28,27 +28,27 @@ func (c *IngestConfig) defaults() {
 
 // KGIngestPipeline orchestrates the document ingest stages.
 type KGIngestPipeline struct {
-	db        *DB
+	db        Store
 	extractor KGExtractor
 	chunker   KGChunker
 	ner       KGNEREngine
 	resolver  *EntityResolver
 	embedder  KGEmbedder
 	hnsw      *HNSWIndex
-	em        *EntityManager
+	em        EntityStore
 	config    IngestConfig
 	statsMu   sync.Mutex
 }
 
 // NewKGIngestPipeline creates a new ingest pipeline.
-func NewKGIngestPipeline(db *DB, opts ...IngestOption) *KGIngestPipeline {
+func NewKGIngestPipeline(db Store, opts ...IngestOption) *KGIngestPipeline {
 	p := &KGIngestPipeline{
 		db:        db,
 		extractor: NewDefaultExtractor(),
 		chunker:   NewSlidingWindowChunker(256, 64),
 		ner:       NewRuleBasedNER(),
 		resolver:  NewEntityResolver(0.85),
-		em:        NewEntityManager(db),
+		em:        noopEntityStore{},
 		config:    IngestConfig{Workers: 4, BatchSize: 32, SkipDuplicate: true},
 	}
 	for _, opt := range opts {
@@ -67,6 +67,7 @@ func WithNER(n KGNEREngine) IngestOption           { return func(p *KGIngestPipe
 func WithEmbedder(e KGEmbedder) IngestOption       { return func(p *KGIngestPipeline) { p.embedder = e } }
 func WithHNSW(h *HNSWIndex) IngestOption           { return func(p *KGIngestPipeline) { p.hnsw = h } }
 func WithIngestConfig(c IngestConfig) IngestOption { return func(p *KGIngestPipeline) { p.config = c } }
+func WithEntityStore(em EntityStore) IngestOption  { return func(p *KGIngestPipeline) { p.em = em } }
 
 // Ingest processes a single document through the pipeline.
 func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*KGIngestResponse, error) {
@@ -171,10 +172,6 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 	}
 
 	// Stage 7: Store and index chunks
-	chunkSchema := &SearchSchema{
-		Fields: []SearchSchemaField{{Name: "$value", Searchable: true}},
-	}
-
 	for i, chunk := range chunks {
 		// Store chunk JSON for retrieval (under a separate key to avoid BM25 indexing the JSON)
 		chunkData, err := json.Marshal(chunk)
@@ -192,7 +189,7 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 
 		// BM25 index: store raw text under the chunk key for full-text search
 		chunkKey := kgChunkPrefix + chunk.ID
-		p.db.PutIndexed([]byte(chunkKey), []byte(chunk.Text), chunkSchema)
+		p.db.PutIndexedText([]byte(chunkKey), []byte(chunk.Text))
 
 		// HNSW index (if available and chunk has embedding)
 		if p.hnsw != nil && len(chunk.Embedding) > 0 {
@@ -279,7 +276,7 @@ func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, enti
 				CreatedBy: "kg-pipeline",
 			}
 			created, err := p.em.CreateEntity(ctx, entReq)
-			if err != nil {
+			if err != nil || created == nil {
 				continue
 			}
 			entityNodeID = created.EntityID

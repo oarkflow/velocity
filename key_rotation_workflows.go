@@ -3,6 +3,7 @@ package velocity
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"time"
 )
 
@@ -41,7 +42,7 @@ func (krw *KeyRotationWorkflow) RotateMasterKey(ctx context.Context, policy KeyR
 }
 
 // RotateClassKey rotates a data-class encryption key.
-func (krw *KeyRotationWorkflow) RotateClassKey(ctx context.Context, class DataClassification) (int, error) {
+func (krw *KeyRotationWorkflow) RotateClassKey(ctx context.Context, class compliance.DataClassification) (int, error) {
 	if krw.classKeys == nil {
 		return 0, fmt.Errorf("class key manager not configured")
 	}

@@ -10,13 +10,14 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func mai2n() {
+func main() {
 	config := velocity.Config{
-		Path: "./interactive_demo_db",
+		Path:          "./interactive_demo_db",
+		EncryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.MasterKeyConfig{
-			Source: velocity.UserDefined,
+			Source: velocity.SystemFile,
 			UserKeyCache: velocity.UserKeyCacheConfig{
-				Enabled: false, // Disable cache to see prompts each time
+				Enabled: false,
 			},
 		},
 		DeviceFingerprint: true,
@@ -34,8 +35,9 @@ func mai2n() {
 	// Test database operations
 	fmt.Println("\nTesting database operations...")
 
-	// db.Put([]byte("test_key"), []byte("test_value"))
-
+	if err := db.Put([]byte("test_key"), []byte("test_value")); err != nil {
+		log.Fatalf("Failed to store data: %v", err)
+	}
 
 	value, err := db.Get([]byte("test_key"))
 	if err != nil {

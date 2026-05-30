@@ -4,23 +4,25 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/s3"
 )
 
 // IntegrityConfig configures the integrity management system
 type IntegrityConfig struct {
 	// Erasure coding
-	ErasureEnabled   bool
-	DataShards       int
-	ParityShards     int
+	ErasureEnabled bool
+	DataShards     int
+	ParityShards   int
 
 	// Bit-rot detection
-	BitRotEnabled    bool
-	ScanInterval     time.Duration
-	HashAlgorithm    HashAlgorithm
+	BitRotEnabled bool
+	ScanInterval  time.Duration
+	HashAlgorithm HashAlgorithm
 
 	// Healing
-	HealingEnabled   bool
-	HealInterval     time.Duration
+	HealingEnabled bool
+	HealInterval   time.Duration
 }
 
 // DefaultIntegrityConfig returns a default configuration
@@ -45,7 +47,7 @@ type IntegrityManager struct {
 	bitrot     *BitRotDetector
 	healing    *HealingManager
 	lock       *ObjectLockManager
-	versioning *BucketVersioning
+	versioning *s3.BucketVersioning
 }
 
 // IntegrityStatus reports the status of all integrity subsystems
@@ -76,11 +78,11 @@ type BitRotStatus struct {
 
 // HealingStatus reports healing status
 type HealingStatus struct {
-	Enabled        bool      `json:"enabled"`
-	Running        bool      `json:"running"`
-	ObjectsHealed  int64     `json:"objects_healed"`
-	HealFailures   int64     `json:"heal_failures"`
-	LastHealTime   time.Time `json:"last_heal_time,omitempty"`
+	Enabled       bool      `json:"enabled"`
+	Running       bool      `json:"running"`
+	ObjectsHealed int64     `json:"objects_healed"`
+	HealFailures  int64     `json:"heal_failures"`
+	LastHealTime  time.Time `json:"last_heal_time,omitempty"`
 }
 
 // LockStatus reports object lock status
@@ -95,18 +97,18 @@ type VersionStatus struct {
 
 // ObjectIntegrityInfo provides complete integrity information for an object
 type ObjectIntegrityInfo struct {
-	Path              string          `json:"path"`
-	IntegrityHash     string          `json:"integrity_hash,omitempty"`
-	HashAlgorithm     string          `json:"hash_algorithm,omitempty"`
-	ErasureCoded      bool            `json:"erasure_coded"`
-	ShardCount        int             `json:"shard_count,omitempty"`
-	HealthyShards     int             `json:"healthy_shards,omitempty"`
-	Locked            bool            `json:"locked"`
-	RetentionMode     string          `json:"retention_mode,omitempty"`
-	RetainUntilDate   *time.Time      `json:"retain_until_date,omitempty"`
-	LegalHold         bool            `json:"legal_hold"`
-	LastScanned       *time.Time      `json:"last_scanned,omitempty"`
-	Healthy           bool            `json:"healthy"`
+	Path            string     `json:"path"`
+	IntegrityHash   string     `json:"integrity_hash,omitempty"`
+	HashAlgorithm   string     `json:"hash_algorithm,omitempty"`
+	ErasureCoded    bool       `json:"erasure_coded"`
+	ShardCount      int        `json:"shard_count,omitempty"`
+	HealthyShards   int        `json:"healthy_shards,omitempty"`
+	Locked          bool       `json:"locked"`
+	RetentionMode   string     `json:"retention_mode,omitempty"`
+	RetainUntilDate *time.Time `json:"retain_until_date,omitempty"`
+	LegalHold       bool       `json:"legal_hold"`
+	LastScanned     *time.Time `json:"last_scanned,omitempty"`
+	Healthy         bool       `json:"healthy"`
 }
 
 // NewIntegrityManager creates a new unified integrity manager
@@ -144,7 +146,7 @@ func NewIntegrityManager(db *DB, config IntegrityConfig) *IntegrityManager {
 
 	// Initialize object lock and versioning
 	im.lock = NewObjectLockManager(db)
-	im.versioning = NewBucketVersioning(db)
+	im.versioning = s3.NewBucketVersioning(db)
 
 	return im
 }
@@ -280,11 +282,11 @@ func (im *IntegrityManager) GetObjectIntegrity(path string) (*ObjectIntegrityInf
 }
 
 // Getters for sub-managers
-func (im *IntegrityManager) ErasureEncoder() *ErasureEncoder    { return im.erasure }
-func (im *IntegrityManager) BitRotDetector() *BitRotDetector     { return im.bitrot }
-func (im *IntegrityManager) HealingManager() *HealingManager     { return im.healing }
-func (im *IntegrityManager) ObjectLockManager() *ObjectLockManager { return im.lock }
-func (im *IntegrityManager) BucketVersioning() *BucketVersioning  { return im.versioning }
+func (im *IntegrityManager) ErasureEncoder() *ErasureEncoder        { return im.erasure }
+func (im *IntegrityManager) BitRotDetector() *BitRotDetector        { return im.bitrot }
+func (im *IntegrityManager) HealingManager() *HealingManager        { return im.healing }
+func (im *IntegrityManager) ObjectLockManager() *ObjectLockManager  { return im.lock }
+func (im *IntegrityManager) BucketVersioning() *s3.BucketVersioning { return im.versioning }
 
 // helpers
 

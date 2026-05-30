@@ -113,29 +113,66 @@ Knowledge graph demo completed
 
 ## Embedded Go Usage
 
+The KG implementation lives in `github.com/oarkflow/velocity/pkg/kg`. The root
+`velocity` package exposes `db.KnowledgeGraph(...)` as the embedded DB integration
+point, while KG request/config/result types come from `pkg/kg`.
+
 Create a KG engine from an open Velocity DB:
 
 ```go
+import (
+	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
+)
+
 db, err := velocity.New("./velocity_data")
 if err != nil {
 	log.Fatal(err)
 }
 defer db.Close()
 
-kg := db.KnowledgeGraph(velocity.KGConfig{
+graph := db.KnowledgeGraph(kg.KGConfig{
 	ChunkMaxWords: 64,
 	ChunkOverlap:  16,
 	IngestWorkers: 4,
 })
-if kg == nil {
+if graph == nil {
 	log.Fatal("knowledge graph unavailable")
 }
+```
+
+Use the standalone package directly when you want the KG package API:
+
+```go
+import (
+	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
+)
+
+db, err := velocity.New("./velocity_data")
+if err != nil {
+	log.Fatal(err)
+}
+defer db.Close()
+
+engine, err := kg.NewKnowledgeGraphEngine(db, kg.KGConfig{
+	ChunkMaxWords: 64,
+	ChunkOverlap:  16,
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+results, err := engine.Search(ctx, &kg.KGSearchRequest{
+	Query: "retention compliance",
+	Limit: 10,
+})
 ```
 
 Ingest a document:
 
 ```go
-resp, err := kg.Ingest(ctx, &velocity.KGIngestRequest{
+resp, err := graph.Ingest(ctx, &kg.KGIngestRequest{
 	Source:    "policy.txt",
 	MediaType: "text/plain",
 	Title:     "Retention Policy",
@@ -154,10 +191,10 @@ fmt.Println(resp.DocID, resp.ChunkCount, resp.EntityCount)
 Search the corpus:
 
 ```go
-results, err := kg.Search(ctx, &velocity.KGSearchRequest{
+results, err := graph.Search(ctx, &kg.KGSearchRequest{
 	Query:   "retention compliance",
 	Limit:   10,
-	Mode:    velocity.KGSearchModeKeyword,
+	Mode:    kg.KGSearchModeKeyword,
 	Filters: map[string]string{"department": "compliance"},
 })
 if err != nil {
@@ -172,19 +209,19 @@ for _, hit := range results.Hits {
 Use richer full-text and typo-tolerant search:
 
 ```go
-phrase, _ := kg.Search(ctx, &velocity.KGSearchRequest{
+phrase, _ := graph.Search(ctx, &kg.KGSearchRequest{
 	Query:     `"retention policy"`,
 	MatchMode: "phrase",
 	Limit:     10,
 })
 
-prefix, _ := kg.Search(ctx, &velocity.KGSearchRequest{
+prefix, _ := graph.Search(ctx, &kg.KGSearchRequest{
 	Query:       "compli* reten*",
 	PrefixMatch: true,
 	Limit:       10,
 })
 
-fuzzy, _ := kg.Search(ctx, &velocity.KGSearchRequest{
+fuzzy, _ := graph.Search(ctx, &kg.KGSearchRequest{
 	Query:         "complaince retenton",
 	Fuzzy:         true,
 	FuzzyMaxEdits: 1,
@@ -219,13 +256,13 @@ fuzzy         ~180 us/op   ~75 KB/op   ~460 allocs/op
 Retrieve and delete a document:
 
 ```go
-doc, err := kg.GetDocument(resp.DocID)
+doc, err := graph.GetDocument(resp.DocID)
 if err != nil {
 	log.Fatal(err)
 }
 fmt.Println(doc.Source, doc.ChunkCount, doc.EntityCount)
 
-if err := kg.DeleteDocument(resp.DocID); err != nil {
+if err := graph.DeleteDocument(resp.DocID); err != nil {
 	log.Fatal(err)
 }
 ```
@@ -233,7 +270,7 @@ if err := kg.DeleteDocument(resp.DocID); err != nil {
 Read analytics:
 
 ```go
-analytics := kg.GetAnalytics()
+analytics := graph.GetAnalytics()
 fmt.Println(analytics.TotalDocuments, analytics.TotalChunks, analytics.TotalEntities)
 ```
 
@@ -247,7 +284,7 @@ Enable it at open time for background sync of existing data and automatic indexi
 db, err := velocity.NewWithConfig(velocity.Config{
 	Path:                                "./velocity_data",
 	KnowledgeGraphAutoIndexEnabled:     true,
-	KnowledgeGraphAutoIndexResources:   []velocity.KGResourceType{velocity.KGResourceKV, velocity.KGResourceObject, velocity.KGResourceSecret},
+	KnowledgeGraphAutoIndexResources:   []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret},
 	KnowledgeGraphAutoIndexMaxValueBytes: 1 << 20,
 })
 if err != nil {
@@ -261,7 +298,7 @@ Or enable it on an already-open DB with explicit behavior:
 ```go
 db.EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
 	Enabled:       true,
-	Resources:     []velocity.KGResourceType{velocity.KGResourceKV, velocity.KGResourceObject, velocity.KGResourceSecret, velocity.KGResourceSQLRow, velocity.KGResourceEnvelope, velocity.KGResourceEntity},
+	Resources:     []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret, kg.ResourceSQLRow, kg.ResourceEnvelope, kg.ResourceEntity},
 	SecretValues:  true,
 	Existing:      true,
 	Async:         true,
@@ -296,10 +333,10 @@ _, _ = db.CreateEnvelope(ctx, &velocity.EnvelopeRequest{
 Search the KG normally:
 
 ```go
-resp, err := db.KnowledgeGraph().Search(ctx, &velocity.KGSearchRequest{
+resp, err := db.KnowledgeGraph().Search(ctx, &kg.KGSearchRequest{
 	Query: "Acme HIPAA risk",
 	Limit: 10,
-	Mode:  velocity.KGSearchModeKeyword,
+	Mode:  kg.KGSearchModeKeyword,
 })
 if err != nil {
 	log.Fatal(err)
@@ -313,10 +350,10 @@ for _, hit := range resp.Hits {
 Query the relationship graph between matching resources:
 
 ```go
-graph, err := db.KnowledgeGraph().SearchResourceGraph(ctx, &velocity.KGResourceGraphRequest{
+graph, err := db.KnowledgeGraph().SearchResourceGraph(ctx, &kg.KGResourceGraphRequest{
 	Query: "Acme HIPAA risk",
 	Limit: 10,
-	Mode:  velocity.KGSearchModeKeyword,
+	Mode:  kg.KGSearchModeKeyword,
 })
 if err != nil {
 	log.Fatal(err)
@@ -373,7 +410,7 @@ Important behavior:
 Batch ingestion is useful for import jobs:
 
 ```go
-docs := []*velocity.KGIngestRequest{
+docs := []*kg.KGIngestRequest{
 	{
 		Source:    "a.txt",
 		MediaType: "text/plain",

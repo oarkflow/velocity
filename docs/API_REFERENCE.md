@@ -43,7 +43,26 @@ Objects:
 - `GetObjectMetadata`, `GetObjectACL`, `GetObjectVersion`
 - `PutObject`, `GetObjectStreamV2`, `DeleteObjectV2`, `RepairObjectStorage`
 
-Security, compliance, and governance APIs are exposed through manager constructors and DB convenience methods documented in the subsystem guides.
+Security, compliance, and governance APIs are exposed through package-owned manager constructors and DB convenience methods documented in the subsystem guides.
+
+Package-owned manager constructors:
+
+```go
+import (
+	"github.com/oarkflow/velocity/pkg/auth"
+	"github.com/oarkflow/velocity/pkg/compliance"
+	"github.com/oarkflow/velocity/pkg/s3"
+)
+
+iam := auth.NewIAMPolicyEngine(db)
+rbac := auth.NewRBACManager(db)
+mfa := auth.NewMFAManager(db)
+consents := compliance.NewConsentManager(db)
+bucketMgr := s3.NewBucketManager(db, db)
+versioning := s3.NewBucketVersioning(db)
+```
+
+Root-owned constructors still include managers that need direct `DB` internals, such as `NewComplianceTagManager`, `NewGDPRController`, `NewRetentionManager`, `NewObjectLockManager`, and object/integrity managers.
 
 Compliance resources:
 

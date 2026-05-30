@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/auth"
+	"github.com/oarkflow/velocity/pkg/s3"
 	"github.com/oarkflow/velocity/web"
 )
 
@@ -119,7 +121,7 @@ func main() {
 	log.Println("Database opened at", dataDir)
 
 	// --- 2. S3 credential store + auth layer --------------------------------
-	credStore := velocity.NewS3CredentialStore(db)
+	credStore := s3.NewS3CredentialStore(db, db)
 
 	// Generate an admin credential (returns auto-generated access key & secret).
 	adminCred, err := credStore.GenerateCredentials("admin", "Default admin credential")
@@ -129,24 +131,24 @@ func main() {
 	log.Printf("S3 credential generated (access key: %s)", adminCred.AccessKeyID)
 
 	region := "us-east-1"
-	sigv4 := velocity.NewSigV4Auth(credStore, region)
+	sigv4 := s3.NewSigV4Auth(credStore, region)
 
 	// --- 3. Bucket & multipart managers ------------------------------------
-	bucketMgr := velocity.NewBucketManager(db)
-	multipartMgr := velocity.NewMultipartManager(db)
+	bucketMgr := s3.NewBucketManager(db, db)
+	multipartMgr := s3.NewMultipartManager(db)
 
 	// --- 4. Presigned URL generator ----------------------------------------
 	endpoint := "http://localhost:" + httpPort
-	presignedGen := velocity.NewPresignedURLGenerator(credStore, region, endpoint)
+	presignedGen := s3.NewPresignedURLGenerator(credStore, region, endpoint)
 
 	// --- 5. IAM policy engine ----------------------------------------------
-	iamEngine := velocity.NewIAMPolicyEngine(db)
+	iamEngine := auth.NewIAMPolicyEngine(db)
 
 	// Create a sample admin policy.
-	adminPolicy := &velocity.IAMPolicy{
+	adminPolicy := &auth.IAMPolicy{
 		Name:    "AdminFullAccess",
 		Version: "2012-10-17",
-		Statements: []velocity.IAMStatement{
+		Statements: []auth.IAMStatement{
 			{
 				Effect:   "Allow",
 				Action:   []string{"s3:*"},

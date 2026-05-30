@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/s3"
 )
 
 func TestS3APIGetObjectMultipleRanges(t *testing.T) {
@@ -24,7 +25,7 @@ func TestS3APIGetObjectMultipleRanges(t *testing.T) {
 	}
 
 	app := fiber.New()
-	api := NewS3API(db, velocity.NewBucketManager(db), velocity.NewMultipartManager(db), nil, nil)
+	api := NewS3API(db, s3.NewBucketManager(db, db), s3.NewMultipartManager(db), nil, nil)
 	app.Get("/s3/:bucket/*", api.handleGetObject)
 
 	req := httptest.NewRequest(http.MethodGet, "/s3/bucket/range.txt", nil)

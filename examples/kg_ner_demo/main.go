@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func main() {
 	fmt.Println()
 
 	// Use the NER engine directly
-	ner := velocity.NewRuleBasedNER()
+	ner := kg.NewRuleBasedNER()
 
 	// --- Built-in entity types ---
 	samples := []struct {
@@ -61,7 +62,7 @@ Next meeting scheduled for 2024-04-01.`,
 		entities := ner.Extract(sample.text)
 
 		// Group by type
-		byType := make(map[string][]velocity.KGEntity)
+		byType := make(map[string][]kg.KGEntity)
 		for _, e := range entities {
 			byType[e.Type] = append(byType[e.Type], e)
 		}
@@ -99,7 +100,7 @@ Commit abc1234 merged by Dr. Alice Johnson on 2024-03-20. Deploy to 10.0.0.5.`
 	fmt.Printf("  Text: %s\n", devText)
 	entities := ner.Extract(devText)
 
-	byType := make(map[string][]velocity.KGEntity)
+	byType := make(map[string][]kg.KGEntity)
 	for _, e := range entities {
 		byType[e.Type] = append(byType[e.Type], e)
 	}
@@ -118,10 +119,10 @@ Commit abc1234 merged by Dr. Alice Johnson on 2024-03-20. Deploy to 10.0.0.5.`
 	// --- Full Pipeline with NER ---
 	fmt.Println("--- NER in Full Pipeline ---")
 
-	kg := db.KnowledgeGraph(velocity.KGConfig{})
+	engine := db.KnowledgeGraph(kg.KGConfig{})
 	ctx := context.Background()
 
-	resp, err := kg.Ingest(ctx, &velocity.KGIngestRequest{
+	resp, err := engine.Ingest(ctx, &kg.KGIngestRequest{
 		Source:    "ner-test.txt",
 		Content:   []byte(samples[0].text),
 		MediaType: "text/plain",
@@ -133,7 +134,7 @@ Commit abc1234 merged by Dr. Alice Johnson on 2024-03-20. Deploy to 10.0.0.5.`
 		fmt.Printf("  Ingested: %d entities auto-extracted and indexed as graph nodes\n", resp.EntityCount)
 		fmt.Printf("  Doc ID: %s\n", resp.DocID)
 
-		analytics := kg.GetAnalytics()
+		analytics := engine.GetAnalytics()
 		fmt.Printf("  Total entities in corpus: %d\n", analytics.TotalEntities)
 	}
 

@@ -5,13 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	velocity "github.com/oarkflow/velocity"
 )
 
+var transferKey = []byte("0123456789abcdef0123456789abcdef")
+
 func main() {
+	_ = os.RemoveAll("./entity_demo_data")
+	_ = os.RemoveAll("./entity_demo_vault2")
+
 	// Open database
-	db, err := velocity.New("./entity_demo_data")
+	db, err := velocity.NewWithConfig(velocity.Config{Path: "./entity_demo_data", EncryptionKey: transferKey})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -825,7 +831,7 @@ func createEnvelopesFromEntities(ctx context.Context, db *velocity.DB, em *veloc
 	fmt.Println("\n--- Importing Envelope into Another Vault ---")
 
 	// Create a new database instance to simulate another vault
-	vault2, err := velocity.New("./entity_demo_vault2")
+	vault2, err := velocity.NewWithConfig(velocity.Config{Path: "./entity_demo_vault2", EncryptionKey: transferKey})
 	if err != nil {
 		log.Fatal(err)
 	}

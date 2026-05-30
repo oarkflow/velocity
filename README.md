@@ -9,11 +9,11 @@ The main Go module is `github.com/oarkflow/velocity` and currently declares Go `
 - Embedded encrypted KV database with WAL, memtables, SSTables, TTL, scans, pagination, increments, batch writes, cache modes, and graceful shutdown.
 - SQL driver under `pkg/sqldriver` registered as `velocity` for use with `database/sql`.
 - Native object and folder storage with metadata, ACLs, versioning, object lock, previews, thumbnails, and repair paths.
-- S3-compatible route layer with SigV4 authentication, buckets, objects, range reads, multipart upload, tagging, presigned URLs, and bucket-level features.
+- S3-compatible package and route layer with SigV4 authentication, buckets, objects, range reads, multipart upload, tagging, presigned URLs, and bucket-level features.
 - HTTP and TCP servers in the separate `pkg/web` module.
 - JWT auth, admin endpoints, master key management endpoints, and a browser admin UI.
-- Enterprise subsystems for IAM policies, STS, OIDC, LDAP, metrics, lifecycle, notifications, integrity, cluster state, replication, and storage tiering.
-- Security and compliance features including master keys, Shamir workflows, FIPS crypto helpers, RBAC, MFA, audit trails, retention, consent, data residency, classification, masking, and breach notification.
+- Enterprise subsystems for IAM/RBAC auth policies, STS, OIDC, LDAP, metrics, lifecycle, notifications, integrity, cluster state, replication, and storage tiering.
+- Security and compliance features including master keys, Shamir workflows, FIPS crypto helpers, MFA, audit trails, retention, consent, data residency, classification, masking, and breach notification.
 - Knowledge graph ingestion, chunking, entity extraction, entity resolution, HNSW/vector search, graph traversal, and analytics.
 
 ## Quick Start
@@ -65,9 +65,15 @@ go run ./cmd serve --http 8081 --tcp 8080 --dir ./velocitydb_server
 
 ## Repository Map
 
-- `velocity.go` and root `*.go`: core embedded database, storage, search, compliance, security, objects, S3 support, KG, resilience, and enterprise managers.
-- `cmd/velocity`: small shipped CLI for data, secret, object, and envelope operations.
+- `velocity.go` and root `*.go`: core embedded database integration, WAL/SSTable/memtable engine, DB methods, search, object integration, retention enforcement, and root-owned enterprise managers that need direct `DB` internals.
+- `cmd/velocity`: small shipped CLI for data, secret, object, envelope, and compliance tag/check operations.
+- `pkg/auth`: IAM policy engine, RBAC, MFA, access reviews, and segregation-of-duties managers.
+- `pkg/compliance`: shared compliance enums plus consent records and consent manager.
+- `pkg/core`: reusable core primitives such as consistent hashing.
+- `pkg/kg`: knowledge graph engine, resource graph, chunking, extraction, NER, HNSW/vector search, and text query implementation.
+- `pkg/s3`: S3/bucket package code including credential store, SigV4, bucket manager, bucket versioning, multipart, presigned URLs, and S3 helper types.
 - `pkg/sqldriver`: `database/sql` driver and SQL executor.
+- `pkg/storage`: reusable storage helpers such as cache modes.
 - `pkg/web`: separate Go module with Fiber HTTP APIs, TCP server, S3 API, admin UI assets, and user storage.
 - `pkg/cli`: richer command framework for backup/data/envelope/folder/object/secret commands; not currently wired into `cmd/velocity`.
 - `examples`: runnable feature demonstrations.

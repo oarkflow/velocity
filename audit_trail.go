@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"time"
 )
 
@@ -19,12 +20,12 @@ func (alm *AuditLogManager) LogComplianceOperation(
 		outcome = "denied"
 	}
 
-	frameworks := make([]ComplianceFramework, 0)
+	frameworks := make([]compliance.Framework, 0)
 	if result.AppliedTag != nil {
 		frameworks = result.AppliedTag.Frameworks
 	}
 
-	dataClass := DataClassification("")
+	dataClass := compliance.DataClassification("")
 	if result.AppliedTag != nil {
 		dataClass = result.AppliedTag.DataClass
 	}
@@ -204,13 +205,13 @@ type AuditLogFilter struct {
 
 // AuditLogStats provides statistics about audit logs
 type AuditLogStats struct {
-	TotalLogs      int64
-	AllowedOps     int64
-	DeniedOps      int64
-	UniqueActors   int
-	TopViolators   []ActorStats
-	CommonActions  map[string]int64
-	ViolationRate  float64
+	TotalLogs     int64
+	AllowedOps    int64
+	DeniedOps     int64
+	UniqueActors  int
+	TopViolators  []ActorStats
+	CommonActions map[string]int64
+	ViolationRate float64
 }
 
 // ActorStats represents statistics for an actor

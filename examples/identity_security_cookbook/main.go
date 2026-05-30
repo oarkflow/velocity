@@ -7,6 +7,8 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/auth"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"os"
 	"strings"
 	"time"
@@ -23,7 +25,7 @@ func main() {
 	check(err)
 	defer db.Close()
 
-	mfa := velocity.NewMFAManager(db)
+	mfa := auth.NewMFAManager()
 	setup, err := mfa.GenerateTOTPSecret("alice", "alice@example.test")
 	check(err)
 	token := totp(setup.Secret, time.Now(), setup.Period, setup.Digits)
@@ -32,35 +34,35 @@ func main() {
 	backupOK, err := mfa.ValidateBackupCode("alice", setup.BackupCodes[0])
 	check(err)
 
-	rbac := velocity.NewRBACManager(db)
-	check(rbac.AddUser(&velocity.User{
+	rbac := auth.NewRBACManager(db)
+	check(rbac.AddUser(&auth.User{
 		ID: "alice", Username: "alice", Email: "alice@example.test",
-		Roles: []string{velocity.RoleAuditor}, ClearanceLevel: string(velocity.DataClassConfidential),
+		Roles: []string{auth.RoleAuditor}, ClearanceLevel: string(compliance.DataClassConfidential),
 		MFAEnabled: true, Active: true,
 		Attributes: map[string]string{"department": "audit"},
 	}))
-	session, err := rbac.CreateSession("alice", &velocity.AccessContext{IPAddress: "127.0.0.1", UserAgent: "cookbook", MFAVerified: true})
+	session, err := rbac.CreateSession("alice", &auth.AccessContext{IPAddress: "127.0.0.1", UserAgent: "cookbook", MFAVerified: true})
 	check(err)
-	decision, err := rbac.CheckAccess(ctx, &velocity.AccessRequest{
+	decision, err := rbac.CheckAccess(ctx, &auth.AccessRequest{
 		UserID: "alice", SessionID: session.SessionID,
-		Resource: velocity.ResourceAudit, Action: velocity.ActionRead,
-		Context: &velocity.AccessContext{Timestamp: time.Now(), IPAddress: "127.0.0.1", MFAVerified: true},
+		Resource: auth.ResourceAudit, Action: auth.ActionRead,
+		Context: &auth.AccessContext{Timestamp: time.Now(), IPAddress: "127.0.0.1", MFAVerified: true},
 	})
 	check(err)
 
-	iam := velocity.NewIAMPolicyEngine(db)
-	check(iam.CreatePolicy(&velocity.IAMPolicy{
+	iam := auth.NewIAMPolicyEngine(db)
+	check(iam.CreatePolicy(&auth.IAMPolicy{
 		Name: "read-demo-bucket",
-		Statements: []velocity.IAMStatement{{
-			Sid: "AllowDemoRead", Effect: velocity.IAMEffectAllow,
+		Statements: []auth.IAMStatement{{
+			Sid: "AllowDemoRead", Effect: auth.IAMEffectAllow,
 			Principal: []string{"alice"},
 			Action:    []string{"s3:GetObject"},
 			Resource:  []string{"arn:velocity:s3:::demo/*"},
-			Condition: &velocity.IAMConditionBlock{IpAddress: map[string]string{"aws:SourceIp": "127.0.0.1/32"}},
+			Condition: &auth.IAMConditionBlock{IpAddress: map[string]string{"aws:SourceIp": "127.0.0.1/32"}},
 		}},
 	}))
 	check(iam.AttachUserPolicy("alice", "read-demo-bucket"))
-	iamResult := iam.EvaluateAccess(&velocity.IAMEvalRequest{
+	iamResult := iam.EvaluateAccess(&auth.IAMEvalRequest{
 		Principal: "alice", Action: "s3:GetObject", Resource: "arn:velocity:s3:::demo/readme.txt",
 		Context: map[string]string{"aws:SourceIp": "127.0.0.1"},
 	})

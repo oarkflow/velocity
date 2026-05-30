@@ -1,15 +1,24 @@
-package velocity
+package kg
 
 import "time"
 
+type ResourceType string
+
+const (
+	ResourceKV       ResourceType = "kv"
+	ResourceObject   ResourceType = "object"
+	ResourceSecret   ResourceType = "secret"
+	ResourceSQLRow   ResourceType = "sql_row"
+	ResourceEnvelope ResourceType = "envelope"
+	ResourceEntity   ResourceType = "entity"
+)
+
 // LSM key prefix constants for Knowledge Graph data
 const (
-	kgPrefix          = "__kg"
 	kgDocPrefix       = "__kg:doc:"
 	kgChunkPrefix     = "__kg:chunk:"
 	kgChunkMetaPrefix = "__kgm:chunk:" // separate prefix to avoid BM25 auto-indexing
 	kgChunkDocPrefix  = "__kg:chunkdoc:"
-	kgEntityPrefix    = "__kg:entity:"
 	kgVecPrefix       = "__kg:vec:"
 	kgHNSWPrefix      = "__kg:hnsw:"
 	kgHNSWMeta        = "__kg:hnsw:meta"
@@ -133,7 +142,7 @@ type KGResourceGraphRequest struct {
 type KGResourceGraphNode struct {
 	ID           string            `json:"id"`
 	Source       string            `json:"source"`
-	ResourceType KGResourceType    `json:"resource_type,omitempty"`
+	ResourceType ResourceType      `json:"resource_type,omitempty"`
 	ResourceID   string            `json:"resource_id,omitempty"`
 	Title        string            `json:"title,omitempty"`
 	Snippet      string            `json:"snippet,omitempty"`

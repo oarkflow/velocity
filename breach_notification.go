@@ -4,20 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"time"
 )
 
 // BreachIncident represents a security breach incident.
 type BreachIncident struct {
-	IncidentID     string                `json:"incident_id"`
-	DetectedAt     time.Time             `json:"detected_at"`
-	ReportedAt     *time.Time            `json:"reported_at,omitempty"`
-	Severity       string                `json:"severity"`
-	Description    string                `json:"description"`
-	Frameworks     []ComplianceFramework `json:"frameworks"`
-	AffectedCount  int                   `json:"affected_count"`
-	Status         string                `json:"status"` // detected, reported, resolved
-	ReportDeadline time.Time             `json:"report_deadline"`
+	IncidentID     string                 `json:"incident_id"`
+	DetectedAt     time.Time              `json:"detected_at"`
+	ReportedAt     *time.Time             `json:"reported_at,omitempty"`
+	Severity       string                 `json:"severity"`
+	Description    string                 `json:"description"`
+	Frameworks     []compliance.Framework `json:"frameworks"`
+	AffectedCount  int                    `json:"affected_count"`
+	Status         string                 `json:"status"` // detected, reported, resolved
+	ReportDeadline time.Time              `json:"report_deadline"`
 }
 
 // ReportIncident records a breach incident.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"log"
 	"time"
 
@@ -27,8 +28,8 @@ func main() {
 	fmt.Println("1. Tagging /customer-data folder with GDPR compliance...")
 	gdprTag := &velocity.ComplianceTag{
 		Path:          "/customer-data",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		Owner:         "privacy-team",
 		Custodian:     "it-department",
 		RetentionDays: 730, // 2 years
@@ -46,8 +47,8 @@ func main() {
 	fmt.Println("\n2. Tagging /patient-records with HIPAA compliance...")
 	hipaaTag := &velocity.ComplianceTag{
 		Path:          "/patient-records",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "medical-director",
 		Custodian:     "health-it",
 		RetentionDays: 2555, // 7 years (HIPAA requirement)
@@ -65,8 +66,8 @@ func main() {
 	fmt.Println("\n3. Tagging /payment-data with PCI DSS compliance...")
 	pciTag := &velocity.ComplianceTag{
 		Path:          "/payment-data",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkPCIDSS},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkPCIDSS},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "cfo",
 		Custodian:     "payment-team",
 		RetentionDays: 365, // 1 year
@@ -85,11 +86,11 @@ func main() {
 	fmt.Println("\n4. Tagging /classified folder with FIPS + NIST compliance...")
 	govTag := &velocity.ComplianceTag{
 		Path: "/classified",
-		Frameworks: []velocity.ComplianceFramework{
-			velocity.FrameworkFIPS,
-			velocity.FrameworkNIST,
+		Frameworks: []compliance.Framework{
+			compliance.FrameworkFIPS,
+			compliance.FrameworkNIST,
 		},
-		DataClass:     velocity.DataClassRestricted,
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "security-clearance-officer",
 		Custodian:     "it-security",
 		RetentionDays: 3650, // 10 years
@@ -221,7 +222,7 @@ func main() {
 
 	// Example 7: List all tags by framework
 	fmt.Println("\n7. Listing all GDPR-tagged paths...")
-	gdprPaths := ctm.ListTagsByFramework(velocity.FrameworkGDPR)
+	gdprPaths := ctm.ListTagsByFramework(compliance.FrameworkGDPR)
 	fmt.Printf("   Found %d GDPR-tagged paths:\n", len(gdprPaths))
 	for _, tag := range gdprPaths {
 		fmt.Printf("     - %s (Owner: %s, Retention: %d days)\n", tag.Path, tag.Owner, tag.RetentionDays)
@@ -234,12 +235,12 @@ func main() {
 		log.Printf("No tags found for /customer-data")
 	} else {
 		err = ctm.UpdateTag(ctx, tags[0].TagID, func(tag *velocity.ComplianceTag) error {
-		// Add SOC2 to existing GDPR compliance
-		tag.Frameworks = append(tag.Frameworks, velocity.FrameworkSOC2)
-		tag.RetentionDays = 1095 // Extend to 3 years
-		fmt.Println("   ✓ Added SOC2 framework")
-		fmt.Println("   ✓ Extended retention to 3 years")
-		return nil
+			// Add SOC2 to existing GDPR compliance
+			tag.Frameworks = append(tag.Frameworks, compliance.FrameworkSOC2)
+			tag.RetentionDays = 1095 // Extend to 3 years
+			fmt.Println("   ✓ Added SOC2 framework")
+			fmt.Println("   ✓ Extended retention to 3 years")
+			return nil
 		})
 		if err != nil {
 			log.Printf("Failed to update tag: %v", err)

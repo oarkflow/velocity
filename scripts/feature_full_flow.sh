@@ -75,6 +75,8 @@ import (
 	"time"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
+	"github.com/oarkflow/velocity/pkg/s3"
 	"github.com/oarkflow/velocity/pkg/sqldriver"
 )
 
@@ -139,7 +141,7 @@ func main() {
 	must(err)
 	fmt.Printf("Search hits/count: %d/%d\n", len(searchHits), searchCount)
 
-	bucketMgr := velocity.NewBucketManager(db)
+	bucketMgr := s3.NewBucketManager(db, db)
 	must(bucketMgr.CreateBucket("archive", "alice", "us-east-1"))
 	must(bucketMgr.SetBucketVersioning("archive", "Enabled"))
 	versioning, err := bucketMgr.GetBucketVersioning("archive")
@@ -231,9 +233,8 @@ func main() {
 	must(err)
 	fmt.Printf("Entities/relations: graph=%d tagged=%d\n", len(graph), len(taggedEntities))
 
-	kg, err := velocity.NewKnowledgeGraphEngine(db, velocity.KGConfig{ChunkMaxWords: 16, ChunkOverlap: 4})
-	must(err)
-	ingested, err := kg.Ingest(ctx, &velocity.KGIngestRequest{
+	graphEngine := db.KnowledgeGraph(kg.KGConfig{ChunkMaxWords: 16, ChunkOverlap: 4})
+	ingested, err := graphEngine.Ingest(ctx, &kg.KGIngestRequest{
 		Source:    "memory://feature-flow",
 		MediaType: "text/plain",
 		Title:     "Feature Flow Document",
@@ -241,9 +242,9 @@ func main() {
 		Metadata:  map[string]string{"kind": "demo"},
 	})
 	must(err)
-	kgResults, err := kg.Search(ctx, &velocity.KGSearchRequest{Query: "Velocity compliance", Limit: 5, Mode: velocity.KGSearchModeKeyword})
+	kgResults, err := graphEngine.Search(ctx, &kg.KGSearchRequest{Query: "Velocity compliance", Limit: 5, Mode: kg.KGSearchModeKeyword})
 	must(err)
-	analytics := kg.GetAnalytics()
+	analytics := graphEngine.GetAnalytics()
 	fmt.Printf("Knowledge graph: doc=%s chunks=%d entities=%d hits=%d analytics_docs=%d\n", ingested.DocID, ingested.ChunkCount, ingested.EntityCount, len(kgResults.Hits), analytics.TotalDocuments)
 
 	sqlPath := filepath.Join(base, "sql")

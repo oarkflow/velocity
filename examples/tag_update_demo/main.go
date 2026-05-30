@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"log"
 	"os"
 
@@ -33,8 +34,8 @@ func main() {
 
 	gdprTag := &velocity.ComplianceTag{
 		Path:          "/customer-data",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		RetentionDays: 365,
 		Owner:         "privacy-team",
 		CreatedBy:     "privacy-officer",
@@ -44,8 +45,8 @@ func main() {
 
 	soc2Tag := &velocity.ComplianceTag{
 		Path:          "/customer-data",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:     compliance.DataClassConfidential,
 		RetentionDays: 730,
 		Owner:         "security-team",
 		CreatedBy:     "security-officer",
@@ -83,7 +84,7 @@ func main() {
 	fmt.Println("3. Update by path and framework...")
 	fmt.Println("   Updating SOC2 tag for /customer-data")
 
-	err = ctm.UpdateTagByPathAndFramework(ctx, "/customer-data", velocity.FrameworkSOC2,
+	err = ctm.UpdateTagByPathAndFramework(ctx, "/customer-data", compliance.FrameworkSOC2,
 		func(tag *velocity.ComplianceTag) error {
 			tag.AuditLevel = "high"
 			tag.AccessPolicy = "soc2-access-policy"

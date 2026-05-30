@@ -11,14 +11,14 @@ import (
 
 // KeyRotationPolicy manages automatic key rotation
 type KeyRotationPolicy struct {
-	Enabled           bool          `json:"enabled"`
-	RotationInterval  time.Duration `json:"rotation_interval"`  // e.g., 90 days
-	MaxKeyAge         time.Duration `json:"max_key_age"`         // e.g., 365 days
-	ReencryptionBatch int           `json:"reencryption_batch"` // Records per batch
-	LastRotation      time.Time     `json:"last_rotation"`
-	CurrentKeyVersion int           `json:"current_key_version"`
+	Enabled           bool             `json:"enabled"`
+	RotationInterval  time.Duration    `json:"rotation_interval"`  // e.g., 90 days
+	MaxKeyAge         time.Duration    `json:"max_key_age"`        // e.g., 365 days
+	ReencryptionBatch int              `json:"reencryption_batch"` // Records per batch
+	LastRotation      time.Time        `json:"last_rotation"`
+	CurrentKeyVersion int              `json:"current_key_version"`
 	KeyHistory        []KeyVersionInfo `json:"key_history"`
-	AutoRotate        bool          `json:"auto_rotate"` // Automatic background rotation
+	AutoRotate        bool             `json:"auto_rotate"` // Automatic background rotation
 }
 
 // KeyRotationManager handles key lifecycle management

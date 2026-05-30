@@ -11,7 +11,7 @@ import (
 	"github.com/oarkflow/velocity"
 )
 
-func mai5n() {
+func main() {
 	// Example 1: Traditional system file approach (default)
 	fmt.Println("=== Example 1: System File Master Key ===")
 	systemFileExample()
@@ -56,7 +56,8 @@ func systemFileExample() {
 
 func userDefinedExample() {
 	config := velocity.Config{
-		Path: "./data/user_defined_db",
+		Path:          "./data/user_defined_db",
+		EncryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.MasterKeyConfig{
 			Source: velocity.UserDefined,
 			UserKeyCache: velocity.UserKeyCacheConfig{
@@ -135,6 +136,7 @@ func shamirExample() {
 func switchSourceExample() {
 	config := velocity.Config{
 		Path:            "./data/switch_db",
+		EncryptionKey:   []byte("0123456789abcdef0123456789abcdef"),
 		MasterKeyConfig: velocity.DefaultMasterKeyConfig(),
 	}
 

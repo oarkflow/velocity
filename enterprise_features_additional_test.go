@@ -2,6 +2,7 @@ package velocity
 
 import (
 	"context"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"strings"
 	"testing"
 	"time"
@@ -33,8 +34,8 @@ func TestDataResidencyBlocksObjectWrite(t *testing.T) {
 
 	if err := ctm.TagPath(ctx, &ComplianceTag{
 		Path:          "/eu",
-		Frameworks:    []ComplianceFramework{FrameworkGDPR},
-		DataClass:     DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		EncryptionReq: true,
 		CreatedBy:     "test",
 	}); err != nil {
@@ -79,9 +80,9 @@ func TestBreachIncidentOnCriticalViolation(t *testing.T) {
 		Path:           "/phi/record",
 		Operation:      "read",
 		Rules:          []string{"HIPAA Security Rule"},
-		Frameworks:     []string{string(FrameworkHIPAA)},
+		Frameworks:     []string{string(compliance.FrameworkHIPAA)},
 		Severity:       "critical",
-		DataClass:      string(DataClassRestricted),
+		DataClass:      string(compliance.DataClassRestricted),
 		EncryptionUsed: false,
 	}
 

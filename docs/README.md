@@ -25,4 +25,5 @@ This documentation set was rebuilt from the current source tree. It is organized
 - Main module: `github.com/oarkflow/velocity`.
 - Go version in `go.mod`: `1.26.0`.
 - `pkg/web` is its own Go module and replaces the root module locally.
+- Current feature package split: `pkg/auth` owns IAM/RBAC/MFA/access reviews/SoD, `pkg/compliance` owns compliance enums and consent management, `pkg/s3` owns S3 and bucket managers, `pkg/kg` owns knowledge graph implementation, `pkg/storage` owns reusable cache helpers, and `pkg/core` owns reusable primitives.
 - `docs/api_tests.http` is preserved as an API exercise file, not part of the Markdown docs set.

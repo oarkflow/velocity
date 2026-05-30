@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/oarkflow/velocity/pkg/s3"
 )
 
 const (
@@ -140,12 +142,12 @@ func (db *DB) PutObject(ctx context.Context, req PutObjectRequest) (*ObjectRecor
 	}
 	bucket, key := objectSplitBucketKey(path)
 	if req.EnforceBucket && bucket != "" {
-		if _, err := NewBucketManager(db).HeadBucket(bucket); err != nil {
+		if _, err := s3.NewBucketManager(db, db).HeadBucket(bucket); err != nil {
 			return nil, err
 		}
 	}
 	if bucket != "" {
-		if enc, err := NewBucketManager(db).GetBucketEncryption(bucket); err == nil && enc != nil {
+		if enc, err := s3.NewBucketManager(db, db).GetBucketEncryption(bucket); err == nil && enc != nil {
 			opts.Encrypt = true
 			if opts.CustomMetadata == nil {
 				opts.CustomMetadata = make(map[string]string)
@@ -720,8 +722,8 @@ func versionIDForObject(db *DB, bucket string) string {
 	if bucket == "" {
 		return generateVersionID()
 	}
-	state, err := NewBucketVersioning(db).GetVersioning(bucket)
-	if err == nil && state == VersioningSuspended {
+	state, err := s3.NewBucketVersioning(db).GetVersioning(bucket)
+	if err == nil && state == s3.VersioningSuspended {
 		return "null"
 	}
 	return generateVersionID()

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"log"
 	"os"
 
@@ -41,11 +42,11 @@ func main() {
 	// Tag the /healthcare folder with HIPAA compliance
 	healthcareTag := &velocity.ComplianceTag{
 		Path:          "/healthcare",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-		DataClass:     velocity.DataClassRestricted, // PHI is restricted data
-		RetentionDays: 2555,                          // 7 years for HIPAA
-		EncryptionReq: true,                          // PHI must be encrypted
-		AuditLevel:    "high",                        // High audit level
+		Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+		DataClass:     compliance.DataClassRestricted, // PHI is restricted data
+		RetentionDays: 2555,                           // 7 years for HIPAA
+		EncryptionReq: true,                           // PHI must be encrypted
+		AuditLevel:    "high",                         // High audit level
 		Owner:         "healthcare-compliance-team",
 		CreatedBy:     "compliance-officer",
 	}
@@ -179,10 +180,10 @@ func main() {
 	// Tag a specific key-value with GDPR compliance
 	userKeyTag := &velocity.ComplianceTag{
 		Path:          "/users/email/john.doe@example.com",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassConfidential, // PII is confidential
-		RetentionDays: 365,                             // 1 year retention
-		EncryptionReq: true,                            // Encrypt PII
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential, // PII is confidential
+		RetentionDays: 365,                              // 1 year retention
+		EncryptionReq: true,                             // Encrypt PII
 		AuditLevel:    "high",
 		Owner:         "privacy-team",
 		CreatedBy:     "data-protection-officer",
@@ -285,10 +286,10 @@ func main() {
 	// Tag file storage area with PCI DSS compliance
 	paymentFileTag := &velocity.ComplianceTag{
 		Path:          "/files/payments",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkPCIDSS},
-		DataClass:     velocity.DataClassRestricted, // Cardholder data is restricted
-		RetentionDays: 90,                            // PCI DSS retention requirement
-		EncryptionReq: true,                          // Must encrypt cardholder data
+		Frameworks:    []compliance.Framework{compliance.FrameworkPCIDSS},
+		DataClass:     compliance.DataClassRestricted, // Cardholder data is restricted
+		RetentionDays: 90,                             // PCI DSS retention requirement
+		EncryptionReq: true,                           // Must encrypt cardholder data
 		AuditLevel:    "high",
 		AccessPolicy:  "pci-dss-level-1",
 		Owner:         "payment-security-team",

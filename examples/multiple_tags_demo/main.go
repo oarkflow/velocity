@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"log"
 	"os"
 	"time"
@@ -35,8 +36,8 @@ func main() {
 	// First tag: GDPR compliance
 	gdprTag := &velocity.ComplianceTag{
 		Path:          "/customer-data",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassConfidential,
 		Owner:         "privacy-team",
 		RetentionDays: 730,
 		EncryptionReq: true,
@@ -51,8 +52,8 @@ func main() {
 	// Second tag: SOC2 compliance (additional requirements)
 	soc2Tag := &velocity.ComplianceTag{
 		Path:          "/customer-data",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkSOC2},
-		DataClass:     velocity.DataClassConfidential,
+		Frameworks:    []compliance.Framework{compliance.FrameworkSOC2},
+		DataClass:     compliance.DataClassConfidential,
 		Owner:         "security-team",
 		RetentionDays: 365,
 		EncryptionReq: true,
@@ -100,8 +101,8 @@ func main() {
 	// Tag for sensitive PII data
 	piiTag := &velocity.ComplianceTag{
 		Path:          "/customer-data/user:john@example.com",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkGDPR},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkGDPR},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "data-protection",
 		RetentionDays: 90, // Short retention for PII
 		EncryptionReq: true,
@@ -120,8 +121,8 @@ func main() {
 	// Additional HIPAA tag (if customer is also a patient)
 	hipaaTag := &velocity.ComplianceTag{
 		Path:          "/customer-data/user:john@example.com",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkHIPAA},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkHIPAA},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "healthcare-team",
 		RetentionDays: 2555, // 7 years for HIPAA
 		EncryptionReq: true,
@@ -155,8 +156,8 @@ func main() {
 	// Financial data compliance
 	pciTag := &velocity.ComplianceTag{
 		Path:          "/payment-data/transactions.csv",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkPCIDSS},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkPCIDSS},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "finance-team",
 		RetentionDays: 365,
 		EncryptionReq: true,
@@ -171,8 +172,8 @@ func main() {
 	// FIPS compliance for encryption
 	fipsTag := &velocity.ComplianceTag{
 		Path:          "/payment-data/transactions.csv",
-		Frameworks:    []velocity.ComplianceFramework{velocity.FrameworkFIPS},
-		DataClass:     velocity.DataClassRestricted,
+		Frameworks:    []compliance.Framework{compliance.FrameworkFIPS},
+		DataClass:     compliance.DataClassRestricted,
 		Owner:         "security-team",
 		EncryptionReq: true,
 		AuditLevel:    "high",
@@ -252,7 +253,7 @@ func main() {
 	// ========================================
 	fmt.Println("\n7. Listing all tags by framework...")
 
-	gdprTags := ctm.ListTagsByFramework(velocity.FrameworkGDPR)
+	gdprTags := ctm.ListTagsByFramework(compliance.FrameworkGDPR)
 	fmt.Printf("   GDPR-tagged paths (%d):\n", len(gdprTags))
 	for _, tag := range gdprTags {
 		fmt.Printf("      - %s\n", tag.Path)
@@ -260,7 +261,7 @@ func main() {
 
 	fmt.Println()
 
-	hipaaPathTags := ctm.ListTagsByFramework(velocity.FrameworkHIPAA)
+	hipaaPathTags := ctm.ListTagsByFramework(compliance.FrameworkHIPAA)
 	fmt.Printf("   HIPAA-tagged paths (%d):\n", len(hipaaPathTags))
 	for _, tag := range hipaaPathTags {
 		fmt.Printf("      - %s\n", tag.Path)

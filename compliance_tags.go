@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/oarkflow/velocity/pkg/compliance"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,22 +15,22 @@ import (
 
 // ComplianceTag represents compliance requirements applied to a resource
 type ComplianceTag struct {
-	TagID         string                 `json:"tag_id"` // Unique identifier for this specific tag
-	Path          string                 `json:"path"`   // Folder, file, or key path
-	ResourceType  ComplianceResourceType `json:"resource_type,omitempty"`
-	ResourceID    string                 `json:"resource_id,omitempty"`
-	ResourceRef   *ComplianceResourceRef `json:"resource_ref,omitempty"`
-	Frameworks    []ComplianceFramework  `json:"frameworks"`     // Applied frameworks
-	DataClass     DataClassification     `json:"data_class"`     // Data classification level
-	Owner         string                 `json:"owner"`          // Data owner
-	Custodian     string                 `json:"custodian"`      // Data custodian
-	RetentionDays int                    `json:"retention_days"` // Retention period
-	EncryptionReq bool                   `json:"encryption_req"` // Encryption required
-	AuditLevel    string                 `json:"audit_level"`    // high, medium, low
-	AccessPolicy  string                 `json:"access_policy"`  // RBAC policy name
-	CreatedAt     time.Time              `json:"created_at"`
-	CreatedBy     string                 `json:"created_by"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	TagID         string                        `json:"tag_id"` // Unique identifier for this specific tag
+	Path          string                        `json:"path"`   // Folder, file, or key path
+	ResourceType  ComplianceResourceType        `json:"resource_type,omitempty"`
+	ResourceID    string                        `json:"resource_id,omitempty"`
+	ResourceRef   *ComplianceResourceRef        `json:"resource_ref,omitempty"`
+	Frameworks    []compliance.Framework        `json:"frameworks"`     // Applied frameworks
+	DataClass     compliance.DataClassification `json:"data_class"`     // Data classification level
+	Owner         string                        `json:"owner"`          // Data owner
+	Custodian     string                        `json:"custodian"`      // Data custodian
+	RetentionDays int                           `json:"retention_days"` // Retention period
+	EncryptionReq bool                          `json:"encryption_req"` // Encryption required
+	AuditLevel    string                        `json:"audit_level"`    // high, medium, low
+	AccessPolicy  string                        `json:"access_policy"`  // RBAC policy name
+	CreatedAt     time.Time                     `json:"created_at"`
+	CreatedBy     string                        `json:"created_by"`
+	Metadata      map[string]interface{}        `json:"metadata,omitempty"`
 }
 
 type ComplianceResourceType string
@@ -66,7 +67,7 @@ type ComplianceTagManager struct {
 	tags map[string][]*ComplianceTag // path -> multiple tags
 	mu   sync.RWMutex
 
-	consentMgr    *ConsentManager
+	consentMgr    *compliance.ConsentManager
 	retentionMgr  *RetentionManager
 	residencyMgr  *DataResidencyManager
 	breakGlassMgr *BreakGlassManager
@@ -86,7 +87,7 @@ func NewComplianceTagManager(db *DB) *ComplianceTagManager {
 	}
 
 	// Wire default managers
-	ctm.consentMgr = NewConsentManager(db)
+	ctm.consentMgr = compliance.NewConsentManager(db)
 	ctm.retentionMgr = NewRetentionManager(db)
 	ctm.residencyMgr = NewDataResidencyManager(db)
 	ctm.breakGlassMgr = NewBreakGlassManager(db)
@@ -110,19 +111,19 @@ func NewComplianceTagManager(db *DB) *ComplianceTagManager {
 		RuleID:     "email",
 		PatternStr: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
 		Strategy:   "partial",
-		DataClass:  DataClassConfidential,
+		DataClass:  compliance.DataClassConfidential,
 	})
 	_ = ctm.maskingEngine.AddRule(&MaskingRule{
 		RuleID:     "ssn",
 		PatternStr: `\d{3}-?\d{2}-?\d{4}`,
 		Strategy:   "full",
-		DataClass:  DataClassRestricted,
+		DataClass:  compliance.DataClassRestricted,
 	})
 	_ = ctm.maskingEngine.AddRule(&MaskingRule{
 		RuleID:     "credit_card",
 		PatternStr: `\d{4}[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}`,
 		Strategy:   "partial",
-		DataClass:  DataClassRestricted,
+		DataClass:  compliance.DataClassRestricted,
 	})
 
 	ctm.loadTags()
@@ -130,7 +131,7 @@ func NewComplianceTagManager(db *DB) *ComplianceTagManager {
 }
 
 // SetConsentManager sets the consent manager.
-func (ctm *ComplianceTagManager) SetConsentManager(cm *ConsentManager) {
+func (ctm *ComplianceTagManager) SetConsentManager(cm *compliance.ConsentManager) {
 	ctm.consentMgr = cm
 }
 
@@ -441,7 +442,7 @@ func mergeTags(tags []*ComplianceTag, path string) *ComplianceTag {
 	merged.Path = path
 
 	// Collect all unique frameworks
-	frameworkSet := make(map[ComplianceFramework]bool)
+	frameworkSet := make(map[compliance.Framework]bool)
 	for _, tag := range tags {
 		for _, fw := range tag.Frameworks {
 			frameworkSet[fw] = true
@@ -449,7 +450,7 @@ func mergeTags(tags []*ComplianceTag, path string) *ComplianceTag {
 	}
 
 	// Convert to slice
-	merged.Frameworks = make([]ComplianceFramework, 0, len(frameworkSet))
+	merged.Frameworks = make([]compliance.Framework, 0, len(frameworkSet))
 	for fw := range frameworkSet {
 		merged.Frameworks = append(merged.Frameworks, fw)
 	}
@@ -579,17 +580,17 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 	// Check each framework
 	for _, framework := range tag.Frameworks {
 		switch framework {
-		case FrameworkGDPR:
+		case compliance.FrameworkGDPR:
 			ctm.validateGDPR(req, tag, result)
-		case FrameworkHIPAA:
+		case compliance.FrameworkHIPAA:
 			ctm.validateHIPAA(req, tag, result)
-		case FrameworkNIST:
+		case compliance.FrameworkNIST:
 			ctm.validateNIST(req, tag, result)
-		case FrameworkPCIDSS:
+		case compliance.FrameworkPCIDSS:
 			ctm.validatePCIDSS(req, tag, result)
-		case FrameworkSOC2:
+		case compliance.FrameworkSOC2:
 			ctm.validateSOC2(req, tag, result)
-		case FrameworkFIPS:
+		case compliance.FrameworkFIPS:
 			ctm.validateFIPS(req, tag, result)
 		}
 	}
@@ -602,7 +603,7 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 	}
 
 	// Consent checks for GDPR
-	if !req.SystemOperation && ctm.consentMgr != nil && containsFramework(tag.Frameworks, FrameworkGDPR) && (req.Operation == "read" || req.Operation == "write") {
+	if !req.SystemOperation && ctm.consentMgr != nil && containsFramework(tag.Frameworks, compliance.FrameworkGDPR) && (req.Operation == "read" || req.Operation == "write") {
 		if req.SubjectID == "" || req.Purpose == "" {
 			result.RequiredActions = append(result.RequiredActions, "identify data subject and purpose for consent verification")
 		} else {
@@ -667,7 +668,7 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 			}
 		}
 	}
-	if !req.SystemOperation && breakGlassRequired && ctm.breakGlassMgr != nil && tag.DataClass >= DataClassRestricted {
+	if !req.SystemOperation && breakGlassRequired && ctm.breakGlassMgr != nil && tag.DataClass >= compliance.DataClassRestricted {
 		if req.BreakGlassRequestID == "" {
 			result.RequiredActions = append(result.RequiredActions, "request break-glass approval for restricted data")
 			result.Allowed = false
@@ -693,7 +694,7 @@ func (ctm *ComplianceTagManager) ValidateOperation(ctx context.Context, req *Com
 	}
 
 	// Masking requirements for reads of sensitive data
-	if ctm.maskingEngine != nil && req.Operation == "read" && tag.DataClass >= DataClassConfidential {
+	if ctm.maskingEngine != nil && req.Operation == "read" && tag.DataClass >= compliance.DataClassConfidential {
 		result.RequiredActions = append(result.RequiredActions, "apply data masking before returning content")
 	}
 
@@ -763,7 +764,7 @@ func (ctm *ComplianceTagManager) validateGDPR(req *ComplianceOperationRequest, t
 	}
 
 	// GDPR Article 32: Security of processing
-	if !req.SystemOperation && req.Operation == "write" && !req.Encrypted && tag.DataClass >= DataClassConfidential {
+	if !req.SystemOperation && req.Operation == "write" && !req.Encrypted && tag.DataClass >= compliance.DataClassConfidential {
 		result.Allowed = false
 		result.ViolatedRules = append(result.ViolatedRules, "GDPR Article 32: confidential data must be encrypted")
 	}
@@ -819,7 +820,7 @@ func (ctm *ComplianceTagManager) validateNIST(req *ComplianceOperationRequest, t
 	result.RequiredActions = append(result.RequiredActions, "NIST AU-2: log security-relevant events")
 
 	// SC-13: Cryptographic Protection
-	if tag.DataClass >= DataClassConfidential && !req.Encrypted {
+	if tag.DataClass >= compliance.DataClassConfidential && !req.Encrypted {
 		result.Allowed = false
 		result.ViolatedRules = append(result.ViolatedRules, "NIST SC-13: FIPS-approved crypto required")
 	}
@@ -909,7 +910,7 @@ type ComplianceOperationRequest struct {
 	Timestamp           time.Time              `json:"timestamp"`
 }
 
-func containsFramework(frameworks []ComplianceFramework, target ComplianceFramework) bool {
+func containsFramework(frameworks []compliance.Framework, target compliance.Framework) bool {
 	for _, f := range frameworks {
 		if f == target {
 			return true
@@ -970,7 +971,7 @@ func (ctm *ComplianceTagManager) loadTags() error {
 }
 
 // ListTagsByFramework returns all paths tagged with a specific framework
-func (ctm *ComplianceTagManager) ListTagsByFramework(framework ComplianceFramework) []*ComplianceTag {
+func (ctm *ComplianceTagManager) ListTagsByFramework(framework compliance.Framework) []*ComplianceTag {
 	ctm.mu.RLock()
 	defer ctm.mu.RUnlock()
 
@@ -1043,7 +1044,7 @@ func (ctm *ComplianceTagManager) UpdateTag(ctx context.Context, tagID string, up
 }
 
 // UpdateTagByPathAndFramework updates the first tag matching path and framework
-func (ctm *ComplianceTagManager) UpdateTagByPathAndFramework(ctx context.Context, path string, framework ComplianceFramework, updateFn func(*ComplianceTag) error) error {
+func (ctm *ComplianceTagManager) UpdateTagByPathAndFramework(ctx context.Context, path string, framework compliance.Framework, updateFn func(*ComplianceTag) error) error {
 	ctm.mu.Lock()
 	defer ctm.mu.Unlock()
 
@@ -1318,7 +1319,7 @@ func (ref ComplianceResourceRef) InheritanceIDs() []string {
 }
 
 // GetEffectiveFrameworks returns all frameworks applicable to a path (including inherited)
-func (ctm *ComplianceTagManager) GetEffectiveFrameworks(path string) []ComplianceFramework {
+func (ctm *ComplianceTagManager) GetEffectiveFrameworks(path string) []compliance.Framework {
 	tag := ctm.GetTag(path)
 	if tag == nil {
 		return nil
@@ -1344,30 +1345,30 @@ func (ctm *ComplianceTagManager) CheckCompliance(ctx context.Context, path, oper
 	return result.Allowed, nil
 }
 
-func (ctm *ComplianceTagManager) MaskStringForClass(data string, class DataClassification) string {
-	if ctm == nil || ctm.maskingEngine == nil || !DataClassAtLeast(class, DataClassConfidential) {
+func (ctm *ComplianceTagManager) MaskStringForClass(data string, class compliance.DataClassification) string {
+	if ctm == nil || ctm.maskingEngine == nil || !DataClassAtLeast(class, compliance.DataClassConfidential) {
 		return data
 	}
 	return ctm.maskingEngine.MaskString(data, class)
 }
 
-func DataClassRank(class DataClassification) int {
+func DataClassRank(class compliance.DataClassification) int {
 	switch class {
-	case DataClassPublic:
+	case compliance.DataClassPublic:
 		return 0
-	case DataClassInternal:
+	case compliance.DataClassInternal:
 		return 1
-	case DataClassConfidential:
+	case compliance.DataClassConfidential:
 		return 2
-	case DataClassRestricted:
+	case compliance.DataClassRestricted:
 		return 3
-	case DataClassTopSecret:
+	case compliance.DataClassTopSecret:
 		return 4
 	default:
 		return -1
 	}
 }
 
-func DataClassAtLeast(class, threshold DataClassification) bool {
+func DataClassAtLeast(class, threshold compliance.DataClassification) bool {
 	return DataClassRank(class) >= DataClassRank(threshold)
 }

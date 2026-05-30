@@ -15,14 +15,15 @@ func main() {
 
 	_ = os.RemoveAll("./out")
 	_ = os.MkdirAll("./out", 0700)
+	transferKey := []byte("0123456789abcdef0123456789abcdef")
 
-	senderDB, err := velocity.NewWithConfig(velocity.Config{Path: "./out/sender_db"})
+	senderDB, err := velocity.NewWithConfig(velocity.Config{Path: "./out/sender_db", EncryptionKey: transferKey})
 	if err != nil {
 		panic(err)
 	}
 	defer senderDB.Close()
 
-	recipientDB, err := velocity.NewWithConfig(velocity.Config{Path: "./out/recipient_db"})
+	recipientDB, err := velocity.NewWithConfig(velocity.Config{Path: "./out/recipient_db", EncryptionKey: transferKey})
 	if err != nil {
 		panic(err)
 	}
@@ -64,7 +65,15 @@ func main() {
 	}
 
 	senderCtx := velocity.WithEnvelopeActor(ctx, "sender-ops")
-	recipientCtx := velocity.WithEnvelopeActor(ctx, "recipient-secure")
+	recipientCtx := velocity.WithEnvelopeActor(
+		velocity.WithEnvelopeAccessContext(ctx, velocity.EnvelopeAccessContext{
+			Fingerprint: "fp:recipient-secure",
+			TrustLevel:  "high",
+			MFAVerified: true,
+			RequestID:   "demo-recipient-load",
+		}),
+		"recipient-secure",
+	)
 
 	env, err := senderDB.CreateEnvelope(senderCtx, request)
 	if err != nil {

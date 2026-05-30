@@ -26,7 +26,7 @@ const (
 
 // ObjectLockConfig represents bucket-level Object Lock configuration
 type ObjectLockConfig struct {
-	Enabled          bool           `json:"enabled"`
+	Enabled          bool                     `json:"enabled"`
 	DefaultRetention *ObjectLockRetentionRule `json:"default_retention,omitempty"`
 }
 
