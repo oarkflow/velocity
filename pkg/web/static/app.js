@@ -323,6 +323,160 @@ qs('#preview-close').addEventListener('click', () => {
   qs('#preview-img').src = '';
 });
 
+// Knowledge Graph
+function escapeHTML(value) {
+  return String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function setActiveTab(name) {
+  const filesActive = name === 'files';
+  qs('#files-panel').classList.toggle('hidden', !filesActive);
+  qs('#kg-panel').classList.toggle('hidden', filesActive);
+  qs('#tab-files').className = filesActive ? 'px-3 py-2 border-b-2 border-blue-600 text-blue-700 font-medium' : 'px-3 py-2 border-b-2 border-transparent text-gray-600 hover:text-blue-700';
+  qs('#tab-kg').className = filesActive ? 'px-3 py-2 border-b-2 border-transparent text-gray-600 hover:text-blue-700' : 'px-3 py-2 border-b-2 border-blue-600 text-blue-700 font-medium';
+  if (!filesActive) {
+    loadKGDashboard();
+  }
+}
+
+qs('#tab-files').addEventListener('click', () => setActiveTab('files'));
+qs('#tab-kg').addEventListener('click', () => setActiveTab('kg'));
+
+async function loadKGDashboard() {
+  const [analytics, status, rules] = await Promise.all([
+    api('/api/v1/kg/analytics'),
+    api('/api/v1/kg/sync/status'),
+    api('/api/v1/kg/ner/rules')
+  ]);
+  if (analytics.ok) {
+    qs('#kg-analytics').innerHTML = `
+      <div>Documents: ${analytics.body.total_documents || 0}</div>
+      <div>Chunks: ${analytics.body.total_chunks || 0}</div>
+      <div>Entities: ${analytics.body.total_entities || 0}</div>
+    `;
+  }
+  if (status.ok) {
+    const body = status.body || {};
+    qs('#kg-sync-status').innerHTML = `
+      <div>Enabled: ${body.enabled ? 'yes' : 'no'}</div>
+      <div>Running: ${body.running ? 'yes' : 'no'}</div>
+      <div>Last error: ${escapeHTML(body.last_error || '-')}</div>
+    `;
+  }
+  if (rules.ok) {
+    renderKGRules(rules.body.rules || []);
+  }
+}
+
+function renderKGRules(rules) {
+  qs('#kg-rules').innerHTML = rules.length ? rules.slice(0, 40).map(rule => `
+    <div class="border-b border-gray-200 py-1">
+      <span class="font-medium">${escapeHTML(rule.type)}</span>
+      <span class="text-gray-500">${Number(rule.confidence || 0).toFixed(2)}</span>
+      <div class="text-xs text-gray-500 truncate">${escapeHTML(rule.pattern)}</div>
+    </div>
+  `).join('') : '<div class="text-gray-500">No rules loaded</div>';
+}
+
+qs('#kg-sync-btn').addEventListener('click', async () => {
+  const r = await api('/api/v1/kg/sync', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({enabled:true, existing:true})
+  });
+  if (!r.ok) {
+    alert('KG sync failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  loadKGDashboard();
+});
+
+qs('#kg-search-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const query = String(fd.get('query') || '').trim();
+  const limit = Number(fd.get('limit') || 10);
+  if (!query) return;
+  const search = await api('/api/v1/kg/search', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({query, limit})
+  });
+  if (!search.ok) {
+    alert('KG search failed: ' + JSON.stringify(search.body));
+    return;
+  }
+  const hits = search.body.hits || [];
+  qs('#kg-results').innerHTML = hits.length ? hits.map(hit => `
+    <div class="border-b border-gray-200 pb-2">
+      <div class="font-medium">${escapeHTML(hit.title || hit.source || hit.doc_id)}</div>
+      <div class="text-gray-600">${escapeHTML((hit.text || '').slice(0, 260))}</div>
+      <div class="text-xs text-gray-500">score ${Number(hit.score || 0).toFixed(4)}</div>
+    </div>
+  `).join('') : '<div class="text-gray-500">No results</div>';
+
+  const graph = await api('/api/v1/kg/resource-graph', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({query, limit, depth:1})
+  });
+  if (graph.ok) {
+    const edges = graph.body.edges || [];
+    qs('#kg-graph').innerHTML = edges.length ? edges.map(edge => `
+      <div class="border-b border-gray-200 pb-2">
+        <div>${escapeHTML(edge.source)} -> ${escapeHTML(edge.target)}</div>
+        <div class="text-gray-600">${escapeHTML(edge.relation_type)} ${Number(edge.confidence || 0).toFixed(2)}: ${escapeHTML(edge.evidence || '')}</div>
+      </div>
+    `).join('') : '<div class="text-gray-500">No inferred edges</div>';
+  }
+});
+
+qs('#kg-import-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const connector = String(fd.get('connector') || 'local_file');
+  const target = String(fd.get('target') || '').trim();
+  const table = String(fd.get('table') || '').trim();
+  const limit = Number(fd.get('limit') || 50);
+  if (!target) return;
+  const payload = {connector, limit};
+  if (connector === 'url') payload.url = target; else payload.path = target;
+  if (table) payload.table = table;
+  const r = await api('/api/v1/kg/connectors/import', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    alert('KG import failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  qs('#kg-import-result').textContent = `Imported ${r.body.imported || 0}, skipped ${r.body.skipped || 0}`;
+  loadKGDashboard();
+});
+
+qs('#kg-rule-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const payload = {
+    type: String(fd.get('type') || '').trim(),
+    pattern: String(fd.get('pattern') || '').trim(),
+    confidence: Number(fd.get('confidence') || 0.75)
+  };
+  if (!payload.type || !payload.pattern) return;
+  const r = await api('/api/v1/kg/ner/rules', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    alert('KG rule failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  ev.target.reset();
+  loadKGDashboard();
+});
+
 // Init
 (function(){
   const t = localStorage.getItem('token');

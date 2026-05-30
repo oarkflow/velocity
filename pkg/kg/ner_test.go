@@ -112,6 +112,49 @@ func TestRuleBasedNER_AddRule(t *testing.T) {
 	if len(tickets) != 2 {
 		t.Fatalf("expected 2 tickets, got %d", len(tickets))
 	}
+	rules := ner.ListRules()
+	found := false
+	for _, rule := range rules {
+		if rule.Type == "TICKET" && rule.Pattern == `[A-Z]+-\d+` {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected custom rule to be listed, got %+v", rules)
+	}
+}
+
+func TestRuleBasedNER_ExpandedIdentifiers(t *testing.T) {
+	ner := NewRuleBasedNER()
+	text := "CASE-12345 references INV-ABC123, CONTRACT-7788, POLICY-9000, ACC-XYZ789, PAN-12345, /var/log/app.log, sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, and api_abcdefghijklmnop."
+	entities := ner.Extract(text)
+	want := map[string]bool{
+		"CASE_ID":         false,
+		"INVOICE_ID":      false,
+		"CONTRACT_ID":     false,
+		"POLICY_ID":       false,
+		"ACCOUNT_ID":      false,
+		"TAX_ID":          false,
+		"FILE_PATH":       false,
+		"HASH":            false,
+		"API_KEY_PATTERN": false,
+	}
+	for _, ent := range entities {
+		if _, ok := want[ent.Type]; ok {
+			want[ent.Type] = true
+			if ent.CanonicalKey == "" {
+				t.Fatalf("expected canonical key for %+v", ent)
+			}
+			if len(ent.Identifiers) == 0 {
+				t.Fatalf("expected identifiers for %+v", ent)
+			}
+		}
+	}
+	for typ, found := range want {
+		if !found {
+			t.Fatalf("expected entity type %s in %+v", typ, entities)
+		}
+	}
 }
 
 func TestRuleBasedNER_Person(t *testing.T) {

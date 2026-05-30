@@ -38,6 +38,12 @@ section "Knowledge graph cookbook with deterministic vector search"
   run go run ./kg_cookbook
 )
 
+section "Comprehensive knowledge graph walkthrough"
+(
+  cd examples
+  run go run ./kg_comprehensive_demo
+)
+
 section "Inline embedded API example"
 cat > "${WORK_DIR}/kg_inline.go" <<'GO'
 package main

@@ -75,6 +75,7 @@ That script demonstrates explicit KG ingestion, automatic indexing from normal K
 ## Knowledge Graph And Entities
 
 - `examples/kg_cookbook/main.go`: KG cookbook.
+- `examples/kg_comprehensive_demo/main.go`: comprehensive KG ingestion, connectors, auto-indexing, graph, and cleanup walkthrough.
 - `examples/kg_batch_demo/main.go`: batch ingestion.
 - `examples/kg_ner_demo/main.go`: NER behavior.
 - `examples/kg_search_demo/main.go`: KG search.

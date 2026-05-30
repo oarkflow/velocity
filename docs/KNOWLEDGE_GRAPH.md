@@ -38,6 +38,8 @@ The KG subsystem can perform these workflows:
 - Extract text from plain text, HTML, and JSON inputs.
 - Chunk long content with a sliding window.
 - Extract entities with the rule-based NER engine.
+- Detect expanded built-in identifiers such as domains, file paths, hashes, ticket IDs, case IDs, invoice IDs, contract IDs, policy IDs, account IDs, API-key-like patterns, and tax/VAT/PAN-style IDs.
+- Register custom regex NER rules through Go or HTTP.
 - Deduplicate and resolve similar entities.
 - Store and retrieve ingested document metadata.
 - Delete documents and related KG records.
@@ -47,6 +49,7 @@ The KG subsystem can perform these workflows:
 - Search by vector or hybrid mode when an embedder/HNSW index is configured.
 - Filter searches by metadata.
 - Return a resource relation graph from a query with `SearchResourceGraph`.
+- Return explainable inferred resource graph edges with relation type, confidence, evidence, source kind, and metadata.
 - Rerank search hits with a custom reranker.
 - Traverse entity relationships.
 - Return corpus analytics.
@@ -481,11 +484,18 @@ The web module exposes KG routes:
 
 - `POST /api/v1/kg/ingest`
 - `POST /api/v1/kg/ingest/batch`
+- `GET /api/v1/kg/connectors`
+- `POST /api/v1/kg/connectors/import`
 - `POST /api/v1/kg/search`
+- `POST /api/v1/kg/resource-graph`
 - `GET /api/v1/kg/documents/:id`
 - `DELETE /api/v1/kg/documents/:id`
-- `GET /api/v1/kg/graph/:entity_id?depth=1`
+- `GET /api/v1/kg/graph/:entity_id?depth=1&relation_type=mentions`
 - `GET /api/v1/kg/analytics`
+- `POST /api/v1/kg/sync`
+- `GET /api/v1/kg/sync/status`
+- `GET /api/v1/kg/ner/rules`
+- `POST /api/v1/kg/ner/rules`
 
 Example request shape:
 
@@ -498,17 +508,60 @@ curl -X POST http://localhost:8081/api/v1/kg/search \
 
 Authentication depends on the web server configuration. See [API Reference](API_REFERENCE.md) and [Operations](OPERATIONS.md).
 
+## CLI
+
+The shipped `cmd/velocity` binary includes first-class KG commands:
+
+```bash
+velocity kg ingest --source notes.md --file ./notes.md --media-type text/markdown
+velocity kg import --connector local_file --path ./docs --format text
+velocity kg import --connector structured_file --file ./customers.csv --table customers
+velocity kg search "retention policy" --format text
+velocity kg graph "CASE-12345" --depth 1 --format text
+velocity kg sync
+velocity kg status
+velocity kg analytics
+velocity kg ner list
+velocity kg ner add --type CUSTOMER_ID --pattern 'CUST-\d+' --confidence 0.9
+```
+
+JSON is the default output for automation. Use `--format text` for concise terminal output on search, graph, and analytics commands.
+
+## Connector Interfaces
+
+`pkg/kg` exposes the lightweight `KGConnector` interface for source integrations:
+
+- `Name()`
+- `ResourceType()`
+- `List(ctx, cursor)`
+- `Fetch(ctx, item)`
+
+Optional `KGWatchConnector` implementations can stream incremental updates. Built-in connector helpers cover local files/directories, URL/API responses, and already-materialized SQL-style rows without adding external service dependencies to the core package.
+
+Connector imports can be run directly from Go with `ImportConnector`, from HTTP with `POST /api/v1/kg/connectors/import`, or from the CLI with `velocity kg import`. Supported built-ins are `local_file`, `url`, `structured_file` for CSV/TSV/JSON rows, and `static_rows` for application-provided SQL-style row payloads.
+
+## Feature Matrix
+
+| Area | Implemented | Extension Interface | Planned / App-Specific |
+| --- | --- | --- | --- |
+| Ingestion | Text, HTML, JSON, CSV, multipart HTTP, batch ingest, auto-indexed Velocity resources | `KGConnector`, custom extractor, batch ingest | SaaS ticket/email/CRM connectors |
+| Entities | Built-in rule NER, custom regex rules, confidence, canonical keys, identifiers | Custom `KGNEREngine`, HTTP rule routes | ML/LLM NER adapters |
+| Relations | Mentions, shared-entity resource edges, references/same_as/related_to inference metadata | Entity manager relations, resource graph response metadata | Domain ontologies and approval workflows |
+| Search | Keyword, phrase, boolean, prefix, fuzzy, vector, hybrid, filters, reranker | Custom embedder, HNSW, reranker | External search backends |
+| Surfaces | Go, HTTP, CLI, admin UI search/status/sync | Connector interfaces and API routes | Rich graph visualization |
+
 ## Limitations
 
 - Keyword mode is the default local path.
 - Vector and hybrid search need an embedder/HNSW setup.
 - The built-in NER is rule-based; domain-specific extraction may need custom rules or a custom NER engine.
 - KG is embedded; very large corpora should be benchmarked with realistic data before production use.
-- The shipped `cmd/velocity` CLI does not expose first-class KG commands yet; use Go APIs, HTTP APIs, examples, or `scripts/knowledge_graph_demo.sh`.
+- The first admin UI KG view is intentionally data-dense and summary-oriented; it does not include an interactive graph canvas yet.
 
 ## Source Examples
 
 - `examples/kg_cookbook/main.go`
+- `examples/kg_comprehensive_demo/main.go`
 - `examples/kg_batch_demo/main.go`
 - `examples/kg_ner_demo/main.go`
 - `examples/kg_search_demo/main.go`

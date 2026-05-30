@@ -3214,11 +3214,13 @@ func (db *DB) deleteLocked(key []byte) error {
 
 	entry.checksum = crc32.ChecksumIEEE(entry.Key)
 
-	if db.wal == nil {
-		return fmt.Errorf("WAL is not initialized")
-	}
-	if err := db.wal.Write(entry); err != nil {
-		return err
+	if !db.disableWAL {
+		if db.wal == nil {
+			return fmt.Errorf("WAL is not initialized")
+		}
+		if err := db.wal.Write(entry); err != nil {
+			return err
+		}
 	}
 
 	db.memTable.Delete(key)

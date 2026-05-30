@@ -181,11 +181,18 @@ Routes under `/api/v1/kg`:
 
 - `POST /ingest`
 - `POST /ingest/batch`
+- `GET /connectors`
+- `POST /connectors/import`
 - `POST /search`
+- `POST /resource-graph`
 - `GET /documents/:id`
 - `DELETE /documents/:id`
-- `GET /graph/:entity_id?depth=1`
+- `GET /graph/:entity_id?depth=1&relation_type=mentions`
 - `GET /analytics`
+- `POST /sync`
+- `GET /sync/status`
+- `GET /ner/rules`
+- `POST /ner/rules`
 
 ## Enterprise API
 

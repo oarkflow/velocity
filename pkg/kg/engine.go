@@ -3,6 +3,7 @@ package kg
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // KGConfig configures the Knowledge Graph Engine.
@@ -17,7 +18,8 @@ type KGConfig struct {
 	ChunkOverlap  int // overlap in words (default 64)
 
 	// Ingest
-	IngestWorkers int // concurrent workers for batch ingest (default 4)
+	IngestWorkers  int // concurrent workers for batch ingest (default 4)
+	CustomNERRules []KGCustomNERRule
 
 	// HNSW tuning
 	HNSWM              int // max connections per layer (default 16)
@@ -32,7 +34,7 @@ type KnowledgeGraphEngine struct {
 	search   *KGSearchEngine
 	hnsw     *HNSWIndex
 	embedder KGEmbedder
-	ner      KGNEREngine
+	ner      *RuleBasedNER
 	em       EntityStore
 	config   KGConfig
 }
@@ -52,6 +54,18 @@ func NewKnowledgeGraphEngine(db Store, config KGConfig, entities ...EntityStore)
 		ner:    NewRuleBasedNER(),
 		em:     em,
 		config: config,
+	}
+	for _, rule := range config.CustomNERRules {
+		if strings.TrimSpace(rule.Type) == "" || strings.TrimSpace(rule.Pattern) == "" {
+			continue
+		}
+		confidence := rule.Confidence
+		if confidence <= 0 {
+			confidence = 0.75
+		}
+		if err := engine.ner.AddRule(rule.Type, rule.Pattern, confidence); err != nil {
+			return nil, fmt.Errorf("add custom NER rule %s: %w", rule.Type, err)
+		}
 	}
 
 	// Set up embedder and HNSW if endpoint is configured
@@ -101,6 +115,31 @@ func NewKnowledgeGraphEngine(db Store, config KGConfig, entities ...EntityStore)
 	return engine, nil
 }
 
+// AddNERRule registers a custom regex entity extractor on the rule-based engine.
+func (e *KnowledgeGraphEngine) AddNERRule(rule KGCustomNERRule) error {
+	if e == nil || e.ner == nil {
+		return fmt.Errorf("knowledge graph NER unavailable")
+	}
+	if strings.TrimSpace(rule.Type) == "" {
+		return fmt.Errorf("rule type is required")
+	}
+	if strings.TrimSpace(rule.Pattern) == "" {
+		return fmt.Errorf("rule pattern is required")
+	}
+	if rule.Confidence <= 0 {
+		rule.Confidence = 0.75
+	}
+	return e.ner.AddRule(rule.Type, rule.Pattern, rule.Confidence)
+}
+
+// ListNERRules returns configured rule-based entity extractors.
+func (e *KnowledgeGraphEngine) ListNERRules() []KGCustomNERRule {
+	if e == nil || e.ner == nil {
+		return nil
+	}
+	return e.ner.ListRules()
+}
+
 // Ingest processes a single document.
 func (e *KnowledgeGraphEngine) Ingest(ctx context.Context, req *KGIngestRequest) (*KGIngestResponse, error) {
 	resp, err := e.pipeline.Ingest(ctx, req)
@@ -122,6 +161,55 @@ func (e *KnowledgeGraphEngine) IngestBatch(ctx context.Context, reqs []*KGIngest
 		}
 	}
 	return resps, errs
+}
+
+// ImportConnector lists connector items, fetches each item, and ingests the
+// fetched content through the normal KG pipeline.
+func (e *KnowledgeGraphEngine) ImportConnector(ctx context.Context, connector KGConnector, cursor string, limit int) (*KGConnectorImportResponse, error) {
+	if e == nil {
+		return nil, fmt.Errorf("knowledge graph engine is nil")
+	}
+	if connector == nil {
+		return nil, fmt.Errorf("connector is required")
+	}
+	items, nextCursor, err := connector.List(ctx, cursor)
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	resp := &KGConnectorImportResponse{
+		Connector:  connector.Name(),
+		NextCursor: nextCursor,
+		Results:    make([]*KGIngestResponse, 0, len(items)),
+	}
+	for _, item := range items {
+		if ctx.Err() != nil {
+			resp.Errors = append(resp.Errors, ctx.Err().Error())
+			break
+		}
+		req, err := connector.Fetch(ctx, item)
+		if err != nil {
+			resp.Skipped++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		if req == nil {
+			resp.Skipped++
+			resp.Errors = append(resp.Errors, "connector returned nil ingest request")
+			continue
+		}
+		ingested, err := e.Ingest(ctx, req)
+		if err != nil {
+			resp.Skipped++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		resp.Imported++
+		resp.Results = append(resp.Results, ingested)
+	}
+	return resp, nil
 }
 
 // Search executes a hybrid search query.
@@ -180,11 +268,15 @@ func (e *KnowledgeGraphEngine) GetAnalytics() *KGAnalytics {
 }
 
 // GraphNeighbors returns the entity graph for a given entity ID.
-func (e *KnowledgeGraphEngine) GraphNeighbors(ctx context.Context, entityID string, depth int) (*EntityResult, error) {
+func (e *KnowledgeGraphEngine) GraphNeighbors(ctx context.Context, entityID string, depth int, relationTypes ...string) (*EntityResult, error) {
 	if depth <= 0 {
 		depth = 1
 	}
-	results, err := e.em.GetRelatedEntities(ctx, entityID, "", depth)
+	relationType := ""
+	if len(relationTypes) > 0 {
+		relationType = relationTypes[0]
+	}
+	results, err := e.em.GetRelatedEntities(ctx, entityID, relationType, depth)
 	if err != nil {
 		return nil, err
 	}

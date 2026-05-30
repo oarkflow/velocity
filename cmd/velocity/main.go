@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/oarkflow/velocity/pkg/compliance"
+	"github.com/oarkflow/velocity/pkg/kg"
 	"log"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/oarkflow/velocity"
@@ -56,6 +58,8 @@ func run() error {
 		return handleEnvelope(db, ctx, args)
 	case "compliance":
 		return handleCompliance(db, ctx, args)
+	case "kg":
+		return handleKG(db, ctx, args)
 	case "help":
 		printUsage()
 	default:
@@ -88,6 +92,16 @@ Commands:
   compliance tag --type TYPE [resource flags] --framework GDPR --class restricted
   compliance get --type TYPE [resource flags]
   compliance check --type TYPE [resource flags] --operation read --actor alice
+  kg ingest --source SRC --file PATH [--media-type TYPE] [--title TITLE]
+  kg import --connector local_file --path PATH [--limit N] [--format text]
+  kg import --connector structured_file --file rows.csv [--table TABLE]
+  kg search QUERY [--limit N] [--format text]
+  kg graph QUERY [--limit N] [--depth N] [--format text]
+  kg sync [--async] [--secret-values]
+  kg status
+  kg analytics
+  kg ner list
+  kg ner add --type TYPE --pattern REGEX [--confidence N]
 
 Examples:
   velocity data put mykey myvalue
@@ -98,6 +112,10 @@ Examples:
   velocity envelope bundle create --label "Evidence" --resource '[{"type":"file","name":"doc.pdf","path":"evidence/doc.pdf"}]'
   velocity compliance tag --type sql_table --table patients --framework HIPAA --class restricted --encrypt
   velocity compliance tag --type secret --name api-key --framework GDPR --class confidential
+  velocity kg ingest --source notes.md --file ./notes.md --media-type text/markdown
+  velocity kg import --connector local_file --path ./docs --format text
+  velocity kg import --connector structured_file --file ./customers.csv --table customers
+  velocity kg search "retention policy" --format text
 
 Environment:
   VELOCITY_PATH   Database path (default: ./velocity_data)
@@ -260,6 +278,282 @@ func getDBPath() string {
 		return path
 	}
 	return "./velocity_data"
+}
+
+func handleKG(db *velocity.DB, ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: velocity kg <ingest|import|search|graph|sync|status|analytics|ner>")
+	}
+	graph := db.KnowledgeGraph()
+	if graph == nil {
+		return fmt.Errorf("knowledge graph unavailable")
+	}
+	subcmd := args[0]
+	flags, positional := parseFlags(args[1:])
+	format := flagDefault(flags, "format", "json")
+
+	switch subcmd {
+	case "ingest":
+		source := flags["source"]
+		filePath := flags["file"]
+		if filePath == "" && len(positional) > 0 {
+			filePath = positional[0]
+		}
+		if filePath == "" {
+			return fmt.Errorf("usage: velocity kg ingest --source SRC --file PATH [--media-type TYPE] [--title TITLE]")
+		}
+		if source == "" {
+			source = filePath
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to read file: %w", err)
+		}
+		mediaType := flags["media-type"]
+		if mediaType == "" {
+			mediaType, _ = detectFileContentType(filePath)
+		}
+		resp, err := graph.Ingest(ctx, &kg.KGIngestRequest{
+			Source:    source,
+			Content:   data,
+			MediaType: mediaType,
+			Title:     flagDefault(flags, "title", filepath.Base(filePath)),
+			Metadata:  map[string]string{"connector": "cli", "path": filePath},
+		})
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			fmt.Printf("ingested doc=%s chunks=%d entities=%d duration_ms=%d\n", resp.DocID, resp.ChunkCount, resp.EntityCount, resp.DurationMs)
+			return nil
+		}
+		return printJSON(resp)
+	case "import":
+		connectorName := flagDefault(flags, "connector", "local_file")
+		connector, err := kgConnectorFromFlags(connectorName, flags, positional)
+		if err != nil {
+			return err
+		}
+		resp, err := graph.ImportConnector(ctx, connector, flags["cursor"], parseIntDefault(flags["limit"], 0))
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			fmt.Printf("connector=%s imported=%d skipped=%d next_cursor=%s\n", resp.Connector, resp.Imported, resp.Skipped, resp.NextCursor)
+			for _, msg := range resp.Errors {
+				fmt.Printf("error: %s\n", msg)
+			}
+			return nil
+		}
+		return printJSON(resp)
+	case "search":
+		query := strings.Join(positional, " ")
+		if query == "" {
+			query = flags["query"]
+		}
+		if query == "" {
+			return fmt.Errorf("usage: velocity kg search QUERY [--limit N] [--format text]")
+		}
+		limit := parseIntDefault(flags["limit"], 10)
+		resp, err := graph.Search(ctx, &kg.KGSearchRequest{Query: query, Limit: limit})
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			for _, hit := range resp.Hits {
+				fmt.Printf("%s\t%.4f\t%s\n", firstNonEmptyCLI(hit.Source, hit.DocID), hit.Score, strings.TrimSpace(hit.Title))
+			}
+			return nil
+		}
+		return printJSON(resp)
+	case "graph":
+		query := strings.Join(positional, " ")
+		if query == "" {
+			query = flags["query"]
+		}
+		if query == "" {
+			return fmt.Errorf("usage: velocity kg graph QUERY [--limit N] [--depth N] [--format text]")
+		}
+		resp, err := graph.SearchResourceGraph(ctx, &kg.KGResourceGraphRequest{
+			Query: query,
+			Limit: parseIntDefault(flags["limit"], 10),
+			Depth: parseIntDefault(flags["depth"], 1),
+		})
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			fmt.Printf("nodes=%d edges=%d hits=%d\n", len(resp.Nodes), len(resp.Edges), resp.SearchHits)
+			for _, edge := range resp.Edges {
+				fmt.Printf("%s -> %s [%s %.2f] %s\n", edge.Source, edge.Target, edge.RelationType, edge.Confidence, edge.Evidence)
+			}
+			return nil
+		}
+		return printJSON(resp)
+	case "sync":
+		cfg := velocity.KnowledgeGraphAutoIndexConfig{
+			Enabled:      true,
+			Existing:     true,
+			Async:        flags["async"] == "true",
+			SecretValues: flags["secret-values"] == "true",
+		}
+		if err := db.SyncKnowledgeGraph(ctx, cfg); err != nil {
+			return err
+		}
+		return printJSON(db.KnowledgeGraphSyncStatus())
+	case "status":
+		return printJSON(db.KnowledgeGraphSyncStatus())
+	case "analytics":
+		analytics := graph.GetAnalytics()
+		if format == "text" {
+			fmt.Printf("documents=%d chunks=%d entities=%d\n", analytics.TotalDocuments, analytics.TotalChunks, analytics.TotalEntities)
+			return nil
+		}
+		return printJSON(analytics)
+	case "ner":
+		if len(positional) < 1 {
+			return fmt.Errorf("usage: velocity kg ner <list|add>")
+		}
+		switch positional[0] {
+		case "list":
+			return printJSON(map[string]any{"rules": graph.ListNERRules()})
+		case "add":
+			rule := kg.KGCustomNERRule{
+				Type:       flagDefault(flags, "type", ""),
+				Pattern:    flagDefault(flags, "pattern", ""),
+				Confidence: parseFloatDefault(flags["confidence"], 0.75),
+			}
+			if err := graph.AddNERRule(rule); err != nil {
+				return err
+			}
+			if format == "text" {
+				fmt.Printf("added rule type=%s confidence=%.2f\n", rule.Type, rule.Confidence)
+				return nil
+			}
+			return printJSON(rule)
+		default:
+			return fmt.Errorf("unknown kg ner command: %s", positional[0])
+		}
+	default:
+		return fmt.Errorf("unknown kg command: %s", subcmd)
+	}
+}
+
+func kgConnectorFromFlags(name string, flags map[string]string, positional []string) (kg.KGConnector, error) {
+	switch name {
+	case "local_file", "local-file", "file", "directory", "dir":
+		root := flags["path"]
+		if root == "" {
+			root = flags["root"]
+		}
+		if root == "" && len(positional) > 0 {
+			root = positional[0]
+		}
+		if root == "" {
+			return nil, fmt.Errorf("usage: velocity kg import --connector local_file --path PATH")
+		}
+		return kg.LocalFileConnector{Root: root}, nil
+	case "url", "http":
+		url := flags["url"]
+		if url == "" && len(positional) > 0 {
+			url = positional[0]
+		}
+		if url == "" {
+			return nil, fmt.Errorf("usage: velocity kg import --connector url --url URL")
+		}
+		return kg.URLConnector{URL: url}, nil
+	case "structured_file", "structured-file", "csv", "json":
+		path := flags["file"]
+		if path == "" {
+			path = flags["path"]
+		}
+		if path == "" && len(positional) > 0 {
+			path = positional[0]
+		}
+		if path == "" {
+			return nil, fmt.Errorf("usage: velocity kg import --connector structured_file --file PATH [--table TABLE]")
+		}
+		return kg.StructuredFileConnector{Path: path, Table: flags["table"]}, nil
+	case "static_rows", "static-rows", "rows", "sql_rows", "sql-rows":
+		path := flags["file"]
+		if path == "" {
+			path = flags["path"]
+		}
+		if path == "" && len(positional) > 0 {
+			path = positional[0]
+		}
+		if path == "" {
+			return nil, fmt.Errorf("usage: velocity kg import --connector static_rows --file rows.json [--table TABLE]")
+		}
+		rows, err := loadStaticRows(path, flags["table"])
+		if err != nil {
+			return nil, err
+		}
+		return kg.StaticRowsConnector{NameValue: "static_rows", Table: flags["table"], Rows: rows}, nil
+	default:
+		return nil, fmt.Errorf("unknown kg connector: %s", name)
+	}
+}
+
+func loadStaticRows(path, table string) ([]kg.KGConnectorItem, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read rows file: %w", err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("rows file must be a JSON array of objects: %w", err)
+	}
+	items := make([]kg.KGConnectorItem, 0, len(decoded))
+	for i, row := range decoded {
+		content, _ := json.Marshal(row)
+		rowID := fmt.Sprintf("%s:%d", filepath.Base(path), i+1)
+		items = append(items, kg.KGConnectorItem{
+			Source:       "static_rows:" + rowID,
+			ResourceType: kg.ResourceSQLRow,
+			ResourceID:   rowID,
+			MediaType:    "application/json",
+			Title:        rowID,
+			Content:      content,
+			Metadata: map[string]string{
+				"connector": "static_rows",
+				"table":     table,
+				"row":       strconv.Itoa(i + 1),
+			},
+		})
+	}
+	return items, nil
+}
+
+func parseIntDefault(raw string, fallback int) int {
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+func parseFloatDefault(raw string, fallback float64) float64 {
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.ParseFloat(raw, 64)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+func firstNonEmptyCLI(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func handleData(db *velocity.DB, ctx context.Context, args []string) error {

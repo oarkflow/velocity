@@ -58,6 +58,8 @@ func (a kgEntityAdapter) AddRelation(ctx context.Context, req *kg.EntityRelation
 		SourceEntity:  rel.SourceEntity,
 		TargetEntity:  rel.TargetEntity,
 		RelationType:  rel.RelationType,
+		CreatedAt:     rel.CreatedAt,
+		CreatedBy:     rel.CreatedBy,
 		Metadata:      rel.Metadata,
 		Bidirectional: rel.Bidirectional,
 	}, nil
@@ -90,6 +92,8 @@ func (a kgEntityAdapter) GetRelatedEntities(ctx context.Context, entityID string
 				SourceEntity:  rel.SourceEntity,
 				TargetEntity:  rel.TargetEntity,
 				RelationType:  rel.RelationType,
+				CreatedAt:     rel.CreatedAt,
+				CreatedBy:     rel.CreatedBy,
 				Metadata:      rel.Metadata,
 				Bidirectional: rel.Bidirectional,
 			})
@@ -97,4 +101,8 @@ func (a kgEntityAdapter) GetRelatedEntities(ctx context.Context, entityID string
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func (a kgEntityAdapter) DeleteEntity(ctx context.Context, entityID string) error {
+	return a.db.DeleteEntity(ctx, entityID)
 }

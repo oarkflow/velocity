@@ -1124,24 +1124,27 @@ func (ctm *ComplianceTagManager) RemoveTagByID(ctx context.Context, tagID string
 	ctm.mu.Lock()
 	defer ctm.mu.Unlock()
 
-	// Find and remove from memory
+	found := false
 	for path, tagList := range ctm.tags {
-		for i, tag := range tagList {
+		filtered := tagList[:0]
+		for _, tag := range tagList {
 			if tag.TagID == tagID {
-				// Remove from slice
-				ctm.tags[path] = append(tagList[:i], tagList[i+1:]...)
-				// Clean up empty lists
-				if len(ctm.tags[path]) == 0 {
-					delete(ctm.tags, path)
-				}
-				// Remove from database
-				key := []byte("compliance:tag:" + tagID)
-				return ctm.db.Delete(key)
+				found = true
+				continue
 			}
+			filtered = append(filtered, tag)
+		}
+		if len(filtered) == 0 {
+			delete(ctm.tags, path)
+		} else {
+			ctm.tags[path] = filtered
 		}
 	}
-
-	return fmt.Errorf("tag not found with ID: %s", tagID)
+	if !found {
+		return fmt.Errorf("tag not found with ID: %s", tagID)
+	}
+	key := []byte("compliance:tag:" + tagID)
+	return ctm.db.Delete(key)
 }
 
 func normalizeCompliancePath(path string) string {

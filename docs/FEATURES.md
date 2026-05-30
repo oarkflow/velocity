@@ -72,13 +72,14 @@ For a runnable smoke flow across the complete feature set, use:
 - Core implementation package under `pkg/kg`, with `db.KnowledgeGraph(...)` as the embedded `velocity` integration point.
 - Document ingestion with text extraction from plain text, HTML, and JSON.
 - Sliding-window chunking.
-- Rule-based NER for emails, URLs, dates, money, organizations, people, and custom rules.
+- Rule-based NER for emails, URLs, domains, file paths, hashes, dates, money, organizations, people, business identifiers, API-key-like patterns, and custom regex rules.
 - Lightweight in-memory KG search index with all/any/phrase/boolean/prefix matching and opt-in fuzzy fallback search.
 - Entity manager and entity relations with graph traversal, tags, linked secrets, objects, and envelopes.
 - Entity resolution and deduplication.
 - HNSW vector index, cosine similarity, vector search, hybrid search, graph neighbors, and analytics.
 - Opt-in automatic indexing for KV records, objects, secrets, SQL rows, envelopes, and entity records so normal writes become KG-searchable without per-record `Ingest` calls.
-- Query-driven resource graph discovery with `SearchResourceGraph`, which returns matching resources as nodes and inferred relation edges when resources mention the same extracted entities.
+- Query-driven resource graph discovery with `SearchResourceGraph`, which returns matching resources as nodes and explainable inferred relation edges when resources mention the same extracted entities.
+- Connector interfaces, `ImportConnector`, HTTP connector import, CLI connector import, and built-in local file, URL, CSV/TSV/JSON structured-row, and static SQL-row helpers for integrations without mandatory external services.
 
 ## APIs And Interfaces
 
@@ -90,6 +91,7 @@ For a runnable smoke flow across the complete feature set, use:
 - S3-compatible HTTP surface.
 - Enterprise API route group under `/api/v1`.
 - Browser admin UI served from `pkg/web/static`.
+- Knowledge Graph HTTP, CLI, and admin UI surfaces for ingest, search, graph discovery, sync status, analytics, and custom NER rules.
 
 ## Resilience And Operations
 

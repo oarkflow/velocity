@@ -117,6 +117,26 @@ Run only the knowledge graph walkthrough:
 
 The KG walkthrough covers explicit ingestion plus automatic indexing from ordinary KV, object, secret, SQL, envelope, and entity writes.
 
+## Knowledge Graph Commands
+
+The shipped `cmd/velocity` binary includes a compact KG command family:
+
+```bash
+velocity kg ingest --source notes.md --file ./notes.md --media-type text/markdown
+velocity kg import --connector local_file --path ./docs --format text
+velocity kg import --connector structured_file --file ./customers.csv --table customers
+velocity kg search "retention policy" --limit 10
+velocity kg search "retention policy" --format text
+velocity kg graph "CASE-12345" --depth 1 --format text
+velocity kg sync
+velocity kg status
+velocity kg analytics
+velocity kg ner list
+velocity kg ner add --type CUSTOMER_ID --pattern 'CUST-\d+' --confidence 0.9
+```
+
+JSON is the default output for automation. Search, graph, and analytics commands also support `--format text`.
+
 Keep its temporary database and generated Go program:
 
 ```bash

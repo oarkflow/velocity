@@ -38,6 +38,11 @@
 
     <!-- Main File Manager Interface -->
     <div id="file-manager" class="hidden bg-white rounded-lg shadow-md p-6">
+      <div class="flex gap-2 mb-4 border-b border-gray-200">
+        <button id="tab-files" class="px-3 py-2 border-b-2 border-blue-600 text-blue-700 font-medium">Files</button>
+        <button id="tab-kg" class="px-3 py-2 border-b-2 border-transparent text-gray-600 hover:text-blue-700">Knowledge Graph</button>
+      </div>
+      <section id="files-panel">
       <!-- Toolbar -->
       <div class="flex justify-between items-center mb-4">
         <div class="flex space-x-2">
@@ -84,6 +89,70 @@
           </tbody>
         </table>
       </div>
+      </section>
+
+      <section id="kg-panel" class="hidden space-y-4">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div class="bg-gray-50 rounded-lg p-4">
+            <h2 class="text-lg font-semibold mb-3">Search</h2>
+            <form id="kg-search-form" class="space-y-3">
+              <input name="query" placeholder="Search the knowledge graph" class="w-full px-3 py-2 border border-gray-300 rounded-md" />
+              <div class="flex gap-2">
+                <input name="limit" type="number" min="1" max="100" value="10" class="w-24 px-3 py-2 border border-gray-300 rounded-md" />
+                <button class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Search</button>
+              </div>
+            </form>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-4">
+            <h2 class="text-lg font-semibold mb-3">Sync</h2>
+            <div id="kg-sync-status" class="text-sm text-gray-700 mb-3">Not loaded</div>
+            <button id="kg-sync-btn" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">Sync Existing</button>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-4">
+            <h2 class="text-lg font-semibold mb-3">Analytics</h2>
+            <div id="kg-analytics" class="text-sm text-gray-700">Not loaded</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="bg-gray-50 rounded-lg p-4">
+            <h2 class="text-lg font-semibold mb-3">Connector Import</h2>
+            <form id="kg-import-form" class="space-y-3">
+              <select name="connector" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                <option value="local_file">Local file/directory</option>
+                <option value="url">URL</option>
+                <option value="structured_file">CSV/TSV/JSON rows</option>
+              </select>
+              <input name="target" placeholder="Path, directory, or URL" class="w-full px-3 py-2 border border-gray-300 rounded-md" />
+              <input name="table" placeholder="Table name for row imports" class="w-full px-3 py-2 border border-gray-300 rounded-md" />
+              <div class="flex gap-2">
+                <input name="limit" type="number" min="1" max="1000" value="50" class="w-24 px-3 py-2 border border-gray-300 rounded-md" />
+                <button class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded">Import</button>
+              </div>
+            </form>
+            <div id="kg-import-result" class="mt-3 text-sm text-gray-700"></div>
+          </div>
+          <div class="bg-gray-50 rounded-lg p-4">
+            <h2 class="text-lg font-semibold mb-3">NER Rules</h2>
+            <form id="kg-rule-form" class="space-y-3">
+              <input name="type" placeholder="Entity type" class="w-full px-3 py-2 border border-gray-300 rounded-md" />
+              <input name="pattern" placeholder="Regex pattern" class="w-full px-3 py-2 border border-gray-300 rounded-md" />
+              <div class="flex gap-2">
+                <input name="confidence" type="number" min="0.01" max="1" step="0.01" value="0.75" class="w-28 px-3 py-2 border border-gray-300 rounded-md" />
+                <button class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Add Rule</button>
+              </div>
+            </form>
+            <div id="kg-rules" class="mt-3 text-sm text-gray-700 max-h-40 overflow-auto"></div>
+          </div>
+        </div>
+        <div class="bg-gray-50 rounded-lg p-4">
+          <h2 class="text-lg font-semibold mb-3">Results</h2>
+          <div id="kg-results" class="space-y-3 text-sm"></div>
+        </div>
+        <div class="bg-gray-50 rounded-lg p-4">
+          <h2 class="text-lg font-semibold mb-3">Resource Graph</h2>
+          <div id="kg-graph" class="space-y-2 text-sm"></div>
+        </div>
+      </section>
 
       <!-- Upload Modal -->
       <div id="upload-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full">

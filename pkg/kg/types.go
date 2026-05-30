@@ -1,6 +1,9 @@
 package kg
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type ResourceType string
 
@@ -61,14 +64,44 @@ type KGChunk struct {
 
 // KGEntity represents a named entity extracted from text.
 type KGEntity struct {
-	Surface    string  `json:"surface"`
-	Canonical  string  `json:"canonical"`
-	Type       string  `json:"type"`
-	Confidence float64 `json:"confidence"`
-	DocID      string  `json:"doc_id,omitempty"`
-	ChunkID    string  `json:"chunk_id,omitempty"`
-	StartByte  int     `json:"start_byte,omitempty"`
-	EndByte    int     `json:"end_byte,omitempty"`
+	Surface      string            `json:"surface"`
+	Canonical    string            `json:"canonical"`
+	Type         string            `json:"type"`
+	Confidence   float64           `json:"confidence"`
+	DocID        string            `json:"doc_id,omitempty"`
+	ChunkID      string            `json:"chunk_id,omitempty"`
+	StartByte    int               `json:"start_byte,omitempty"`
+	EndByte      int               `json:"end_byte,omitempty"`
+	Aliases      []string          `json:"aliases,omitempty"`
+	Identifiers  map[string]string `json:"identifiers,omitempty"`
+	SourceRefs   []KGSourceRef     `json:"source_refs,omitempty"`
+	CanonicalKey string            `json:"canonical_key,omitempty"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+}
+
+// KGSourceRef identifies where an entity or relation was observed.
+type KGSourceRef struct {
+	Source       string       `json:"source,omitempty"`
+	DocID        string       `json:"doc_id,omitempty"`
+	ChunkID      string       `json:"chunk_id,omitempty"`
+	ResourceType ResourceType `json:"resource_type,omitempty"`
+	ResourceID   string       `json:"resource_id,omitempty"`
+	StartByte    int          `json:"start_byte,omitempty"`
+	EndByte      int          `json:"end_byte,omitempty"`
+}
+
+// KGRelation describes an inferred or explicit graph edge with explainable evidence.
+type KGRelation struct {
+	Source       string            `json:"source"`
+	Target       string            `json:"target"`
+	RelationType string            `json:"relation_type"`
+	Confidence   float64           `json:"confidence,omitempty"`
+	Evidence     string            `json:"evidence,omitempty"`
+	SourceKind   string            `json:"source_kind,omitempty"`
+	CreatedBy    string            `json:"created_by,omitempty"`
+	CreatedAt    time.Time         `json:"created_at,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
 }
 
 // SearchMode represents the type of search to perform.
@@ -158,6 +191,12 @@ type KGResourceGraphEdge struct {
 	RelationType string            `json:"relation_type"`
 	Entity       KGEntity          `json:"entity"`
 	Weight       float64           `json:"weight"`
+	Confidence   float64           `json:"confidence,omitempty"`
+	Evidence     string            `json:"evidence,omitempty"`
+	SourceKind   string            `json:"source_kind,omitempty"`
+	CreatedBy    string            `json:"created_by,omitempty"`
+	CreatedAt    time.Time         `json:"created_at,omitempty"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
@@ -178,6 +217,50 @@ type KGIngestRequest struct {
 	MediaType string            `json:"media_type"`
 	Title     string            `json:"title,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+}
+
+// KGCustomNERRule configures an additional rule-based entity extractor.
+type KGCustomNERRule struct {
+	Type       string  `json:"type"`
+	Pattern    string  `json:"pattern"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+// KGConnectorItem identifies a source record exposed by a connector.
+type KGConnectorItem struct {
+	Source       string            `json:"source"`
+	ResourceType ResourceType      `json:"resource_type,omitempty"`
+	ResourceID   string            `json:"resource_id,omitempty"`
+	MediaType    string            `json:"media_type,omitempty"`
+	Title        string            `json:"title,omitempty"`
+	Content      []byte            `json:"content,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Cursor       string            `json:"cursor,omitempty"`
+}
+
+// KGConnector provides a dependency-light ingestion integration point. Built-in
+// and application connectors can list items and fetch them as KG ingest requests.
+type KGConnector interface {
+	Name() string
+	ResourceType() ResourceType
+	List(ctx context.Context, cursor string) ([]KGConnectorItem, string, error)
+	Fetch(ctx context.Context, item KGConnectorItem) (*KGIngestRequest, error)
+}
+
+// KGWatchConnector is optionally implemented by connectors that can stream
+// incremental updates.
+type KGWatchConnector interface {
+	Watch(ctx context.Context, cursor string) (<-chan KGConnectorItem, error)
+}
+
+// KGConnectorImportResponse summarizes a connector-driven ingest run.
+type KGConnectorImportResponse struct {
+	Connector  string              `json:"connector"`
+	Imported   int                 `json:"imported"`
+	Skipped    int                 `json:"skipped"`
+	NextCursor string              `json:"next_cursor,omitempty"`
+	Results    []*KGIngestResponse `json:"results,omitempty"`
+	Errors     []string            `json:"errors,omitempty"`
 }
 
 // KGIngestResponse is the response after ingesting a document.

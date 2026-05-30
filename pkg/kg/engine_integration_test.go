@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	. "github.com/oarkflow/velocity"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,6 +157,217 @@ func TestKGEngine_SearchModesAndChunkEntities(t *testing.T) {
 	}
 	if len(fuzzy.Hits[0].Entities) == 0 {
 		t.Fatal("expected hydrated hit entities from chunk metadata")
+	}
+}
+
+func TestKGEngine_ResourceGraphEdgeMetadata(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	engine := db.KnowledgeGraph()
+	ctx := context.Background()
+
+	docs := []*kg.KGIngestRequest{
+		{
+			Source:    "case-note.txt",
+			MediaType: "text/plain",
+			Title:     "Case Note",
+			Content:   []byte("CASE-12345 references Acme Corp and invoice INV-ABC123."),
+			Metadata:  map[string]string{"resource_type": string(kg.ResourceKV), "key": "case-note"},
+		},
+		{
+			Source:    "invoice.txt",
+			MediaType: "text/plain",
+			Title:     "Invoice",
+			Content:   []byte("Invoice INV-ABC123 belongs to Acme Corp for CASE-12345."),
+			Metadata:  map[string]string{"resource_type": string(kg.ResourceObject), "path": "invoice.txt"},
+		},
+	}
+	for _, doc := range docs {
+		if _, err := engine.Ingest(ctx, doc); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+
+	resp, err := engine.SearchResourceGraph(ctx, &kg.KGResourceGraphRequest{Query: "CASE-12345 INV-ABC123", Limit: 10})
+	if err != nil {
+		t.Fatalf("resource graph: %v", err)
+	}
+	if len(resp.Edges) == 0 {
+		t.Fatalf("expected inferred edges, got %+v", resp)
+	}
+	found := false
+	for _, edge := range resp.Edges {
+		if edge.RelationType == "references" && edge.Confidence > 0 && edge.Evidence != "" && edge.SourceKind == "inferred" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected references edge with metadata, got %+v", resp.Edges)
+	}
+}
+
+func TestKGEngine_ImportConnector(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	fileDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fileDir, "connector.txt"), []byte("Connector imported CASE-55555 for Acme Corp."), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := db.KnowledgeGraph()
+	resp, err := engine.ImportConnector(context.Background(), kg.LocalFileConnector{Root: fileDir}, "", 10)
+	if err != nil {
+		t.Fatalf("import connector: %v", err)
+	}
+	if resp.Imported != 1 || resp.Skipped != 0 {
+		t.Fatalf("unexpected import response: %+v", resp)
+	}
+	search, err := engine.Search(context.Background(), &kg.KGSearchRequest{Query: "CASE-55555", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if search.TotalHits == 0 {
+		t.Fatalf("expected imported content to be searchable")
+	}
+}
+
+func TestKGEngine_ImportStructuredFileConnector(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	csvPath := filepath.Join(t.TempDir(), "customers.csv")
+	if err := os.WriteFile(csvPath, []byte("id,name,note\n1,Acme Corp,CASE-12121\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine := db.KnowledgeGraph()
+	resp, err := engine.ImportConnector(context.Background(), kg.StructuredFileConnector{Path: csvPath, Table: "customers"}, "", 10)
+	if err != nil {
+		t.Fatalf("import structured connector: %v", err)
+	}
+	if resp.Imported != 1 {
+		t.Fatalf("expected one row imported, got %+v", resp)
+	}
+	search, err := engine.Search(context.Background(), &kg.KGSearchRequest{Query: "CASE-12121", Limit: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if search.TotalHits == 0 {
+		t.Fatalf("expected structured row content to be searchable")
+	}
+}
+
+func TestKGEngine_DeleteDocumentRemovesKGDocumentEntity(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	engine := db.KnowledgeGraph()
+	ctx := context.Background()
+	resp, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "delete-entity.txt",
+		MediaType: "text/plain",
+		Title:     "Delete Entity",
+		Content:   []byte("Delete cleanup references CASE-99999 and Acme Corp."),
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	doc, err := engine.GetDocument(resp.DocID)
+	if err != nil {
+		t.Fatalf("get doc: %v", err)
+	}
+	entityID := doc.Metadata["kg_doc_entity_id"]
+	if entityID == "" {
+		t.Fatalf("expected kg_doc_entity_id metadata in %+v", doc.Metadata)
+	}
+	if _, err := db.GetEntity(ctx, entityID, true); err != nil {
+		t.Fatalf("expected document entity before delete: %v", err)
+	}
+	if err := engine.DeleteDocument(resp.DocID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := engine.GetDocument(resp.DocID); err == nil {
+		t.Fatalf("expected KG document to be removed")
+	}
+	if _, err := db.GetEntity(ctx, entityID, true); err == nil {
+		t.Fatalf("expected KG document entity to be removed")
+	}
+}
+
+func TestKGEngine_DeleteDocumentWithAutoIndexEnabled(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.EnableKnowledgeGraphAutoIndex(KnowledgeGraphAutoIndexConfig{
+		Enabled:   true,
+		Resources: []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret, kg.ResourceEnvelope, kg.ResourceEntity},
+	})
+	engine := db.KnowledgeGraph()
+	ctx := context.Background()
+	resp, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "auto-delete-entity.txt",
+		MediaType: "text/plain",
+		Title:     "Auto Delete Entity",
+		Content:   []byte("Auto delete cleanup references CASE-91919 and Acme Corp."),
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := engine.DeleteDocument(resp.DocID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := engine.GetDocument(resp.DocID); err == nil {
+		t.Fatalf("expected KG document to be removed with auto-index enabled")
+	}
+}
+
+func TestKGEngine_DeleteDocumentWithPerformanceConfig(t *testing.T) {
+	dir := t.TempDir()
+	db, err := NewWithConfig(Config{
+		Path:                    dir,
+		DisableEncryption:       true,
+		DisableWAL:              true,
+		DisableIndexPersistence: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.EnableKnowledgeGraphAutoIndex(KnowledgeGraphAutoIndexConfig{
+		Enabled:   true,
+		Resources: []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret, kg.ResourceEnvelope, kg.ResourceEntity},
+	})
+	engine := db.KnowledgeGraph()
+	resp, err := engine.Ingest(context.Background(), &kg.KGIngestRequest{
+		Source:    "perf-delete-entity.txt",
+		MediaType: "text/plain",
+		Title:     "Perf Delete Entity",
+		Content:   []byte("Perf delete cleanup references CASE-92929 and Acme Corp."),
+	})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := engine.DeleteDocument(resp.DocID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := engine.GetDocument(resp.DocID); err == nil {
+		t.Fatalf("expected KG document to be removed with performance config")
 	}
 }
 

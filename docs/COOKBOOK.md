@@ -513,6 +513,7 @@ Command:
 
 ```bash
 go run ./examples/kg_cookbook
+go run ./examples/kg_comprehensive_demo
 go run ./examples/kg_batch_demo
 go run ./examples/kg_ner_demo
 go run ./examples/kg_search_demo

@@ -2,6 +2,7 @@ package kg
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -106,6 +107,7 @@ func buildKGResourceGraphEdges(nodes []KGResourceGraphNode, entityToNodes map[st
 		target string
 		entity KGEntity
 		count  int
+		types  map[string]int
 	}
 	aggregated := make(map[pairKey]*edgeAgg)
 	for entityKey, nodeIndexes := range entityToNodes {
@@ -126,10 +128,11 @@ func buildKGResourceGraphEdges(nodes []KGResourceGraphNode, entityToNodes map[st
 				}
 				agg := aggregated[key]
 				if agg == nil {
-					agg = &edgeAgg{source: key.a, target: key.b, entity: ent}
+					agg = &edgeAgg{source: key.a, target: key.b, entity: ent, types: make(map[string]int)}
 					aggregated[key] = agg
 				}
 				agg.count++
+				agg.types[ent.Type]++
 				if ent.Confidence > agg.entity.Confidence {
 					agg.entity = ent
 				}
@@ -142,18 +145,71 @@ func buildKGResourceGraphEdges(nodes []KGResourceGraphNode, entityToNodes map[st
 		if agg.count < minShared {
 			continue
 		}
+		relationType := inferResourceRelationType(nodesByID(nodes, agg.source), nodesByID(nodes, agg.target), agg.entity, agg.count)
+		confidence := inferResourceRelationConfidence(agg.entity, agg.count)
+		evidence := fmt.Sprintf("Both resources mention %s entity %q", agg.entity.Type, firstNonEmpty(agg.entity.Canonical, agg.entity.Surface))
 		edges = append(edges, KGResourceGraphEdge{
 			Source:       agg.source,
 			Target:       agg.target,
-			RelationType: "mentions_same_entity",
+			RelationType: relationType,
 			Entity:       agg.entity,
 			Weight:       float64(agg.count),
+			Confidence:   confidence,
+			Evidence:     evidence,
+			SourceKind:   "inferred",
+			CreatedBy:    "kg-resource-graph",
+			CreatedAt:    time.Now().UTC(),
+			Attributes: map[string]string{
+				"entity_key": kgEntityGraphKey(agg.entity),
+			},
 			Metadata: map[string]string{
 				"shared_entities": intString(agg.count),
+				"evidence":        evidence,
+				"source_kind":     "inferred",
 			},
 		})
 	}
 	return edges
+}
+
+func nodesByID(nodes []KGResourceGraphNode, id string) KGResourceGraphNode {
+	for _, node := range nodes {
+		if node.ID == id {
+			return node
+		}
+	}
+	return KGResourceGraphNode{ID: id}
+}
+
+func inferResourceRelationType(a, b KGResourceGraphNode, ent KGEntity, shared int) string {
+	switch strings.ToUpper(ent.Type) {
+	case "EMAIL", "DOMAIN", "URL", "ORG", "PERSON":
+		if sameResourceFamily(a, b) {
+			return "same_as"
+		}
+	case "TICKET_ID", "CASE_ID", "INVOICE_ID", "CONTRACT_ID", "POLICY_ID", "ACCOUNT_ID":
+		return "references"
+	}
+	if shared > 1 {
+		return "related_to"
+	}
+	return "mentions_same_entity"
+}
+
+func inferResourceRelationConfidence(ent KGEntity, shared int) float64 {
+	confidence := ent.Confidence
+	if confidence <= 0 {
+		confidence = 0.5
+	}
+	confidence += float64(shared-1) * 0.05
+	if confidence > 0.99 {
+		return 0.99
+	}
+	return confidence
+}
+
+func sameResourceFamily(a, b KGResourceGraphNode) bool {
+	return a.ResourceType != "" && a.ResourceType == b.ResourceType
 }
 
 func entityForGraphKey(entities []KGEntity, want string) KGEntity {
@@ -167,6 +223,9 @@ func entityForGraphKey(entities []KGEntity, want string) KGEntity {
 }
 
 func kgEntityGraphKey(ent KGEntity) string {
+	if ent.CanonicalKey != "" {
+		return strings.ToLower(ent.CanonicalKey)
+	}
 	canonical := strings.TrimSpace(ent.Canonical)
 	if canonical == "" {
 		canonical = strings.TrimSpace(ent.Surface)
@@ -175,6 +234,15 @@ func kgEntityGraphKey(ent KGEntity) string {
 		return ""
 	}
 	return strings.ToLower(ent.Type) + ":" + strings.ToLower(canonical)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func resourceIDFromHit(hit KGSearchHit) string {

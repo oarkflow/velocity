@@ -157,6 +157,16 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 		EntityCount: len(entities),
 	}
 
+	// Stage 6: Entity graph — create entity nodes and document-entity relations
+	if p.em != nil && len(entities) > 0 {
+		if docEntityID := p.indexEntities(ctx, docID, entities); docEntityID != "" {
+			if doc.Metadata == nil {
+				doc.Metadata = make(map[string]string)
+			}
+			doc.Metadata["kg_doc_entity_id"] = docEntityID
+		}
+	}
+
 	// Don't store full text and chunks in the document record (they're stored separately)
 	docForStorage := doc
 	docForStorage.Text = ""
@@ -195,11 +205,6 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 		if p.hnsw != nil && len(chunk.Embedding) > 0 {
 			_ = p.hnsw.Insert(chunk.ID, chunk.Embedding)
 		}
-	}
-
-	// Stage 8: Entity graph — create entity nodes and document-entity relations
-	if p.em != nil && len(entities) > 0 {
-		p.indexEntities(ctx, docID, entities)
 	}
 
 	// Stage 9: Source index (for dedup)
@@ -256,12 +261,31 @@ func (p *KGIngestPipeline) IngestBatch(ctx context.Context, reqs []*KGIngestRequ
 	return results, errs
 }
 
-func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, entities []KGEntity) {
+func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, entities []KGEntity) string {
 	seen := make(map[string]string) // canonical|type -> entityID
+	docEntityID := ""
+	if p.em != nil {
+		docEntity, err := p.em.CreateEntity(ctx, &EntityRequest{
+			Type: "kg_document",
+			Name: docID,
+			Tags: map[string]string{"kg_type": "DOCUMENT"},
+			Metadata: map[string]string{
+				"doc_id":        docID,
+				"canonical_key": "document:" + docID,
+			},
+			CreatedBy: "kg-pipeline",
+		})
+		if err == nil && docEntity != nil {
+			docEntityID = docEntity.EntityID
+		}
+	}
 
 	for _, ent := range entities {
 		key := ent.Canonical + "|" + ent.Type
 		entityNodeID, exists := seen[key]
+		if ent.CanonicalKey == "" {
+			ent.CanonicalKey = canonicalEntityKey(ent.Type, firstNonEmpty(ent.Canonical, ent.Surface))
+		}
 
 		if !exists {
 			// Create entity node
@@ -270,8 +294,10 @@ func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, enti
 				Name: ent.Canonical,
 				Tags: map[string]string{"kg_type": ent.Type},
 				Metadata: map[string]string{
-					"surface":    ent.Surface,
-					"confidence": fmt.Sprintf("%.2f", ent.Confidence),
+					"surface":       ent.Surface,
+					"confidence":    fmt.Sprintf("%.2f", ent.Confidence),
+					"canonical_key": ent.CanonicalKey,
+					"doc_id":        docID,
 				},
 				CreatedBy: "kg-pipeline",
 			}
@@ -283,18 +309,25 @@ func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, enti
 			seen[key] = entityNodeID
 		}
 
-		// Create document-entity relation
-		p.em.AddRelation(ctx, &EntityRelationRequest{
-			SourceEntity: docID,
-			TargetEntity: entityNodeID,
-			RelationType: "mentions",
-			Metadata: map[string]string{
-				"surface":    ent.Surface,
-				"confidence": fmt.Sprintf("%.2f", ent.Confidence),
-			},
-			CreatedBy: "kg-pipeline",
-		})
+		if docEntityID != "" {
+			// Create document-entity relation
+			p.em.AddRelation(ctx, &EntityRelationRequest{
+				SourceEntity: docEntityID,
+				TargetEntity: entityNodeID,
+				RelationType: "mentions",
+				Metadata: map[string]string{
+					"surface":       ent.Surface,
+					"confidence":    fmt.Sprintf("%.2f", ent.Confidence),
+					"evidence":      "Matched entity: " + ent.Surface,
+					"source_kind":   "extracted",
+					"doc_id":        docID,
+					"canonical_key": ent.CanonicalKey,
+				},
+				CreatedBy: "kg-pipeline",
+			})
+		}
 	}
+	return docEntityID
 }
 
 func (p *KGIngestPipeline) updateStats(chunks, entities int) {
@@ -344,19 +377,35 @@ func (p *KGIngestPipeline) DeleteDocument(docID string) error {
 			continue
 		}
 		chunkID := string(chunkIDData)
-		p.db.DeleteIndexed([]byte(kgChunkPrefix + chunkID))
-		p.db.Delete([]byte(kgChunkMetaPrefix + chunkID))
+		if err := p.db.DeleteIndexed([]byte(kgChunkPrefix + chunkID)); err != nil {
+			return fmt.Errorf("delete chunk index %s: %w", chunkID, err)
+		}
+		if err := p.db.Delete([]byte(kgChunkMetaPrefix + chunkID)); err != nil {
+			return fmt.Errorf("delete chunk metadata %s: %w", chunkID, err)
+		}
+		if err := p.db.Delete([]byte(fmt.Sprintf("%s%s:%d", kgChunkDocPrefix, docID, i))); err != nil {
+			return fmt.Errorf("delete chunk doc index %s:%d: %w", docID, i, err)
+		}
 		if p.hnsw != nil {
 			p.hnsw.Delete(chunkID)
 		}
 	}
 
 	// Delete document
-	p.db.Delete([]byte(kgDocPrefix + docID))
+	if err := p.db.Delete([]byte(kgDocPrefix + docID)); err != nil {
+		return fmt.Errorf("delete document %s: %w", docID, err)
+	}
+	if doc.Metadata != nil && doc.Metadata["kg_doc_entity_id"] != "" {
+		if deleter, ok := p.em.(EntityDeleteStore); ok {
+			_ = deleter.DeleteEntity(context.Background(), doc.Metadata["kg_doc_entity_id"])
+		}
+	}
 
 	// Delete source index
 	if doc.Source != "" {
-		p.db.Delete([]byte(kgSourcePrefix + doc.Source))
+		if err := p.db.Delete([]byte(kgSourcePrefix + doc.Source)); err != nil {
+			return fmt.Errorf("delete source index %s: %w", doc.Source, err)
+		}
 	}
 
 	return nil

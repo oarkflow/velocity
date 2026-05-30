@@ -1,6 +1,9 @@
 package kg
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Store is the minimal persistence surface required by the knowledge graph.
 // The root velocity.DB implements this through a small adapter so pkg/kg stays
@@ -22,6 +25,12 @@ type EntityStore interface {
 	CreateEntity(ctx context.Context, req *EntityRequest) (*Entity, error)
 	AddRelation(ctx context.Context, req *EntityRelationRequest) (*EntityRelation, error)
 	GetRelatedEntities(ctx context.Context, entityID string, relationType string, depth int) ([]*EntityResult, error)
+}
+
+// EntityDeleteStore is optionally implemented by entity stores that can delete
+// KG-owned document nodes and their attached relations.
+type EntityDeleteStore interface {
+	DeleteEntity(ctx context.Context, entityID string) error
 }
 
 type noopEntityStore struct{}
@@ -61,6 +70,8 @@ type EntityRelation struct {
 	SourceEntity  string            `json:"source_entity"`
 	TargetEntity  string            `json:"target_entity"`
 	RelationType  string            `json:"relation_type"`
+	CreatedAt     time.Time         `json:"created_at,omitempty"`
+	CreatedBy     string            `json:"created_by,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	Bidirectional bool              `json:"bidirectional"`
 }
