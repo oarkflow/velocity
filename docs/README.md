@@ -8,6 +8,7 @@ This documentation set was rebuilt from the current source tree. It is organized
 - Developers embedding Velocity: [Developer Guide](DEVELOPER_GUIDE.md), [API Reference](API_REFERENCE.md), and [SQL Driver](SQL_DRIVER.md).
 - Operators: [Operations](OPERATIONS.md), [Security](SECURITY.md), and [Testing](TESTING.md).
 - Technical evaluators: [Architecture](ARCHITECTURE.md), [Feature Catalog](FEATURES.md), [Compliance](COMPLIANCE.md), and [Limitations](LIMITATIONS.md).
+- Product evaluators: [Use Cases And Business Models](use-cases.md) and [Frontend Requirements](ui.md).
 - Anyone looking for copy-paste usage: [Code And Command Cookbook](COOKBOOK.md).
 
 ## Core References
@@ -17,6 +18,8 @@ This documentation set was rebuilt from the current source tree. It is organized
 - [CLI Reference](CLI_REFERENCE.md): shipped `cmd/velocity` commands and the separate `pkg/cli` framework.
 - [Object and S3](OBJECT_AND_S3.md): native object storage and S3-compatible behavior.
 - [Knowledge Graph](KNOWLEDGE_GRAPH.md): ingestion, search, graph, and analytics.
+- [Use Cases And Business Models](use-cases.md): market use cases, buyer segments, and packaging ideas.
+- [Frontend Requirements](ui.md): UI requirements for search, files, KG, compliance, and admin workflows.
 - [Examples](EXAMPLES.md): map of runnable example programs.
 - [Cookbook](COOKBOOK.md): Go snippets plus CLI, curl, and `go run` commands for each major subsystem.
 
