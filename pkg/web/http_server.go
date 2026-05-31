@@ -119,6 +119,19 @@ func (s *HTTPServer) setupRoutes() {
 	api.Get("/files/:key/thumbnail", s.handleFileThumbnail)
 	api.Delete("/files/:key", s.handleFileDelete)
 
+	v1 := s.app.Group("/api/v1", s.jwtAuthMiddleware())
+	v1.Get("/system/health", s.handleSystemHealth)
+
+	compliance := v1.Group("/compliance")
+	compliance.Get("/tags", s.handleComplianceListTags)
+	compliance.Post("/tags", s.adminOnly(), s.handleComplianceCreateTag)
+	compliance.Get("/tags/*", s.handleComplianceGetTagsForResource)
+	compliance.Get("/audit", s.handleComplianceAuditTrail)
+	compliance.Get("/retention/policies", s.handleComplianceListRetentionPolicies)
+	compliance.Post("/retention/policies", s.adminOnly(), s.handleComplianceCreateRetentionPolicy)
+	compliance.Post("/retention/policies/:id/legal-holds", s.adminOnly(), s.handleComplianceAddLegalHold)
+	compliance.Post("/retention/policies/:id/legal-holds/:hold_id/release", s.adminOnly(), s.handleComplianceReleaseLegalHold)
+
 	staticRoot := resolveStaticRoot()
 
 	// Public static assets for the admin UI
