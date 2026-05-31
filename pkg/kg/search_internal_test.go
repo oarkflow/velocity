@@ -21,7 +21,7 @@ func TestTokenizeSearchRemovesStopWordsWithFallback(t *testing.T) {
 
 func TestTokenizeSearchDomainStopWordsPreserveImportantTerms(t *testing.T) {
 	got := tokenizeSearch("the patient and invoice of CASE-12345 compliance report")
-	want := []string{"patient", "invoice", "case", "12345", "compliance", "report"}
+	want := []string{"case-12345", "patient", "invoice", "case", "12345", "compliance", "report"}
 	if len(got) != len(want) {
 		t.Fatalf("tokens=%v want=%v", got, want)
 	}

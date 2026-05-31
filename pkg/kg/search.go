@@ -19,37 +19,49 @@ type KGReranker interface {
 
 // KGSearchEngine performs hybrid BM25 + vector search with RRF fusion.
 type KGSearchEngine struct {
-	db         Store
-	hnsw       *HNSWIndex
-	embedder   KGEmbedder
-	reranker   KGReranker
-	em         EntityStore
-	cacheMu    sync.RWMutex
-	chunkCache map[string]KGChunk
-	docCache   map[string]KGDocument
-	indexMu    sync.RWMutex
-	indexDirty bool
-	termIndex  map[string][]string
-	fuzzyIndex map[string][]string
-	chunkText  map[string]string
-	chunkTerms map[string][]string
-	chunkNorm  map[string]string
+	db          Store
+	hnsw        *HNSWIndex
+	embedder    KGEmbedder
+	reranker    KGReranker
+	em          EntityStore
+	cacheMu     sync.RWMutex
+	chunkCache  map[string]KGChunk
+	docCache    map[string]KGDocument
+	indexMu     sync.RWMutex
+	initialized bool
+	indexDirty  bool
+	deferIndex  bool
+	termIndex   map[string][]string
+	fuzzyIndex  map[string][]string
+	chunkText   map[string]string
+	chunkTerms  map[string][]string
+	chunkNorm   map[string]string
 }
 
 func NewKGSearchEngine(db Store, hnsw *HNSWIndex, embedder KGEmbedder, em EntityStore) *KGSearchEngine {
+	indexDirty := false
+	initialized := true
+	if data, err := db.Get([]byte(kgStatsKey)); err == nil {
+		var stats KGCorpusStats
+		if json.Unmarshal(data, &stats) == nil && stats.Chunks > 0 {
+			indexDirty = true
+			initialized = false
+		}
+	}
 	return &KGSearchEngine{
-		db:         db,
-		hnsw:       hnsw,
-		embedder:   embedder,
-		em:         em,
-		chunkCache: make(map[string]KGChunk),
-		docCache:   make(map[string]KGDocument),
-		indexDirty: true,
-		termIndex:  make(map[string][]string),
-		fuzzyIndex: make(map[string][]string),
-		chunkText:  make(map[string]string),
-		chunkTerms: make(map[string][]string),
-		chunkNorm:  make(map[string]string),
+		db:          db,
+		hnsw:        hnsw,
+		embedder:    embedder,
+		em:          em,
+		chunkCache:  make(map[string]KGChunk),
+		docCache:    make(map[string]KGDocument),
+		initialized: initialized,
+		indexDirty:  indexDirty,
+		termIndex:   make(map[string][]string),
+		fuzzyIndex:  make(map[string][]string),
+		chunkText:   make(map[string]string),
+		chunkTerms:  make(map[string][]string),
+		chunkNorm:   make(map[string]string),
 	}
 }
 
@@ -221,11 +233,6 @@ func (s *KGSearchEngine) Search(ctx context.Context, req *KGSearchRequest) (*KGS
 		}
 	}
 
-	// Trim to limit
-	if len(sorted) > limit {
-		sorted = sorted[:limit]
-	}
-
 	// Filter by min score
 	if req.MinScore > 0 {
 		filtered := sorted[:0]
@@ -239,14 +246,30 @@ func (s *KGSearchEngine) Search(ctx context.Context, req *KGSearchRequest) (*KGS
 
 	// --- Hydrate results ---
 	hits := make([]KGSearchHit, 0, len(sorted))
-	for _, c := range sorted {
+	seenResources := make(map[string]struct{}, limit)
+	hydrateLimit := limit * 20
+	if hydrateLimit < 100 {
+		hydrateLimit = 100
+	}
+	if hydrateLimit > len(sorted) {
+		hydrateLimit = len(sorted)
+	}
+	for _, c := range sorted[:hydrateLimit] {
 		hit := s.hydrateHit(c.chunkID, c.text, c.score, c.bm25, c.vec)
 		if hit != nil {
 			// Apply metadata filters
 			if len(req.Filters) > 0 && !matchFilters(hit.Metadata, req.Filters) {
 				continue
 			}
+			resourceID := firstNonEmpty(hit.Source, hit.DocID, hit.ChunkID)
+			if _, ok := seenResources[resourceID]; ok {
+				continue
+			}
+			seenResources[resourceID] = struct{}{}
 			hits = append(hits, *hit)
+			if len(hits) >= limit {
+				break
+			}
 		}
 	}
 
@@ -284,6 +307,9 @@ func (s *KGSearchEngine) bm25Search(req *KGSearchRequest, limit int) []kgTextCan
 	ids := s.candidateChunkIDs(plan)
 	if len(ids) == 0 {
 		return nil
+	}
+	if plan.anyMode {
+		ids = limitCandidateIDs(ids, searchCandidateScanLimit(limit))
 	}
 	out := make([]kgTextCandidate, 0, min(limit, len(ids)))
 	s.indexMu.RLock()
@@ -362,6 +388,7 @@ func (s *KGSearchEngine) fuzzySearch(req *KGSearchRequest, limit int) []kgFuzzyC
 		s.indexMu.RUnlock()
 		return nil
 	}
+	candidateIDs = limitCandidateIDs(candidateIDs, fuzzyCandidateScanLimit(limit))
 	candidates := make([]kgFuzzyCandidate, 0, min(limit, len(candidateIDs)))
 	for _, id := range candidateIDs {
 		terms := s.chunkTerms[id]
@@ -391,9 +418,10 @@ func (s *KGSearchEngine) fuzzySearch(req *KGSearchRequest, limit int) []kgFuzzyC
 
 func (s *KGSearchEngine) ensureTextIndex() error {
 	s.indexMu.RLock()
+	initialized := s.initialized
 	dirty := s.indexDirty
 	s.indexMu.RUnlock()
-	if !dirty {
+	if initialized && !dirty {
 		return nil
 	}
 
@@ -444,9 +472,99 @@ func (s *KGSearchEngine) ensureTextIndex() error {
 	s.chunkText = chunkText
 	s.chunkTerms = chunkTerms
 	s.chunkNorm = chunkNorm
+	s.initialized = true
 	s.indexDirty = false
 	s.indexMu.Unlock()
 	return nil
+}
+
+func (s *KGSearchEngine) indexDocument(docID string) error {
+	if s == nil || docID == "" {
+		return nil
+	}
+	s.indexMu.RLock()
+	deferIndex := s.deferIndex
+	canIncremental := s.initialized && !s.indexDirty && !deferIndex
+	s.indexMu.RUnlock()
+	if !canIncremental {
+		s.markIndexDirty()
+		return nil
+	}
+	doc, ok := s.docMeta(docID)
+	if !ok {
+		return nil
+	}
+	updates := make([]KGChunk, 0, doc.ChunkCount)
+	for i := 0; i < doc.ChunkCount; i++ {
+		chunkIDData, err := s.db.Get([]byte(fmt.Sprintf("%s%s:%d", kgChunkDocPrefix, docID, i)))
+		if err != nil {
+			continue
+		}
+		chunkID := string(chunkIDData)
+		chunk, ok := s.chunkMeta(chunkID)
+		if !ok {
+			rawText, err := s.db.Get([]byte(kgChunkPrefix + chunkID))
+			if err != nil {
+				continue
+			}
+			chunk = KGChunk{ID: chunkID, DocID: docID, Index: i, Text: string(rawText)}
+		}
+		if chunk.Text == "" {
+			rawText, err := s.db.Get([]byte(kgChunkPrefix + chunkID))
+			if err != nil {
+				continue
+			}
+			chunk.Text = string(rawText)
+		}
+		updates = append(updates, chunk)
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	s.indexMu.Lock()
+	for _, chunk := range updates {
+		s.removeChunkFromTextIndexLocked(chunk.ID)
+		terms := tokenizeSearch(strings.ToLower(chunk.Text))
+		s.chunkText[chunk.ID] = chunk.Text
+		s.chunkTerms[chunk.ID] = terms
+		s.chunkNorm[chunk.ID] = strings.Join(terms, " ")
+		seen := make(map[string]struct{}, len(terms))
+		for _, term := range terms {
+			if _, ok := seen[term]; ok {
+				continue
+			}
+			seen[term] = struct{}{}
+			s.termIndex[term] = append(s.termIndex[term], chunk.ID)
+			for _, gram := range fuzzyCandidateGrams(term) {
+				s.fuzzyIndex[gram] = append(s.fuzzyIndex[gram], chunk.ID)
+			}
+		}
+	}
+	s.initialized = true
+	s.indexDirty = false
+	s.indexMu.Unlock()
+	return nil
+}
+
+func (s *KGSearchEngine) removeChunkFromTextIndexLocked(chunkID string) {
+	if chunkID == "" {
+		return
+	}
+	for _, term := range s.chunkTerms[chunkID] {
+		s.termIndex[term] = removeTextIndexString(s.termIndex[term], chunkID)
+		if len(s.termIndex[term]) == 0 {
+			delete(s.termIndex, term)
+		}
+		for _, gram := range fuzzyCandidateGrams(term) {
+			s.fuzzyIndex[gram] = removeTextIndexString(s.fuzzyIndex[gram], chunkID)
+			if len(s.fuzzyIndex[gram]) == 0 {
+				delete(s.fuzzyIndex, gram)
+			}
+		}
+	}
+	delete(s.chunkText, chunkID)
+	delete(s.chunkTerms, chunkID)
+	delete(s.chunkNorm, chunkID)
 }
 
 func (s *KGSearchEngine) candidateChunkIDs(plan fullTextPlan) []string {
@@ -464,8 +582,35 @@ func (s *KGSearchEngine) candidateChunkIDs(plan fullTextPlan) []string {
 	var candidates []string
 	used := false
 	s.indexMu.RLock()
+	identifierTerms := make([]string, 0, len(terms))
 	for _, term := range terms {
-		ids := s.termIndex[term]
+		if looksLikeIdentifierToken(term) {
+			identifierTerms = append(identifierTerms, term)
+		}
+	}
+	if len(identifierTerms) > 0 {
+		for _, term := range identifierTerms {
+			ids := sortedUniqueCopy(s.termIndex[term])
+			if len(ids) == 0 {
+				s.indexMu.RUnlock()
+				return nil
+			}
+			if !used {
+				candidates = append([]string(nil), ids...)
+				used = true
+			} else {
+				candidates = intersectSortedStrings(candidates, ids)
+			}
+			if len(candidates) == 0 {
+				s.indexMu.RUnlock()
+				return nil
+			}
+		}
+		s.indexMu.RUnlock()
+		return candidates
+	}
+	for _, term := range terms {
+		ids := sortedUniqueCopy(s.termIndex[term])
 		if len(ids) == 0 {
 			if !plan.anyMode {
 				s.indexMu.RUnlock()
@@ -490,7 +635,7 @@ func (s *KGSearchEngine) candidateChunkIDs(plan fullTextPlan) []string {
 		var prefixIDs []string
 		for term, ids := range s.termIndex {
 			if strings.HasPrefix(term, prefix) {
-				prefixIDs = mergeSortedUniqueStrings(prefixIDs, ids)
+				prefixIDs = mergeSortedUniqueStrings(prefixIDs, sortedUniqueCopy(ids))
 			}
 		}
 		if len(prefixIDs) == 0 {
@@ -538,6 +683,50 @@ func mergeSortedUniqueStrings(a, b []string) []string {
 	}
 	out = append(out, a[i:]...)
 	out = append(out, b[j:]...)
+	return out
+}
+
+func searchCandidateScanLimit(limit int) int {
+	if limit <= 0 {
+		limit = 10
+	}
+	n := limit * 5000
+	if n < 25000 {
+		return 25000
+	}
+	if n > 100000 {
+		return 100000
+	}
+	return n
+}
+
+func fuzzyCandidateScanLimit(limit int) int {
+	if limit <= 0 {
+		limit = 10
+	}
+	n := limit * 1000
+	if n < 5000 {
+		return 5000
+	}
+	if n > 20000 {
+		return 20000
+	}
+	return n
+}
+
+func limitCandidateIDs(ids []string, max int) []string {
+	if max <= 0 || len(ids) <= max {
+		return ids
+	}
+	out := make([]string, 0, max)
+	step := float64(len(ids)) / float64(max)
+	for i := 0; i < max; i++ {
+		idx := int(float64(i) * step)
+		if idx >= len(ids) {
+			idx = len(ids) - 1
+		}
+		out = append(out, ids[idx])
+	}
 	return out
 }
 
@@ -728,13 +917,13 @@ func (s *KGSearchEngine) accurateFuzzyCandidateIDsLocked(queryTerms []string) []
 		}
 		var termIDs []string
 		if isProtectedFuzzyTerm(term) || isCodeOrIdentifierTerm(term) {
-			termIDs = s.termIndex[term]
+			termIDs = sortedUniqueCopy(s.termIndex[term])
 			if len(termIDs) == 0 {
 				return nil
 			}
 		} else if isSafeFuzzyToken(term) {
 			for _, gram := range fuzzyCandidateGrams(term) {
-				termIDs = mergeSortedUniqueStrings(termIDs, s.fuzzyIndex[gram])
+				termIDs = mergeSortedUniqueStrings(termIDs, sortedUniqueCopy(s.fuzzyIndex[gram]))
 			}
 			if len(termIDs) == 0 {
 				continue
@@ -870,6 +1059,28 @@ func uniqueSortedStrings(values []string) []string {
 	for _, value := range values[1:] {
 		if value != out[len(out)-1] {
 			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func sortedUniqueCopy(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return uniqueSortedStrings(out)
+}
+
+func removeTextIndexString(values []string, value string) []string {
+	if len(values) == 0 || value == "" {
+		return values
+	}
+	out := values[:0]
+	for _, current := range values {
+		if current != value {
+			out = append(out, current)
 		}
 	}
 	return out
@@ -1038,6 +1249,19 @@ func (s *KGSearchEngine) invalidateDocument(docID string) {
 	if s == nil || docID == "" {
 		return
 	}
+	chunkIDs := make([]string, 0)
+	for i := 0; ; i++ {
+		chunkIDData, err := s.db.Get([]byte(fmt.Sprintf("%s%s:%d", kgChunkDocPrefix, docID, i)))
+		if err != nil {
+			break
+		}
+		chunkIDs = append(chunkIDs, string(chunkIDData))
+	}
+	s.indexMu.Lock()
+	for _, chunkID := range chunkIDs {
+		s.removeChunkFromTextIndexLocked(chunkID)
+	}
+	s.indexMu.Unlock()
 	s.cacheMu.Lock()
 	delete(s.docCache, docID)
 	for chunkID, chunk := range s.chunkCache {
@@ -1046,7 +1270,6 @@ func (s *KGSearchEngine) invalidateDocument(docID string) {
 		}
 	}
 	s.cacheMu.Unlock()
-	s.markIndexDirty()
 }
 
 func (s *KGSearchEngine) markIndexDirty() {
@@ -1054,8 +1277,31 @@ func (s *KGSearchEngine) markIndexDirty() {
 		return
 	}
 	s.indexMu.Lock()
+	s.initialized = false
 	s.indexDirty = true
 	s.indexMu.Unlock()
+}
+
+func (s *KGSearchEngine) setDeferredIndexing(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.indexMu.Lock()
+	s.deferIndex = enabled
+	if enabled {
+		s.initialized = false
+		s.indexDirty = true
+	}
+	s.indexMu.Unlock()
+}
+
+func (s *KGSearchEngine) deferredIndexing() bool {
+	if s == nil {
+		return false
+	}
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	return s.deferIndex
 }
 
 func matchFilters(metadata, filters map[string]string) bool {

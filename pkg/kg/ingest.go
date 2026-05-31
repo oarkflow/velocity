@@ -12,9 +12,10 @@ import (
 
 // IngestConfig controls pipeline behavior.
 type IngestConfig struct {
-	Workers       int  // concurrent workers for batch ingest (default 4)
-	BatchSize     int  // embedding batch size (default 32)
-	SkipDuplicate bool // skip documents with the same source (default true)
+	Workers            int  // concurrent workers for batch ingest (default 4)
+	BatchSize          int  // embedding batch size (default 32)
+	SkipDuplicate      bool // skip documents with the same source (default true)
+	DisableDBTextIndex bool // store KG chunk text without also indexing it through the DB search layer
 }
 
 func (c *IngestConfig) defaults() {
@@ -38,6 +39,8 @@ type KGIngestPipeline struct {
 	em        EntityStore
 	config    IngestConfig
 	statsMu   sync.Mutex
+	statsBulk bool
+	pending   KGCorpusStats
 }
 
 // NewKGIngestPipeline creates a new ingest pipeline.
@@ -158,7 +161,7 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 	}
 
 	// Stage 6: Entity graph — create entity nodes and document-entity relations
-	if p.em != nil && len(entities) > 0 {
+	if p.em != nil && !isNoopEntityStore(p.em) && len(entities) > 0 {
 		if docEntityID := p.indexEntities(ctx, docID, entities); docEntityID != "" {
 			if doc.Metadata == nil {
 				doc.Metadata = make(map[string]string)
@@ -184,7 +187,10 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 	// Stage 7: Store and index chunks
 	for i, chunk := range chunks {
 		// Store chunk JSON for retrieval (under a separate key to avoid BM25 indexing the JSON)
-		chunkData, err := json.Marshal(chunk)
+		chunkForStorage := chunk
+		chunkForStorage.Text = ""
+		chunkForStorage.Embedding = nil
+		chunkData, err := json.Marshal(chunkForStorage)
 		if err != nil {
 			continue
 		}
@@ -199,7 +205,11 @@ func (p *KGIngestPipeline) Ingest(ctx context.Context, req *KGIngestRequest) (*K
 
 		// BM25 index: store raw text under the chunk key for full-text search
 		chunkKey := kgChunkPrefix + chunk.ID
-		p.db.PutIndexedText([]byte(chunkKey), []byte(chunk.Text))
+		if p.config.DisableDBTextIndex {
+			p.db.Put([]byte(chunkKey), []byte(chunk.Text))
+		} else {
+			p.db.PutIndexedText([]byte(chunkKey), []byte(chunk.Text))
+		}
 
 		// HNSW index (if available and chunk has embedding)
 		if p.hnsw != nil && len(chunk.Embedding) > 0 {
@@ -333,7 +343,16 @@ func (p *KGIngestPipeline) indexEntities(ctx context.Context, docID string, enti
 func (p *KGIngestPipeline) updateStats(chunks, entities int) {
 	p.statsMu.Lock()
 	defer p.statsMu.Unlock()
+	if p.statsBulk {
+		p.pending.Documents++
+		p.pending.Chunks += chunks
+		p.pending.Entities += entities
+		return
+	}
+	p.updateStatsLocked(1, chunks, entities)
+}
 
+func (p *KGIngestPipeline) updateStatsLocked(docs, chunks, entities int) {
 	statsData, _ := p.db.Get([]byte(kgStatsKey))
 	var stats KGCorpusStats
 	if len(statsData) > 0 {
@@ -342,11 +361,27 @@ func (p *KGIngestPipeline) updateStats(chunks, entities int) {
 	if stats.EntityTypes == nil {
 		stats.EntityTypes = make(map[string]int)
 	}
-	stats.Documents++
+	stats.Documents += docs
 	stats.Chunks += chunks
 	stats.Entities += entities
 	data, _ := json.Marshal(stats)
 	p.db.Put([]byte(kgStatsKey), data)
+}
+
+func (p *KGIngestPipeline) setBulkStats(enabled bool) error {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	if enabled {
+		p.statsBulk = true
+		return nil
+	}
+	p.statsBulk = false
+	if p.pending.Documents == 0 && p.pending.Chunks == 0 && p.pending.Entities == 0 {
+		return nil
+	}
+	p.updateStatsLocked(p.pending.Documents, p.pending.Chunks, p.pending.Entities)
+	p.pending = KGCorpusStats{}
+	return nil
 }
 
 // GetDocument retrieves a stored document by ID.

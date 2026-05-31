@@ -20,9 +20,12 @@ type KGConfig struct {
 	ChunkOverlap  int // overlap in words (default 64)
 
 	// Ingest
-	IngestWorkers  int // concurrent workers for batch ingest (default 4)
-	CustomNERRules []KGCustomNERRule
-	AuthzFilter    KGAuthzFilter // optional per-result authorization hook
+	IngestWorkers         int // concurrent workers for batch ingest (default 4)
+	CustomNERRules        []KGCustomNERRule
+	DisableNER            bool          // skip named entity extraction during ingest
+	DisableEntityIndexing bool          // skip mirroring extracted mentions into the entity graph during ingest
+	DisableDBTextIndex    bool          // skip generic DB text indexing for KG chunks; KG search still indexes chunks itself
+	AuthzFilter           KGAuthzFilter // optional per-result authorization hook
 
 	// HNSW tuning
 	HNSWM              int // max connections per layer (default 16)
@@ -97,14 +100,23 @@ func NewKnowledgeGraphEngine(db Store, config KGConfig, entities ...EntityStore)
 	chunker := NewSlidingWindowChunker(config.ChunkMaxWords, config.ChunkOverlap)
 
 	// Set up ingest pipeline
+	pipelineEntityStore := engine.em
+	if config.DisableEntityIndexing {
+		pipelineEntityStore = noopEntityStore{}
+	}
 	opts := []IngestOption{
 		WithChunker(chunker),
-		WithNER(engine.ner),
-		WithEntityStore(engine.em),
+		WithEntityStore(pipelineEntityStore),
 		WithIngestConfig(IngestConfig{
-			Workers:       config.IngestWorkers,
-			SkipDuplicate: true,
+			Workers:            config.IngestWorkers,
+			SkipDuplicate:      true,
+			DisableDBTextIndex: config.DisableDBTextIndex,
 		}),
+	}
+	if config.DisableNER {
+		opts = append(opts, WithNER(nil))
+	} else {
+		opts = append(opts, WithNER(engine.ner))
 	}
 	if engine.embedder != nil {
 		opts = append(opts, WithEmbedder(engine.embedder))
@@ -151,8 +163,8 @@ func (e *KnowledgeGraphEngine) ListNERRules() []KGCustomNERRule {
 // Ingest processes a single document.
 func (e *KnowledgeGraphEngine) Ingest(ctx context.Context, req *KGIngestRequest) (*KGIngestResponse, error) {
 	resp, err := e.pipeline.Ingest(ctx, req)
-	if err == nil && e.search != nil {
-		e.search.markIndexDirty()
+	if err == nil && e.search != nil && resp != nil {
+		_ = e.search.indexDocument(resp.DocID)
 	}
 	return resp, err
 }
@@ -161,11 +173,19 @@ func (e *KnowledgeGraphEngine) Ingest(ctx context.Context, req *KGIngestRequest)
 func (e *KnowledgeGraphEngine) IngestBatch(ctx context.Context, reqs []*KGIngestRequest) ([]*KGIngestResponse, []error) {
 	resps, errs := e.pipeline.IngestBatch(ctx, reqs)
 	if e.search != nil {
-		for _, err := range errs {
-			if err == nil {
-				e.search.markIndexDirty()
-				break
+		if e.search.deferredIndexing() {
+			e.search.markIndexDirty()
+			return resps, errs
+		}
+		indexed := false
+		for i, err := range errs {
+			if err == nil && i < len(resps) && resps[i] != nil {
+				_ = e.search.indexDocument(resps[i].DocID)
+				indexed = true
 			}
+		}
+		if !indexed {
+			e.search.markIndexDirty()
 		}
 	}
 	return resps, errs
@@ -223,8 +243,20 @@ func (e *KnowledgeGraphEngine) ImportConnector(ctx context.Context, connector KG
 // Search executes a hybrid search query.
 func (e *KnowledgeGraphEngine) Search(ctx context.Context, req *KGSearchRequest) (*KGSearchResponse, error) {
 	resp, err := e.search.Search(ctx, req)
-	if err != nil || resp == nil || e.config.AuthzFilter == nil {
+	if err != nil || resp == nil {
 		return resp, err
+	}
+	limit := 10
+	if req != nil && req.Limit > 0 {
+		limit = req.Limit
+	}
+	if req != nil && req.EnableGraph {
+		if err := e.applyGraphSearchScoring(ctx, req, resp, limit); err != nil {
+			return nil, err
+		}
+	}
+	if e.config.AuthzFilter == nil {
+		return resp, nil
 	}
 	filtered := resp.Hits[:0]
 	for _, hit := range resp.Hits {
@@ -242,6 +274,31 @@ func (e *KnowledgeGraphEngine) Search(ctx context.Context, req *KGSearchRequest)
 	return resp, nil
 }
 
+// BeginBulkIndexing defers in-memory text-index maintenance during high-volume
+// ingest. Call EndBulkIndexing after the bulk load to build the index once.
+func (e *KnowledgeGraphEngine) BeginBulkIndexing() {
+	if e != nil && e.search != nil {
+		e.search.setDeferredIndexing(true)
+	}
+	if e != nil && e.pipeline != nil {
+		_ = e.pipeline.setBulkStats(true)
+	}
+}
+
+// EndBulkIndexing rebuilds derived KG indexes after BeginBulkIndexing.
+func (e *KnowledgeGraphEngine) EndBulkIndexing(ctx context.Context) error {
+	if e == nil || e.search == nil {
+		return nil
+	}
+	if e.pipeline != nil {
+		if err := e.pipeline.setBulkStats(false); err != nil {
+			return err
+		}
+	}
+	e.search.setDeferredIndexing(false)
+	return e.RebuildIndexes(ctx)
+}
+
 // GetDocument retrieves a document by ID.
 func (e *KnowledgeGraphEngine) GetDocument(docID string) (*KGDocument, error) {
 	return e.pipeline.GetDocument(docID)
@@ -249,10 +306,10 @@ func (e *KnowledgeGraphEngine) GetDocument(docID string) (*KGDocument, error) {
 
 // DeleteDocument removes a document and its indexes.
 func (e *KnowledgeGraphEngine) DeleteDocument(docID string) error {
-	err := e.pipeline.DeleteDocument(docID)
-	if err == nil && e.search != nil {
+	if e.search != nil {
 		e.search.invalidateDocument(docID)
 	}
+	err := e.pipeline.DeleteDocument(docID)
 	return err
 }
 
@@ -266,10 +323,10 @@ func (e *KnowledgeGraphEngine) DeleteSource(source string) error {
 		return nil
 	}
 	docID := string(data)
-	err = e.pipeline.DeleteDocument(docID)
-	if err == nil && e.search != nil {
+	if e.search != nil {
 		e.search.invalidateDocument(docID)
 	}
+	err = e.pipeline.DeleteDocument(docID)
 	return err
 }
 
@@ -608,6 +665,9 @@ func (e *KnowledgeGraphEngine) RebuildIndexes(ctx context.Context) error {
 		if err := e.search.ensureTextIndex(); err != nil {
 			return err
 		}
+	}
+	if err := e.graph.RebuildIndexes(ctx); err != nil {
+		return err
 	}
 	_, err := e.graph.GraphMetrics(ctx, nil)
 	return err

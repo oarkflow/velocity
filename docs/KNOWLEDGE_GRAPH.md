@@ -96,6 +96,26 @@ Include the larger synthetic batch benchmark:
 KG_RUN_BATCH=1 ./scripts/knowledge_graph_demo.sh
 ```
 
+Run the real-world scale context-search demo:
+
+```bash
+cd examples
+go run ./kg_realworld_scale_demo
+VELOCITY_KG_SCALE_RECORDS=1000000 \
+VELOCITY_KG_SCALE_OBJECTS=10000 \
+VELOCITY_KG_SCALE_OBJECT_BYTES=262144 \
+VELOCITY_KG_SCALE_MAX_INDEX_BYTES=262144 \
+VELOCITY_KG_SCALE_KEEP=1 \
+go run ./kg_realworld_scale_demo
+```
+
+The scale demo models ops/support/compliance/KYC data across KV records,
+large object evidence, structured CSV/JSON files, SQL-style connector rows,
+envelopes, entities, ontology taxonomies, persistent relations, resource graph
+materialization, graph traversal, and `ContextSearch`. `VELOCITY_KG_SCALE_OBJECT_BYTES`
+controls generated object body size, while `VELOCITY_KG_SCALE_MAX_INDEX_BYTES`
+controls how much object content KG auto-indexing will ingest for search.
+
 The script runs:
 
 - `examples/kg_search_demo`
@@ -663,6 +683,8 @@ Connector imports can be run directly from Go with `ImportConnector`, from HTTP 
 
 - `examples/kg_cookbook/main.go`
 - `examples/kg_comprehensive_demo/main.go`
+- `examples/kg_context_search_demo/main.go`
+- `examples/kg_realworld_scale_demo/main.go`
 - `examples/kg_batch_demo/main.go`
 - `examples/kg_ner_demo/main.go`
 - `examples/kg_search_demo/main.go`

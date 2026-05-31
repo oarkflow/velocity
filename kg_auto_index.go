@@ -24,6 +24,7 @@ type KnowledgeGraphAutoIndexConfig struct {
 	SecretValues  bool
 	Existing      bool
 	Async         bool
+	SyncWorkers   int
 	MaxValueBytes int64
 }
 
@@ -95,6 +96,9 @@ func normalizeKGAutoIndexConfig(cfg KnowledgeGraphAutoIndexConfig) KnowledgeGrap
 	if cfg.MaxValueBytes <= 0 {
 		cfg.MaxValueBytes = defaultKGAutoIndexMaxValueBytes
 	}
+	if cfg.SyncWorkers <= 0 {
+		cfg.SyncWorkers = 1
+	}
 	if !cfg.SecretValues {
 		cfg.SecretValues = false
 	}
@@ -121,6 +125,10 @@ func (idx *KGAutoIndexer) Sync(ctx context.Context) error {
 		return nil
 	}
 	idx.markStart()
+	graph := idx.db.KnowledgeGraph()
+	if graph != nil {
+		graph.BeginBulkIndexing()
+	}
 	var err error
 	for _, typ := range idx.cfg.Resources {
 		if ctx.Err() != nil {
@@ -128,6 +136,11 @@ func (idx *KGAutoIndexer) Sync(ctx context.Context) error {
 			break
 		}
 		if e := idx.syncType(ctx, typ); e != nil && err == nil {
+			err = e
+		}
+	}
+	if graph != nil {
+		if e := graph.EndBulkIndexing(ctx); e != nil && err == nil {
 			err = e
 		}
 	}
@@ -513,8 +526,11 @@ func looksTextual(data []byte, contentType string) bool {
 	if len(sample) > 512 {
 		sample = sample[:512]
 	}
+	if bytes.IndexByte(sample, 0) < 0 {
+		return true
+	}
 	detected := http.DetectContentType(sample)
-	return strings.HasPrefix(detected, "text/") || strings.Contains(detected, "json") || bytes.IndexByte(sample, 0) < 0
+	return strings.HasPrefix(detected, "text/") || strings.Contains(detected, "json")
 }
 
 func metadataText(meta map[string]string) string {
@@ -584,21 +600,21 @@ func (idx *KGAutoIndexer) syncKV(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, key := range keys {
+	return idx.parallelKeys(ctx, keys, func(key string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if !idx.db.kgShouldIndexKVKey(key) {
-			continue
+			return nil
 		}
 		value, err := idx.db.Get([]byte(key))
 		if err != nil {
 			idx.count(kg.ResourceKV, false)
-			continue
+			return nil
 		}
 		idx.db.kgAutoIndexKV([]byte(key), value)
-	}
-	return nil
+		return nil
+	})
 }
 
 func (idx *KGAutoIndexer) syncObjects(ctx context.Context) error {
@@ -606,7 +622,7 @@ func (idx *KGAutoIndexer) syncObjects(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, key := range keys {
+	return idx.parallelKeys(ctx, keys, func(key string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -614,15 +630,81 @@ func (idx *KGAutoIndexer) syncObjects(ctx context.Context) error {
 		rec, err := idx.db.getObjectRecord(path)
 		if err != nil || rec.State == ObjectStateDeleted {
 			idx.count(kg.ResourceObject, false)
-			continue
+			return nil
 		}
 		var content []byte
 		if data, _, err := idx.db.GetObjectInternal(path, rec.CreatedBy); err == nil {
 			content = data
 		}
 		idx.db.kgAutoIndexObjectRecord(rec, content)
+		return nil
+	})
+}
+
+func (idx *KGAutoIndexer) parallelKeys(ctx context.Context, keys []string, fn func(string) error) error {
+	if len(keys) == 0 {
+		return nil
 	}
-	return nil
+	workers := idx.cfg.SyncWorkers
+	if workers <= 1 || len(keys) < 2 {
+		for _, key := range keys {
+			if err := fn(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if workers > len(keys) {
+		workers = len(keys)
+	}
+	jobs := make(chan string, workers*2)
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
+	var firstErr error
+	setErr := func(err error) {
+		if err == nil {
+			return
+		}
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range jobs {
+				if ctx.Err() != nil {
+					setErr(ctx.Err())
+					continue
+				}
+				if err := fn(key); err != nil {
+					setErr(err)
+				}
+			}
+		}()
+	}
+	for _, key := range keys {
+		errMu.Lock()
+		err := firstErr
+		errMu.Unlock()
+		if err != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			setErr(ctx.Err())
+			break
+		case jobs <- key:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	errMu.Lock()
+	defer errMu.Unlock()
+	return firstErr
 }
 
 func (idx *KGAutoIndexer) syncSecrets(ctx context.Context) error {

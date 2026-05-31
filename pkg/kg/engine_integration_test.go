@@ -293,6 +293,67 @@ func TestKGEngine_ContextSearchExpandsPersistentRelations(t *testing.T) {
 	}
 }
 
+func TestKGEngine_SearchScoresPersistentGraphRelations(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	engine := db.KnowledgeGraph()
+	ctx := context.Background()
+
+	if _, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "case:CASE-88888",
+		MediaType: "text/plain",
+		Title:     "Case",
+		Content:   []byte("CASE-88888 payment incident with settlement risk."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "runbook:payments",
+		MediaType: "text/plain",
+		Title:     "Payments runbook",
+		Content:   []byte("Mitigation owner rotation and rollback steps."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CreateRelation(ctx, &kg.KGRelationRequest{
+		Source:       "case:CASE-88888",
+		Target:       "runbook:payments",
+		RelationType: "mitigated_by",
+		Direction:    kg.KGRelationDirectionOut,
+		Confidence:   0.95,
+		Evidence:     "Runbook mitigates the payment case",
+		SourceKind:   "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := engine.Search(ctx, &kg.KGSearchRequest{
+		Query:       "CASE-88888",
+		Limit:       5,
+		EnableGraph: true,
+		GraphDepth:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRelated := false
+	for _, hit := range resp.Hits {
+		if hit.Source == "runbook:payments" && hit.Score > 0 && hit.Metadata["kg_graph_score"] != "" {
+			foundRelated = true
+		}
+	}
+	if !foundRelated {
+		t.Fatalf("expected graph-enabled search to include scored related runbook, got %+v", resp.Hits)
+	}
+	if resp.GraphNodes == 0 {
+		t.Fatalf("expected graph node count to be populated")
+	}
+}
+
 func TestKGEngine_ImportConnector(t *testing.T) {
 	dir := t.TempDir()
 	db, err := New(dir)

@@ -197,6 +197,9 @@ func tokenizeSearchFiltered(s string, fallbackAllStopWords bool) []string {
 		return nil
 	}
 	out := make([]string, 0, len(tokens))
+	for _, token := range identifierTokens(s) {
+		out = append(out, token)
+	}
 	for _, token := range tokens {
 		if isKGStopWord(token) {
 			continue
@@ -207,6 +210,50 @@ func tokenizeSearchFiltered(s string, fallbackAllStopWords bool) []string {
 		return tokens
 	}
 	return out
+}
+
+func identifierTokens(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == ':' || r == '/' || r == '.')
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.Trim(part, ".,;:!?()[]{}\"'`")
+		if !looksLikeIdentifierToken(part) {
+			continue
+		}
+		out = append(out, part)
+		if idx := strings.LastIndexAny(part, ":/"); idx >= 0 && idx+1 < len(part) {
+			tail := part[idx+1:]
+			if looksLikeIdentifierToken(tail) {
+				out = append(out, tail)
+			}
+		}
+	}
+	return dedupeStrings(out)
+}
+
+func looksLikeIdentifierToken(token string) bool {
+	if token == "" || !strings.ContainsAny(token, "-_:.") {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, r := range token {
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case r == '-' || r == '_' || r == ':' || r == '/' || r == '.':
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
 }
 
 func isKGStopWord(token string) bool {

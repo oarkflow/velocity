@@ -47,6 +47,14 @@ func (noopEntityStore) GetRelatedEntities(context.Context, string, string, int) 
 	return nil, nil
 }
 
+func isNoopEntityStore(em EntityStore) bool {
+	if em == nil {
+		return true
+	}
+	_, ok := em.(noopEntityStore)
+	return ok
+}
+
 // Entity mirrors the lightweight entity shape needed by the KG package.
 type Entity struct {
 	EntityID  string            `json:"entity_id"`

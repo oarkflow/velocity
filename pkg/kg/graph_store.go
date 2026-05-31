@@ -3,6 +3,7 @@ package kg
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -199,25 +200,32 @@ func (s *KGGraphStore) QueryRelations(ctx context.Context, query *KGRelationQuer
 		}
 		return []KGRelation{}, nil
 	}
-	keys, err := s.db.Keys(kgRelationPrefix + "*")
+	ids, indexed, err := s.relationIDsForQuery(ctx, *query)
 	if err != nil {
 		return nil, err
 	}
-	relations := make([]KGRelation, 0, len(keys))
-	for _, key := range keys {
+	var keys []string
+	if !indexed {
+		keys, err = s.db.Keys(kgRelationPrefix + "*")
+		if err != nil {
+			return nil, err
+		}
+		ids = make([]string, 0, len(keys))
+		for _, key := range keys {
+			ids = append(ids, strings.TrimPrefix(key, kgRelationPrefix))
+		}
+	}
+	relations := make([]KGRelation, 0, len(ids))
+	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		data, err := s.db.Get([]byte(key))
+		rel, err := s.GetRelation(ctx, id)
 		if err != nil {
 			continue
 		}
-		var rel KGRelation
-		if json.Unmarshal(data, &rel) != nil {
-			continue
-		}
-		if relationMatches(rel, *query) {
-			relations = append(relations, rel)
+		if relationMatches(*rel, *query) {
+			relations = append(relations, *rel)
 			if query.Limit > 0 && len(relations) >= query.Limit {
 				break
 			}
@@ -635,7 +643,19 @@ func (s *KGGraphStore) putRelation(rel *KGRelation) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Put([]byte(kgRelationPrefix+rel.RelationID), data)
+	var existing *KGRelation
+	if current, err := s.GetRelation(context.Background(), rel.RelationID); err == nil {
+		existing = current
+	}
+	if err := s.db.Put([]byte(kgRelationPrefix+rel.RelationID), data); err != nil {
+		return err
+	}
+	if existing != nil {
+		if err := s.deleteRelationIndexes(existing); err != nil {
+			return err
+		}
+	}
+	return s.putRelationIndexes(rel)
 }
 
 func (s *KGGraphStore) appendMutation(action, entity, entityID, actor string, revision int64) error {
@@ -658,32 +678,320 @@ func (s *KGGraphStore) appendMutation(action, entity, entityID, actor string, re
 }
 
 func (s *KGGraphStore) relationsForNode(ctx context.Context, nodeID string, query *KGGraphQuery) ([]KGRelation, error) {
-	base := relationQueryFromGraph(query, 0)
-	base.Source = ""
-	base.Target = ""
-	relations, err := s.QueryRelations(ctx, base)
+	if query == nil {
+		query = &KGGraphQuery{}
+	}
+	perNodeLimit := 0
+	if query.Limit > 0 {
+		perNodeLimit = query.Limit
+	}
+	base := relationQueryFromGraph(query, perNodeLimit)
+	direction := normalizeRelationDirection(query.Direction)
+	switch direction {
+	case KGRelationDirectionOut:
+		base.Source = nodeID
+		return s.QueryRelations(ctx, base)
+	case KGRelationDirectionIn:
+		base.Target = nodeID
+		return s.QueryRelations(ctx, base)
+	default:
+		outgoing := *base
+		outgoing.Source = nodeID
+		incoming := *base
+		incoming.Target = nodeID
+		out, err := s.QueryRelations(ctx, &outgoing)
+		if err != nil {
+			return nil, err
+		}
+		in, err := s.QueryRelations(ctx, &incoming)
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[string]struct{}, len(out)+len(in))
+		merged := make([]KGRelation, 0, len(out)+len(in))
+		for _, rel := range out {
+			seen[rel.RelationID] = struct{}{}
+			merged = append(merged, rel)
+		}
+		for _, rel := range in {
+			if _, ok := seen[rel.RelationID]; ok {
+				continue
+			}
+			merged = append(merged, rel)
+		}
+		sort.Slice(merged, func(i, j int) bool {
+			if merged[i].CreatedAt.Equal(merged[j].CreatedAt) {
+				return merged[i].RelationID < merged[j].RelationID
+			}
+			return merged[i].CreatedAt.Before(merged[j].CreatedAt)
+		})
+		return merged, nil
+	}
+}
+
+func (s *KGGraphStore) putRelationIndexes(rel *KGRelation) error {
+	if err := s.db.Put([]byte(kgRelationIdxMeta), []byte("1")); err != nil {
+		return err
+	}
+	for _, key := range relationIndexKeys(rel) {
+		if err := s.addRelationIDToIndex(key, rel.RelationID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *KGGraphStore) deleteRelationIndexes(rel *KGRelation) error {
+	for _, key := range relationIndexKeys(rel) {
+		if err := s.removeRelationIDFromIndex(key, rel.RelationID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func relationIndexKeys(rel *KGRelation) []string {
+	if rel == nil || rel.RelationID == "" {
+		return nil
+	}
+	keys := []string{
+		relationIndexKey(kgRelationSrcIdx, rel.Source),
+		relationIndexKey(kgRelationTgtIdx, rel.Target),
+		relationIndexKey(kgRelationTypeIdx, rel.RelationType),
+		relationIndexKey(kgRelationStatIdx, string(normalizeRelationStatus(rel.Status))),
+	}
+	if rel.SourceKind != "" {
+		keys = append(keys, relationIndexKey(kgRelationKindIdx, rel.SourceKind))
+	}
+	return keys
+}
+
+func relationIndexKey(prefix, value string) string {
+	return prefix + encodeRelationIndexSegment(value)
+}
+
+func encodeRelationIndexSegment(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
+func relationIDFromIndexKey(key string) string {
+	idx := strings.LastIndexByte(key, ':')
+	if idx < 0 || idx+1 >= len(key) {
+		return ""
+	}
+	return key[idx+1:]
+}
+
+func (s *KGGraphStore) relationIDsForQuery(ctx context.Context, query KGRelationQuery) ([]string, bool, error) {
+	var sets [][]string
+	addSet := func(ids []string) {
+		sets = append(sets, ids)
+	}
+	hasEndpoint := query.Source != "" || query.Target != ""
+	if query.Source != "" {
+		ids, err := s.relationIDsFromIndex(ctx, kgRelationSrcIdx, query.Source)
+		if err != nil {
+			return nil, false, err
+		}
+		addSet(ids)
+	}
+	if query.Target != "" {
+		ids, err := s.relationIDsFromIndex(ctx, kgRelationTgtIdx, query.Target)
+		if err != nil {
+			return nil, false, err
+		}
+		addSet(ids)
+	}
+	// Endpoint adjacency is the most selective path for graph traversal.
+	// Hydrated relation filtering is cheaper than scanning broad type/status
+	// indexes such as "references" for every frontier node.
+	if !hasEndpoint && len(query.RelationTypes) > 0 {
+		typeIDs := make([]string, 0)
+		for _, relationType := range query.RelationTypes {
+			ids, err := s.relationIDsFromIndex(ctx, kgRelationTypeIdx, relationType)
+			if err != nil {
+				return nil, false, err
+			}
+			typeIDs = mergeSortedUniqueStrings(typeIDs, ids)
+		}
+		addSet(typeIDs)
+	}
+	if !hasEndpoint && query.SourceKind != "" {
+		ids, err := s.relationIDsFromIndex(ctx, kgRelationKindIdx, query.SourceKind)
+		if err != nil {
+			return nil, false, err
+		}
+		addSet(ids)
+	}
+	if !hasEndpoint && query.Status != "" {
+		ids, err := s.relationIDsFromIndex(ctx, kgRelationStatIdx, string(normalizeRelationStatus(query.Status)))
+		if err != nil {
+			return nil, false, err
+		}
+		addSet(ids)
+	}
+	if len(sets) == 0 {
+		return nil, false, nil
+	}
+	ids := sets[0]
+	for _, set := range sets[1:] {
+		ids = intersectSortedStrings(ids, set)
+		if len(ids) == 0 {
+			break
+		}
+	}
+	if len(ids) == 0 {
+		available, err := s.relationIndexAvailable(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		if !available {
+			return nil, false, nil
+		}
+	}
+	return ids, true, nil
+}
+
+func (s *KGGraphStore) relationIDsFromIndex(ctx context.Context, prefix, value string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	indexKey := relationIndexKey(prefix, value)
+	data, err := s.db.Get([]byte(indexKey))
+	if err == nil {
+		var ids []string
+		if json.Unmarshal(data, &ids) == nil {
+			sort.Strings(ids)
+			return uniqueSortedStrings(ids), nil
+		}
+	}
+	if (prefix == kgRelationSrcIdx || prefix == kgRelationTgtIdx) && err != nil {
+		available, availableErr := s.relationIndexAvailable(ctx)
+		if availableErr != nil {
+			return nil, availableErr
+		}
+		if available {
+			return nil, nil
+		}
+	}
+	// Compatibility for stores created before relation indexes were compacted:
+	// older index entries used one key per relation under the same prefix.
+	keys, err := s.db.Keys(indexKey + ":*")
 	if err != nil {
 		return nil, err
 	}
-	direction := normalizeRelationDirection(query.Direction)
-	out := make([]KGRelation, 0)
-	for _, rel := range relations {
-		switch direction {
-		case KGRelationDirectionOut:
-			if rel.Source == nodeID {
-				out = append(out, rel)
-			}
-		case KGRelationDirectionIn:
-			if rel.Target == nodeID {
-				out = append(out, rel)
-			}
-		default:
-			if rel.Source == nodeID || rel.Target == nodeID {
-				out = append(out, rel)
-			}
+	ids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if id := relationIDFromIndexKey(key); id != "" {
+			ids = append(ids, id)
 		}
 	}
-	return out, nil
+	sort.Strings(ids)
+	return uniqueSortedStrings(ids), nil
+}
+
+func (s *KGGraphStore) addRelationIDToIndex(key, relationID string) error {
+	if key == "" || relationID == "" {
+		return nil
+	}
+	if isBroadRelationIndexKey(key) {
+		return s.db.Put([]byte(key+":"+relationID), []byte("1"))
+	}
+	ids := []string{}
+	if data, err := s.db.Get([]byte(key)); err == nil {
+		_ = json.Unmarshal(data, &ids)
+	}
+	for _, id := range ids {
+		if id == relationID {
+			return nil
+		}
+	}
+	ids = append(ids, relationID)
+	sort.Strings(ids)
+	data, err := json.Marshal(uniqueSortedStrings(ids))
+	if err != nil {
+		return err
+	}
+	return s.db.Put([]byte(key), data)
+}
+
+func isBroadRelationIndexKey(key string) bool {
+	return strings.HasPrefix(key, kgRelationTypeIdx) ||
+		strings.HasPrefix(key, kgRelationKindIdx) ||
+		strings.HasPrefix(key, kgRelationStatIdx)
+}
+
+func (s *KGGraphStore) removeRelationIDFromIndex(key, relationID string) error {
+	if key == "" || relationID == "" {
+		return nil
+	}
+	if isBroadRelationIndexKey(key) {
+		_ = s.db.Delete([]byte(key + ":" + relationID))
+		return nil
+	}
+	data, err := s.db.Get([]byte(key))
+	if err != nil {
+		_ = s.db.Delete([]byte(key + ":" + relationID))
+		return nil
+	}
+	var ids []string
+	if json.Unmarshal(data, &ids) != nil {
+		return nil
+	}
+	out := ids[:0]
+	for _, id := range ids {
+		if id != relationID {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		_ = s.db.Delete([]byte(key + ":" + relationID))
+		return s.db.Delete([]byte(key))
+	}
+	sort.Strings(out)
+	encoded, err := json.Marshal(uniqueSortedStrings(out))
+	if err != nil {
+		return err
+	}
+	_ = s.db.Delete([]byte(key + ":" + relationID))
+	return s.db.Put([]byte(key), encoded)
+}
+
+func (s *KGGraphStore) relationIndexAvailable(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	_, err := s.db.Get([]byte(kgRelationIdxMeta))
+	return err == nil, nil
+}
+
+func (s *KGGraphStore) RebuildIndexes(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	keys, err := s.db.Keys(kgRelationPrefix + "*")
+	if err != nil {
+		return err
+	}
+	if len(keys) > 0 {
+		if err := s.db.Put([]byte(kgRelationIdxMeta), []byte("1")); err != nil {
+			return err
+		}
+	}
+	for _, key := range keys {
+		data, err := s.db.Get([]byte(key))
+		if err != nil {
+			continue
+		}
+		var rel KGRelation
+		if json.Unmarshal(data, &rel) != nil {
+			continue
+		}
+		if err := s.putRelationIndexes(&rel); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func relationQueryFromGraph(query *KGGraphQuery, limit int) *KGRelationQuery {

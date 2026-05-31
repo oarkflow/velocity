@@ -3,7 +3,7 @@ package kg
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -35,6 +35,16 @@ func (c *SlidingWindowChunker) Chunk(docID, text string) []KGChunk {
 	words := strings.Fields(text)
 	if len(words) == 0 {
 		return nil
+	}
+	if len(words) <= c.MaxWords {
+		return []KGChunk{{
+			ID:        generateChunkID(docID, 0),
+			DocID:     docID,
+			Index:     0,
+			Text:      text,
+			StartByte: 0,
+			EndByte:   len(text),
+		}}
 	}
 
 	step := c.MaxWords - c.Overlap
@@ -74,7 +84,11 @@ func (c *SlidingWindowChunker) Chunk(docID, text string) []KGChunk {
 }
 
 func generateChunkID(docID string, index int) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", docID, index)))
+	buf := make([]byte, 0, len(docID)+12)
+	buf = append(buf, docID...)
+	buf = append(buf, ':')
+	buf = strconv.AppendInt(buf, int64(index), 10)
+	h := sha256.Sum256(buf)
 	return "chk-" + hex.EncodeToString(h[:8])
 }
 

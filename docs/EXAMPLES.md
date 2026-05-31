@@ -80,6 +80,7 @@ That script demonstrates explicit KG ingestion, automatic indexing from normal K
 - `examples/kg_ner_demo/main.go`: NER behavior.
 - `examples/kg_search_demo/main.go`: KG search.
 - `examples/kg_context_search_demo/main.go`: ontology taxonomy, persistent relations, and relation-aware context search.
+- `examples/kg_realworld_scale_demo/main.go`: scalable real-world KG corpus with mixed KV, large object evidence, structured-file, SQL-style, envelope, entity, relation, and context-search workflows; supports 1M-record runs through environment variables.
 - `examples/entity_data_demo/main.go`: entity-linked data.
 - `examples/entity_relations_demo/main.go`: entity relations.
 - `scripts/knowledge_graph_demo.sh`: end-to-end KG shell walkthrough, including automatic resource indexing.

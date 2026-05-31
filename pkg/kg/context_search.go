@@ -191,6 +191,11 @@ func (e *KnowledgeGraphEngine) searchHitForSource(source string) (KGSearchHit, b
 			if chunk, ok := e.search.chunkMeta(chunkID); ok {
 				hit.ChunkID = chunk.ID
 				hit.Text = chunk.Text
+				if hit.Text == "" {
+					if rawText, err := e.db.Get([]byte(kgChunkPrefix + chunk.ID)); err == nil {
+						hit.Text = string(rawText)
+					}
+				}
 				hit.Entities = chunk.Entities
 			}
 		}
