@@ -155,8 +155,33 @@ func TestKGEngine_SearchModesAndChunkEntities(t *testing.T) {
 	if fuzzy.TotalHits == 0 {
 		t.Fatal("expected fuzzy search hit")
 	}
+	if fuzzy.Hits[0].Score <= 0 {
+		t.Fatalf("expected fuzzy search hit to have positive fused score, got %.4f", fuzzy.Hits[0].Score)
+	}
 	if len(fuzzy.Hits[0].Entities) == 0 {
 		t.Fatal("expected hydrated hit entities from chunk metadata")
+	}
+	stopFuzzy, err := engine.Search(ctx, &kg.KGSearchRequest{Query: "the retrival and complianc", Fuzzy: true, FuzzyMaxEdits: 1, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopFuzzy.TotalHits == 0 {
+		t.Fatal("expected stop-word-aware fuzzy search hit")
+	}
+	if _, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "protected-fuzzy.txt",
+		MediaType: "text/plain",
+		Title:     "Protected Fuzzy",
+		Content:   []byte("Patient reports ringing in both ears. Patient denies ringing in left ear only."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	protectedFuzzy, err := engine.Search(ctx, &kg.KGSearchRequest{Query: "both eers", Fuzzy: true, FuzzyMaxEdits: 1, Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protectedFuzzy.TotalHits == 0 {
+		t.Fatal("expected fuzzy hit when protected term matches exactly")
 	}
 }
 

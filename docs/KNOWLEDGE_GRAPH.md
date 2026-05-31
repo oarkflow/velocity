@@ -46,7 +46,7 @@ The KG subsystem can perform these workflows:
 - Search by keyword.
 - Search with full-text match modes, including all terms, any terms, boolean `OR`, quoted phrases, and prefix matching.
 - Use opt-in fuzzy matching for typo-tolerant fallback search.
-- Use a dedicated n-gram candidate index for fuzzy chunk search instead of scanning every chunk first.
+- Use Levenshtein edit-distance scoring for typo-tolerant fuzzy search, backed by an n-gram candidate index and stop-word-aware tokenization.
 - Search by vector or hybrid mode when an embedder/HNSW index is configured.
 - Filter searches by metadata.
 - Return a resource relation graph from a query with `SearchResourceGraph`.

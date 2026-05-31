@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unsafe"
 )
 
@@ -155,7 +156,7 @@ func (s *KGSearchEngine) Search(ctx context.Context, req *KGSearchRequest) (*KGS
 	}
 
 	// --- RRF Fusion ---
-	for _, c := range candidates {
+	for id, c := range candidates {
 		if c.bm25Rank > 0 {
 			c.score += bm25Weight * (1.0 / (rrfK + float64(c.bm25Rank)))
 		}
@@ -163,8 +164,9 @@ func (s *KGSearchEngine) Search(ctx context.Context, req *KGSearchRequest) (*KGS
 			c.score += vecWeight * (1.0 / (rrfK + float64(c.vecRank)))
 		}
 		if c.fuzzyRank > 0 {
-			c.score += bm25Weight * 0.75 * (1.0 / (rrfK + float64(c.fuzzyRank)))
+			c.score += bm25Weight * 0.45 * (1.0 / (rrfK + float64(c.fuzzyRank)))
 		}
+		candidates[id] = c
 	}
 
 	// Sort by fused score
@@ -182,7 +184,7 @@ func (s *KGSearchEngine) Search(ctx context.Context, req *KGSearchRequest) (*KGS
 		if c.bm25Rank > 0 {
 			bm25Score = 1.0 / (rrfK + float64(c.bm25Rank))
 		} else if c.fuzzyRank > 0 {
-			bm25Score = 0.75 / (rrfK + float64(c.fuzzyRank))
+			bm25Score = 0.45 / (rrfK + float64(c.fuzzyRank))
 		}
 		if c.vecRank > 0 {
 			vecScore = 1.0 / (rrfK + float64(c.vecRank))
@@ -320,12 +322,34 @@ type kgFuzzyCandidate struct {
 	text    []byte
 }
 
+var kgProtectedFuzzyTerms = map[string]struct{}{
+	"no": {}, "not": {}, "none": {}, "never": {}, "without": {}, "except": {},
+	"neither": {}, "nor": {}, "negative": {}, "denies": {},
+	"with": {}, "both": {}, "all": {}, "any": {}, "each": {}, "either": {},
+	"every": {},
+	"left":  {}, "right": {}, "bilateral": {}, "unilateral": {},
+	"upper": {}, "lower": {}, "inner": {}, "outer": {}, "middle": {},
+	"anterior": {}, "posterior": {}, "medial": {}, "lateral": {},
+	"proximal": {}, "distal": {}, "superior": {}, "inferior": {},
+	"before": {}, "after": {}, "during": {}, "prior": {}, "post": {}, "pre": {},
+	"acute": {}, "chronic": {}, "subacute": {}, "recurrent": {}, "persistent": {},
+	"intermittent": {}, "progressive": {},
+	"mild": {}, "moderate": {}, "severe": {}, "critical": {},
+	"active": {}, "inactive": {}, "resolved": {}, "unresolved": {},
+	"confirmed": {}, "suspected": {}, "probable": {}, "possible": {},
+	"icd": {}, "icd10": {}, "cpt": {}, "hcpcs": {}, "snomed": {}, "loinc": {},
+	"rxnorm": {}, "dx": {}, "sx": {}, "hx": {}, "tx": {}, "rx": {},
+}
+
 func (s *KGSearchEngine) fuzzySearch(req *KGSearchRequest, limit int) []kgFuzzyCandidate {
 	if err := s.ensureTextIndex(); err != nil {
 		return nil
 	}
-	queryTerms := tokenize(strings.ToLower(req.Query))
+	queryTerms := tokenizeSearch(strings.ToLower(req.Query))
 	if len(queryTerms) == 0 {
+		return nil
+	}
+	if !shouldUseFuzzyForTerms(queryTerms) {
 		return nil
 	}
 	maxEdits := req.FuzzyMaxEdits
@@ -333,12 +357,10 @@ func (s *KGSearchEngine) fuzzySearch(req *KGSearchRequest, limit int) []kgFuzzyC
 		maxEdits = 1
 	}
 	s.indexMu.RLock()
-	candidateIDs := s.fuzzyCandidateIDsLocked(queryTerms)
-	if len(candidateIDs) == 0 && len(queryTerms) > 0 && len(queryTerms[0]) < 3 {
-		for id := range s.chunkTerms {
-			candidateIDs = append(candidateIDs, id)
-		}
-		sort.Strings(candidateIDs)
+	candidateIDs := s.accurateFuzzyCandidateIDsLocked(queryTerms)
+	if len(candidateIDs) == 0 {
+		s.indexMu.RUnlock()
+		return nil
 	}
 	candidates := make([]kgFuzzyCandidate, 0, min(limit, len(candidateIDs)))
 	for _, id := range candidateIDs {
@@ -392,7 +414,7 @@ func (s *KGSearchEngine) ensureTextIndex() error {
 		chunkID := strings.TrimPrefix(key, kgChunkPrefix)
 		text := string(data)
 		chunkText[chunkID] = text
-		terms := tokenize(strings.ToLower(text))
+		terms := tokenizeSearch(strings.ToLower(text))
 		chunkTerms[chunkID] = terms
 		chunkNorm[chunkID] = strings.Join(terms, " ")
 		seen := make(map[string]struct{}, 16)
@@ -402,7 +424,7 @@ func (s *KGSearchEngine) ensureTextIndex() error {
 			}
 			seen[term] = struct{}{}
 			termIndex[term] = append(termIndex[term], chunkID)
-			for _, gram := range tokenNGrams(term, 3) {
+			for _, gram := range fuzzyCandidateGrams(term) {
 				fuzzyIndex[gram] = append(fuzzyIndex[gram], chunkID)
 			}
 		}
@@ -544,48 +566,87 @@ func unsafeStringBytes(s string) []byte {
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-func fuzzyTextScore(queryTerms []string, text []byte, maxEdits int) float64 {
-	return fuzzyTokenScore(queryTerms, tokenize(strings.ToLower(string(text))), maxEdits)
-}
-
 func fuzzyTokenScore(queryTerms []string, tokens []string, maxEdits int) float64 {
-	if len(tokens) == 0 {
+	if len(queryTerms) == 0 || len(tokens) == 0 {
 		return 0
 	}
+	tokenSet := make(map[string]struct{}, len(tokens))
 	maxTokenLen := 0
 	for _, token := range tokens {
-		if len(token) > maxTokenLen {
-			maxTokenLen = len(token)
+		t := normalizeFuzzyToken(token)
+		if t == "" {
+			continue
 		}
+		tokenSet[t] = struct{}{}
+		if len(t) > maxTokenLen {
+			maxTokenLen = len(t)
+		}
+	}
+	if len(tokenSet) == 0 {
+		return 0
 	}
 	prev := make([]int, maxTokenLen+1)
 	curr := make([]int, maxTokenLen+1)
 	score := 0.0
-	for _, q := range queryTerms {
+	required := 0
+	matched := 0
+	for _, rawQ := range queryTerms {
+		q := normalizeFuzzyToken(rawQ)
+		if q == "" {
+			continue
+		}
+		required++
+		if _, ok := tokenSet[q]; ok {
+			score += 1
+			matched++
+			continue
+		}
+		if isProtectedFuzzyTerm(q) || isCodeOrIdentifierTerm(q) || !isSafeFuzzyToken(q) {
+			continue
+		}
+		allowedEdits := maxAllowedFuzzyEdits(q)
+		if maxEdits > 0 && maxEdits < allowedEdits {
+			allowedEdits = maxEdits
+		}
+		if allowedEdits <= 0 {
+			continue
+		}
 		best := 0.0
-		for _, token := range tokens {
-			switch {
-			case token == q:
-				best = 1
-			case strings.HasPrefix(token, q) || strings.HasPrefix(q, token):
+		for token := range tokenSet {
+			if !isSafeFuzzyToken(token) {
+				continue
+			}
+			if strings.HasPrefix(token, q) || strings.HasPrefix(q, token) {
 				if best < 0.85 {
 					best = 0.85
 				}
-			case boundedEditDistance(q, token, maxEdits, prev, curr) <= maxEdits:
-				if best < 0.65 {
-					best = 0.65
-				}
+				continue
 			}
-			if best == 1 {
-				break
+			distance := levenshteinDistance(q, token, allowedEdits, prev, curr)
+			if distance > allowedEdits {
+				continue
+			}
+			similarity := levenshteinSimilarity(q, token, distance)
+			if similarity < minFuzzySimilarity(q) {
+				continue
+			}
+			similarity *= 0.90
+			if similarity > best {
+				best = similarity
 			}
 		}
-		score += best
+		if best > 0 {
+			score += best
+			matched++
+		}
 	}
-	if score == 0 {
+	if required == 0 {
 		return 0
 	}
-	return score / float64(len(queryTerms))
+	if float64(matched)/float64(required) < 0.75 {
+		return 0
+	}
+	return score / float64(required)
 }
 
 func kgPlanMatchesTokens(plan fullTextPlan, tokens []string, normalizedText string) bool {
@@ -657,25 +718,129 @@ func containsKGToken(values []string, target string) bool {
 	return false
 }
 
-func (s *KGSearchEngine) fuzzyCandidateIDsLocked(queryTerms []string) []string {
+func (s *KGSearchEngine) accurateFuzzyCandidateIDsLocked(queryTerms []string) []string {
 	var candidates []string
 	used := false
-	for _, term := range queryTerms {
-		var termIDs []string
-		for _, gram := range tokenNGrams(term, 3) {
-			termIDs = mergeSortedUniqueStrings(termIDs, s.fuzzyIndex[gram])
+	for _, rawTerm := range queryTerms {
+		term := normalizeFuzzyToken(rawTerm)
+		if term == "" {
+			continue
 		}
-		if len(termIDs) == 0 {
+		var termIDs []string
+		if isProtectedFuzzyTerm(term) || isCodeOrIdentifierTerm(term) {
+			termIDs = s.termIndex[term]
+			if len(termIDs) == 0 {
+				return nil
+			}
+		} else if isSafeFuzzyToken(term) {
+			for _, gram := range fuzzyCandidateGrams(term) {
+				termIDs = mergeSortedUniqueStrings(termIDs, s.fuzzyIndex[gram])
+			}
+			if len(termIDs) == 0 {
+				continue
+			}
+		} else {
 			continue
 		}
 		if !used {
 			candidates = append([]string(nil), termIDs...)
 			used = true
+		} else if isProtectedFuzzyTerm(term) || isCodeOrIdentifierTerm(term) {
+			candidates = intersectSortedStrings(candidates, termIDs)
 		} else {
 			candidates = mergeSortedUniqueStrings(candidates, termIDs)
 		}
+		if used && len(candidates) == 0 {
+			return nil
+		}
 	}
 	return candidates
+}
+
+func normalizeFuzzyToken(token string) string {
+	return strings.Trim(strings.TrimSpace(strings.ToLower(token)), ".,;:!?()[]{}\"'`")
+}
+
+func shouldUseFuzzyForTerms(queryTerms []string) bool {
+	for _, term := range queryTerms {
+		t := normalizeFuzzyToken(term)
+		if t == "" || isProtectedFuzzyTerm(t) || isCodeOrIdentifierTerm(t) {
+			continue
+		}
+		if isSafeFuzzyToken(t) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSafeFuzzyToken(token string) bool {
+	token = normalizeFuzzyToken(token)
+	if len(token) < 4 {
+		return false
+	}
+	hasLetter := false
+	for _, r := range token {
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			return false
+		default:
+			return false
+		}
+	}
+	return hasLetter
+}
+
+func isProtectedFuzzyTerm(token string) bool {
+	_, ok := kgProtectedFuzzyTerms[normalizeFuzzyToken(token)]
+	return ok
+}
+
+func isCodeOrIdentifierTerm(token string) bool {
+	token = normalizeFuzzyToken(token)
+	if token == "" {
+		return false
+	}
+	digits := 0
+	letters := 0
+	for _, r := range token {
+		switch {
+		case unicode.IsDigit(r):
+			digits++
+		case unicode.IsLetter(r):
+			letters++
+		case r == '-' || r == '_' || r == ':' || r == '/' || r == '.':
+		default:
+			return false
+		}
+	}
+	if digits == 0 {
+		return false
+	}
+	if letters > 0 {
+		return true
+	}
+	return float64(digits)/float64(len(token)) >= 0.70
+}
+
+func maxAllowedFuzzyEdits(token string) int {
+	switch n := len(normalizeFuzzyToken(token)); {
+	case n <= 3:
+		return 0
+	case n <= 4:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func minFuzzySimilarity(token string) float64 {
+	if len(normalizeFuzzyToken(token)) <= 5 {
+		return 0.60
+	}
+	return 0.84
 }
 
 func tokenNGrams(term string, n int) []string {
@@ -687,6 +852,14 @@ func tokenNGrams(term string, n int) []string {
 		grams = append(grams, term[i:i+n])
 	}
 	return grams
+}
+
+func fuzzyCandidateGrams(term string) []string {
+	term = normalizeFuzzyToken(term)
+	if len(term) <= 5 {
+		return tokenNGrams(term, 2)
+	}
+	return tokenNGrams(term, 3)
 }
 
 func uniqueSortedStrings(values []string) []string {
@@ -702,7 +875,9 @@ func uniqueSortedStrings(values []string) []string {
 	return out
 }
 
-func boundedEditDistance(a, b string, max int, prev, curr []int) int {
+// levenshteinDistance returns the Levenshtein edit distance between two tokens,
+// with an early-exit bound for fuzzy search.
+func levenshteinDistance(a, b string, max int, prev, curr []int) int {
 	if a == b {
 		return 0
 	}
@@ -748,6 +923,21 @@ func boundedEditDistance(a, b string, max int, prev, curr []int) int {
 		prev, curr = curr, prev
 	}
 	return prev[len(b)]
+}
+
+func levenshteinSimilarity(a, b string, distance int) float64 {
+	longest := len(a)
+	if len(b) > longest {
+		longest = len(b)
+	}
+	if longest == 0 {
+		return 1
+	}
+	score := 1 - float64(distance)/float64(longest)
+	if score < 0 {
+		return 0
+	}
+	return score
 }
 
 func min3(a, b, c int) int {
@@ -866,13 +1056,6 @@ func (s *KGSearchEngine) markIndexDirty() {
 	s.indexMu.Lock()
 	s.indexDirty = true
 	s.indexMu.Unlock()
-}
-
-func extractChunkID(key string) string {
-	if strings.HasPrefix(key, kgChunkPrefix) {
-		return key[len(kgChunkPrefix):]
-	}
-	return ""
 }
 
 func matchFilters(metadata, filters map[string]string) bool {

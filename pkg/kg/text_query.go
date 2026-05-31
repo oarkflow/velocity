@@ -15,6 +15,31 @@ type fullTextPlan struct {
 	phraseAll bool
 }
 
+var kgStopWords = map[string]struct{}{
+	// Domain-neutral English function words only. Terms that can carry meaning
+	// in legal, healthcare, finance, support, evidence, or operations corpora
+	// are intentionally preserved even if they are common in those domains.
+	"a": {}, "about": {}, "above": {}, "after": {}, "again": {}, "against": {}, "all": {},
+	"am": {}, "an": {}, "and": {}, "any": {}, "are": {}, "as": {}, "at": {}, "be": {},
+	"because": {}, "been": {}, "before": {}, "being": {}, "below": {}, "between": {},
+	"both": {}, "but": {}, "by": {}, "can": {}, "cannot": {}, "could": {}, "did": {},
+	"do": {}, "does": {}, "doing": {}, "down": {}, "during": {}, "each": {}, "few": {},
+	"for": {}, "from": {}, "further": {}, "had": {}, "has": {}, "have": {}, "having": {},
+	"he": {}, "her": {}, "here": {}, "hers": {}, "herself": {}, "him": {}, "himself": {},
+	"his": {}, "how": {}, "i": {}, "if": {}, "in": {}, "into": {}, "is": {}, "it": {},
+	"its": {}, "itself": {}, "just": {}, "me": {}, "more": {}, "most": {}, "my": {},
+	"myself": {}, "no": {}, "nor": {}, "not": {}, "now": {}, "of": {}, "off": {},
+	"on": {}, "once": {}, "only": {}, "or": {}, "other": {}, "our": {}, "ours": {},
+	"ourselves": {}, "out": {}, "over": {}, "own": {}, "same": {}, "she": {}, "should": {},
+	"so": {}, "some": {}, "such": {}, "than": {}, "that": {}, "the": {}, "their": {},
+	"theirs": {}, "them": {}, "themselves": {}, "then": {}, "there": {}, "these": {},
+	"they": {}, "this": {}, "those": {}, "through": {}, "to": {}, "too": {}, "under": {},
+	"until": {}, "up": {}, "very": {}, "was": {}, "we": {}, "were": {}, "what": {},
+	"when": {}, "where": {}, "which": {}, "while": {}, "who": {}, "whom": {}, "why": {},
+	"will": {}, "with": {}, "within": {}, "without": {}, "would": {}, "you": {}, "your": {},
+	"yours": {}, "yourself": {}, "yourselves": {},
+}
+
 func parseFullTextQuery(text, matchMode string, prefixMatch bool) fullTextPlan {
 	text = strings.TrimSpace(text)
 	plan := fullTextPlan{raw: text}
@@ -58,7 +83,7 @@ func parseFullTextQuery(text, matchMode string, prefixMatch bool) fullTextPlan {
 				continue
 			}
 			if negative {
-				plan.negative = append(plan.negative, tokenize(strings.ToLower(phrase))...)
+				plan.negative = append(plan.negative, tokenizeSearchStrict(strings.ToLower(phrase))...)
 				continue
 			}
 			plan.phrases = append(plan.phrases, strings.ToLower(phrase))
@@ -68,7 +93,7 @@ func parseFullTextQuery(text, matchMode string, prefixMatch bool) fullTextPlan {
 		if prefix {
 			token = strings.TrimSuffix(token, "*")
 		}
-		for _, term := range tokenize(strings.ToLower(token)) {
+		for _, term := range tokenizeSearchStrict(strings.ToLower(token)) {
 			if negative {
 				plan.negative = append(plan.negative, term)
 			} else if prefix || prefixMatch {
@@ -135,7 +160,7 @@ func (p fullTextPlan) indexTerms() []string {
 	terms := make([]string, 0, len(p.terms)+len(p.phrases)*2)
 	terms = append(terms, p.terms...)
 	for _, phrase := range p.phrases {
-		terms = append(terms, tokenize(strings.ToLower(phrase))...)
+		terms = append(terms, tokenizeSearchStrict(strings.ToLower(phrase))...)
 	}
 	return dedupeStrings(terms)
 }
@@ -157,8 +182,55 @@ func tokenize(s string) []string {
 	return out
 }
 
+func tokenizeSearch(s string) []string {
+	return tokenizeSearchFiltered(s, true)
+}
+
+func tokenizeSearchStrict(s string) []string {
+	return tokenizeSearchFiltered(s, false)
+}
+
+func tokenizeSearchFiltered(s string, fallbackAllStopWords bool) []string {
+	s = strings.ToLower(s)
+	tokens := tokenize(s)
+	if len(tokens) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if isKGStopWord(token) {
+			continue
+		}
+		out = append(out, token)
+	}
+	if len(out) == 0 && fallbackAllStopWords {
+		return tokens
+	}
+	return out
+}
+
+func isKGStopWord(token string) bool {
+	if tokenContainsDigit(token) || strings.Contains(token, "_") {
+		return false
+	}
+	if isProtectedFuzzyTerm(token) {
+		return false
+	}
+	_, ok := kgStopWords[token]
+	return ok
+}
+
+func tokenContainsDigit(token string) bool {
+	for _, r := range token {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsNormalizedPhrase(normalizedText, phrase string) bool {
-	phraseTokens := tokenize(strings.ToLower(phrase))
+	phraseTokens := tokenizeSearch(strings.ToLower(phrase))
 	if len(phraseTokens) == 0 {
 		return false
 	}

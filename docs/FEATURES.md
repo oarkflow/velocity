@@ -73,7 +73,7 @@ For a runnable smoke flow across the complete feature set, use:
 - Document ingestion with text extraction from plain text, HTML, and JSON.
 - Sliding-window chunking.
 - Rule-based NER for emails, URLs, domains, file paths, hashes, dates, money, organizations, people, business identifiers, API-key-like patterns, and custom regex rules.
-- Lightweight KG search index with all/any/phrase/boolean/prefix matching and opt-in n-gram-backed fuzzy fallback search.
+- Lightweight KG search index with all/any/phrase/boolean/prefix matching and opt-in stop-word-aware, n-gram-backed Levenshtein fuzzy fallback search.
 - Persistent first-class KG relations with CRUD, provenance/evidence, confidence, direction, status, revisions, and mutation log records.
 - Ontology definitions and validation for allowed relation types, endpoint types, direction, required fields, and cardinality.
 - Persistent graph query and algorithms for traversal, shortest path, impact/dependency traversal, degree metrics, and connected components.
