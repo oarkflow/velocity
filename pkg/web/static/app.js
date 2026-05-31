@@ -5,7 +5,34 @@ function qsa(sel, root=document){ return [...root.querySelectorAll(sel)]; }
 
 function tokenHeader() {
   const t = localStorage.getItem('token');
-  return t ? {'Authorization': 'Bearer ' + t} : {};
+  return t && !tokenExpired(t) ? {'Authorization': 'Bearer ' + t} : {};
+}
+
+function tokenExpired(token) {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1] || ''));
+    return payload.exp && payload.exp * 1000 <= Date.now();
+  } catch (e) {
+    return false;
+  }
+}
+
+function hasToken() {
+  const t = localStorage.getItem('token');
+  if (!t) return false;
+  if (tokenExpired(t)) {
+    localStorage.removeItem('token');
+    return false;
+  }
+  return true;
+}
+
+function showLogin() {
+  localStorage.removeItem('token');
+  qs('#file-manager').classList.add('hidden');
+  qs('#login').classList.remove('hidden');
+  qs('#auth-ui #user-info').classList.add('hidden');
+  qs('#logout-btn').classList.add('hidden');
 }
 
 async function api(path, opts={}){
@@ -14,6 +41,9 @@ async function api(path, opts={}){
   const text = await res.text();
   let body = text;
   try { body = JSON.parse(text); } catch(e){}
+  if (res.status === 401 && path !== '/auth/login') {
+    showLogin();
+  }
   return {ok:res.ok,status:res.status,body};
 }
 
@@ -70,11 +100,11 @@ async function loadDirectory(path) {
   // Add parent directory if not root
   if (path) {
     const tr = document.createElement('tr');
-    tr.className = 'hover:bg-gray-100 cursor-pointer';
+    tr.className = 'file-row file-row-clickable';
     tr.innerHTML = `
-      <td class="py-2">
-        <div class="flex items-center">
-          <svg class="w-5 h-5 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <td>
+        <div class="file-name-cell">
+          <svg class="file-icon file-icon-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
           </svg>
           ..
@@ -95,11 +125,11 @@ async function loadDirectory(path) {
   // Add folders
   folders.forEach(folder => {
     const tr = document.createElement('tr');
-    tr.className = 'hover:bg-gray-100 cursor-pointer';
+    tr.className = 'file-row file-row-clickable';
     tr.innerHTML = `
-      <td class="py-2">
-        <div class="flex items-center">
-          <svg class="w-5 h-5 mr-2 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <td>
+        <div class="file-name-cell">
+          <svg class="file-icon file-icon-folder" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2H5a2 2 0 00-2-2z"></path>
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5a2 2 0 012-2h4a2 2 0 012 2v2H8V5z"></path>
           </svg>
@@ -110,10 +140,11 @@ async function loadDirectory(path) {
       <td>-</td>
       <td>-</td>
       <td>
-        <button class="text-red-500 hover:text-red-700" data-delete-folder="${folder}">Delete</button>
+        <button class="file-row-btn file-row-btn-danger" data-delete-folder="${folder}">Delete</button>
       </td>
     `;
-    tr.addEventListener('click', () => {
+    tr.addEventListener('click', (ev) => {
+      if (ev.target.closest('button')) return;
       loadDirectory(path + folder + '/');
     });
     tbody.appendChild(tr);
@@ -122,16 +153,16 @@ async function loadDirectory(path) {
   // Add files
   files.forEach(file => {
     const tr = document.createElement('tr');
-    tr.className = 'hover:bg-gray-100';
+    tr.className = 'file-row';
     const size = file.size ? (file.size >= 1024 ? (file.size/1024).toFixed(1) + ' KB' : file.size + ' B') : '-';
     const modified = file.modified_at ? new Date(file.modified_at).toLocaleString() : '-';
     const isImage = file.content_type && file.content_type.startsWith('image/');
     const fileName = decodeURIComponent(file.path).split('/').pop();
 
     tr.innerHTML = `
-      <td class="py-2">
-        <div class="flex items-center">
-          <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <td>
+        <div class="file-name-cell">
+          <svg class="file-icon file-icon-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
           </svg>
           ${fileName}
@@ -141,9 +172,11 @@ async function loadDirectory(path) {
       <td>${size}</td>
       <td>${modified}</td>
       <td>
-        ${isImage ? '<button class="text-blue-500 hover:text-blue-700 mr-2" data-preview="' + file.path + '">Preview</button>' : ''}
-        <button class="text-green-500 hover:text-green-700 mr-2" data-download="' + file.path + '">Download</button>
-        <button class="text-red-500 hover:text-red-700" data-delete="' + file.path + '">Delete</button>
+        <div class="file-row-actions">
+          ${isImage ? '<button class="file-row-btn" data-preview="' + file.path + '">Preview</button>' : ''}
+          <button class="file-row-btn" data-download="' + file.path + '">Download</button>
+          <button class="file-row-btn file-row-btn-danger" data-delete="' + file.path + '">Delete</button>
+        </div>
       </td>
     `;
     tbody.appendChild(tr);
@@ -173,6 +206,7 @@ function updateBreadcrumb(path) {
 
 // Upload button
 qs('#upload-btn').addEventListener('click', () => {
+  qs('#upload-btn').closest('details')?.removeAttribute('open');
   qs('#upload-modal').classList.remove('hidden');
 });
 
@@ -209,6 +243,7 @@ qs('#upload-form').addEventListener('submit', async (ev) => {
 
 // New folder
 qs('#new-folder-btn').addEventListener('click', () => {
+  qs('#new-folder-btn').closest('details')?.removeAttribute('open');
   qs('#new-folder-modal').classList.remove('hidden');
 });
 
@@ -328,7 +363,83 @@ function escapeHTML(value) {
   return String(value || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 
+function splitCSV(value) {
+  return String(value || '').split(',').map(v => v.trim()).filter(Boolean);
+}
+
+function kgNumber(value, fallback=0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function renderJSON(value) {
+  return `<pre class="kg-json">${escapeHTML(JSON.stringify(value || {}, null, 2))}</pre>`;
+}
+
+function queryTerms(query) {
+  return String(query || '').toLowerCase().split(/[^a-z0-9_./-]+/).filter(term => term.length > 1);
+}
+
+function makeSnippet(text, query, size=520) {
+  const raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw || raw.length <= size) return raw;
+  const lower = raw.toLowerCase();
+  let pos = -1;
+  for (const term of queryTerms(query)) {
+    pos = lower.indexOf(term);
+    if (pos >= 0) break;
+  }
+  if (pos < 0) return raw.slice(0, size) + '...';
+  const start = Math.max(0, pos - Math.floor(size * 0.35));
+  const end = Math.min(raw.length, start + size);
+  return `${start > 0 ? '... ' : ''}${raw.slice(start, end)}${end < raw.length ? ' ...' : ''}`;
+}
+
+function highlightQuery(text, query) {
+  let html = escapeHTML(text);
+  for (const term of queryTerms(query).sort((a, b) => b.length - a.length)) {
+    const escaped = escapeHTML(term).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    html = html.replace(new RegExp(`(${escaped})`, 'ig'), '<mark>$1</mark>');
+  }
+  return html;
+}
+
+function objectPathFromHit(hit) {
+  return (hit.metadata && hit.metadata.path) || String(hit.source || '').replace(/^object:/, '');
+}
+
+function renderKGHits(hits, query='', emptyText='No results') {
+  return hits.length ? hits.map(hit => `
+    <article class="kg-hit" data-doc-id="${escapeHTML(hit.doc_id || '')}">
+      <div class="kg-hit-head">
+        <span class="kg-hit-title">${escapeHTML(hit.title || hit.source || hit.doc_id || hit.chunk_id)}</span>
+        <span class="kg-pill">score ${Number(hit.score || 0).toFixed(4)}</span>
+        ${hit.metadata?.content_type ? `<span class="kg-pill">${escapeHTML(hit.metadata.content_type)}</span>` : ''}
+      </div>
+      <div class="kg-hit-snippet">${highlightQuery(makeSnippet(hit.text || '', query), query)}</div>
+      <div class="kg-hit-meta">
+        <span>${escapeHTML(objectPathFromHit(hit) || hit.source || '-')}</span>
+        <span>doc ${escapeHTML(hit.doc_id || '-')}</span>
+      </div>
+      <details class="kg-doc-details">
+        <summary>Document details</summary>
+        <div class="kg-doc-body">
+          <div><strong>Title</strong>${escapeHTML(hit.title || '-')}</div>
+          <div><strong>Source</strong>${escapeHTML(hit.source || '-')}</div>
+          <div><strong>Content type</strong>${escapeHTML(hit.metadata?.content_type || hit.metadata?.resource_type || '-')}</div>
+          <div><strong>Object ID</strong>${escapeHTML(hit.metadata?.object_id || '-')}</div>
+          ${objectPathFromHit(hit) ? `<a class="kg-doc-link" href="/api/objects/${encodeURIComponent(objectPathFromHit(hit))}" target="_blank" rel="noopener">Open document</a>` : ''}
+        </div>
+      </details>
+    </article>
+  `).join('') : `<div class="text-gray-500">${emptyText}</div>`;
+}
+
 function setActiveTab(name) {
+  if (!hasToken()) {
+    showLogin();
+    return;
+  }
   const filesActive = name === 'files';
   qs('#files-panel').classList.toggle('hidden', !filesActive);
   qs('#kg-panel').classList.toggle('hidden', filesActive);
@@ -343,10 +454,14 @@ qs('#tab-files').addEventListener('click', () => setActiveTab('files'));
 qs('#tab-kg').addEventListener('click', () => setActiveTab('kg'));
 
 let lastKGGraphRequest = null;
+let kgSyncRunning = false;
 
 async function loadKGDashboard() {
-  const [analytics, status, rules, jobs, merges, relations] = await Promise.all([
-    api('/api/v1/kg/analytics'),
+  if (!hasToken()) return;
+  const analytics = await api('/api/v1/kg/analytics');
+  if (analytics.status === 401 || !hasToken()) return;
+
+  const [status, rules, jobs, merges, relations] = await Promise.all([
     api('/api/v1/kg/sync/status'),
     api('/api/v1/kg/ner/rules'),
     api('/api/v1/kg/jobs?status=running'),
@@ -362,6 +477,7 @@ async function loadKGDashboard() {
   }
   if (status.ok) {
     const body = status.body || {};
+    kgSyncRunning = Boolean(body.running);
     qs('#kg-sync-status').innerHTML = `
       <div>Enabled: ${body.enabled ? 'yes' : 'no'}</div>
       <div>Running: ${body.running ? 'yes' : 'no'}</div>
@@ -390,7 +506,13 @@ qs('#kg-sync-btn').addEventListener('click', async () => {
   const r = await api('/api/v1/kg/sync', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({enabled:true, existing:true})
+    body: JSON.stringify({
+      enabled: true,
+      existing: true,
+      sync_workers: 4,
+      max_value_bytes: 67108864,
+      resources: ['kv', 'object', 'secret', 'envelope', 'entity']
+    })
   });
   if (!r.ok) {
     alert('KG sync failed: ' + JSON.stringify(r.body));
@@ -399,45 +521,97 @@ qs('#kg-sync-btn').addEventListener('click', async () => {
   loadKGDashboard();
 });
 
+qs('#kg-rebuild-btn').addEventListener('click', async () => {
+  const r = await api('/api/v1/kg/rebuild', {method:'POST'});
+  if (!r.ok) {
+    alert('KG rebuild failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  loadKGDashboard();
+});
+
+qs('#kg-object-probe-btn').addEventListener('click', () => {
+  const form = qs('#kg-search-form');
+  form.querySelector('[name=query]').value = 'OBJECT-CONTENT-0000100';
+  form.querySelector('[name=limit]').value = '5';
+  form.dispatchEvent(new Event('submit', {cancelable:true, bubbles:true}));
+});
+
 qs('#kg-search-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);
   const query = String(fd.get('query') || '').trim();
   const limit = Number(fd.get('limit') || 10);
   if (!query) return;
+  const payload = {
+    query,
+    limit,
+    mode: String(fd.get('mode') || ''),
+    match_mode: String(fd.get('match_mode') || ''),
+    prefix_match: fd.get('prefix_match') === 'on',
+    fuzzy: fd.get('fuzzy') === 'on',
+    fuzzy_max_edits: fd.get('fuzzy') === 'on' ? 1 : 0,
+    enable_graph: fd.get('enable_graph') === 'on',
+    graph_depth: kgNumber(fd.get('graph_depth'), 2),
+    enable_vector: fd.get('enable_vector') === 'on',
+    min_score: kgNumber(fd.get('min_score'), 0)
+  };
+  if (!payload.mode) delete payload.mode;
+  if (!payload.match_mode) delete payload.match_mode;
+  if (!payload.min_score) delete payload.min_score;
   const search = await api('/api/v1/kg/search', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({query, limit})
+    body: JSON.stringify(payload)
   });
   if (!search.ok) {
     alert('KG search failed: ' + JSON.stringify(search.body));
     return;
   }
   const hits = search.body.hits || [];
-  qs('#kg-results').innerHTML = hits.length ? hits.map(hit => `
-    <div class="border-b border-gray-200 pb-2">
-      <div class="font-medium">${escapeHTML(hit.title || hit.source || hit.doc_id)}</div>
-      <div class="text-gray-600">${escapeHTML((hit.text || '').slice(0, 260))}</div>
-      <div class="text-xs text-gray-500">score ${Number(hit.score || 0).toFixed(4)}</div>
-    </div>
-  `).join('') : '<div class="text-gray-500">No results</div>';
+  qs('#kg-results').innerHTML = renderKGHits(hits, query, kgNoResultsMessage(query));
+});
 
-  const graph = await api('/api/v1/kg/resource-graph', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({query, limit, depth:1})
+function kgNoResultsMessage(query) {
+  const suffix = kgSyncRunning ? ' Indexing is still running, so newly uploaded files may appear in a moment.' : ' Try Broad match, check that the file was synced, or search a shorter phrase.';
+  return `<div class="kg-empty"><strong>No results for "${escapeHTML(query)}"</strong>${suffix}</div>`;
+}
+
+qs('#kg-context-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const payload = {
+    query: String(fd.get('query') || '').trim(),
+    limit: kgNumber(fd.get('limit'), 10),
+    graph_depth: kgNumber(fd.get('depth'), 2),
+    include_related: fd.get('include_related') === 'on',
+    relation_types: splitCSV(fd.get('relation_types')),
+    context_weight: 0.45,
+    search_weight: 1
+  };
+  if (!payload.query) return;
+  const r = await api('/api/v1/kg/context-search', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
   });
-  if (graph.ok) {
-    lastKGGraphRequest = {query, limit, depth:1};
-    const edges = graph.body.edges || [];
-    qs('#kg-graph').innerHTML = edges.length ? edges.map(edge => `
-      <div class="border-b border-gray-200 pb-2">
-        <div>${escapeHTML(edge.source)} -> ${escapeHTML(edge.target)}</div>
-        <div class="text-gray-600">${escapeHTML(edge.relation_type)} ${Number(edge.confidence || 0).toFixed(2)}: ${escapeHTML(edge.evidence || '')}</div>
-      </div>
-    `).join('') : '<div class="text-gray-500">No inferred edges</div>';
+  if (!r.ok) {
+    alert('Context search failed: ' + JSON.stringify(r.body));
+    return;
   }
+  const hits = r.body.hits || [];
+  qs('#kg-context-results').innerHTML = hits.length ? hits.map(hit => `
+    <div class="kg-hit">
+      <div class="flex flex-wrap gap-2 items-center">
+        <span class="font-medium">${escapeHTML(hit.title || hit.source || hit.doc_id)}</span>
+        <span class="kg-pill">${escapeHTML(hit.match_kind || 'hit')}</span>
+        <span class="kg-pill">final ${Number(hit.final_score || hit.score || 0).toFixed(4)}</span>
+        <span class="kg-pill">context ${Number(hit.context_score || 0).toFixed(4)}</span>
+      </div>
+      <div class="text-gray-600 mt-1">${escapeHTML((hit.text || '').slice(0, 280))}</div>
+      <div class="text-xs text-gray-500 mt-1">relations ${(hit.related_relations || []).length}</div>
+    </div>
+  `).join('') : '<div class="text-gray-500">No context hits</div>';
 });
 
 qs('#kg-materialize-btn').addEventListener('click', async () => {
@@ -503,6 +677,64 @@ qs('#kg-query-form').addEventListener('submit', async (ev) => {
   qs('#kg-persistent-graph').innerHTML = renderRelationList(r.body.relations || [], 'No persistent relations found');
 });
 
+qs('#kg-path-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const payload = {
+    source: String(fd.get('source') || '').trim(),
+    target: String(fd.get('target') || '').trim(),
+    query: {depth: 8}
+  };
+  if (!payload.source || !payload.target) return;
+  const r = await api('/api/v1/kg/algorithms/path', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  qs('#kg-algorithms').innerHTML = r.ok ? `
+    <div class="kg-hit">
+      <div class="font-medium">Shortest path</div>
+      <div class="text-gray-600">${escapeHTML((r.body.nodes || []).join(' -> '))}</div>
+      <div class="mt-2">${renderRelationList(r.body.relations || [], 'No path relations')}</div>
+    </div>
+  ` : `<div class="text-red-600">${escapeHTML(JSON.stringify(r.body))}</div>`;
+});
+
+qs('#kg-metrics-btn').addEventListener('click', async () => {
+  const r = await api('/api/v1/kg/algorithms/metrics', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({})
+  });
+  qs('#kg-algorithms').innerHTML = r.ok ? renderJSON(r.body) : `<div class="text-red-600">${escapeHTML(JSON.stringify(r.body))}</div>`;
+});
+
+qs('#kg-components-btn').addEventListener('click', async () => {
+  const r = await api('/api/v1/kg/algorithms/components', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({depth: 8, limit: 500})
+  });
+  const components = Array.isArray(r.body) ? r.body : (r.body.components || []);
+  qs('#kg-algorithms').innerHTML = r.ok ? (components.length ? components.slice(0, 20).map((c, i) => `
+    <div class="kg-hit">
+      <div class="font-medium">Component ${i + 1}</div>
+      <div class="text-gray-600">${escapeHTML((c || []).slice(0, 20).join(', '))}</div>
+    </div>
+  `).join('') : '<div class="text-gray-500">No components</div>') : `<div class="text-red-600">${escapeHTML(JSON.stringify(r.body))}</div>`;
+});
+
+qs('#kg-mutations-btn').addEventListener('click', async () => {
+  const r = await api('/api/v1/kg/mutations?limit=50');
+  const records = r.body.records || r.body.mutations || r.body || [];
+  qs('#kg-algorithms').innerHTML = r.ok && Array.isArray(records) ? (records.length ? records.map(m => `
+    <div class="kg-hit">
+      <div class="font-medium">${escapeHTML(m.action || '')} ${escapeHTML(m.entity || m.entity_type || '')}</div>
+      <div class="text-xs text-gray-500">${escapeHTML(m.entity_id || '')} ${escapeHTML(m.actor || '')}</div>
+    </div>
+  `).join('') : '<div class="text-gray-500">No mutations</div>') : renderJSON(r.body);
+});
+
 qs('#kg-relation-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const fd = new FormData(ev.target);
@@ -530,6 +762,7 @@ qs('#kg-relation-form').addEventListener('submit', async (ev) => {
 qs('#kg-load-jobs-btn').addEventListener('click', loadKGJobs);
 
 async function loadKGJobs() {
+  if (!hasToken()) return;
   const r = await api('/api/v1/kg/jobs');
   if (r.ok) renderKGJobs(r.body.jobs || []);
 }

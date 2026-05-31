@@ -2,10 +2,14 @@ package extractor
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
+	"encoding/ascii85"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -70,7 +74,9 @@ func (e *PDFExtractor) Extract(content []byte, _ string) (string, error) {
 	// Locate pdftotext.
 	bin, err := e.findBinary()
 	if err != nil {
-		// Fall back to printable-byte scrape.
+		if text := extractPDFContentStreamText(content); strings.TrimSpace(text) != "" {
+			return e.postProcess(text), nil
+		}
 		return extractPrintableText(content), nil
 	}
 
@@ -101,7 +107,10 @@ func (e *PDFExtractor) Extract(content []byte, _ string) (string, error) {
 		}
 	}
 
-	// Last resort: printable-byte scrape.
+	if text := extractPDFContentStreamText(content); strings.TrimSpace(text) != "" {
+		return e.postProcess(text), nil
+	}
+
 	return extractPrintableText(content), nil
 }
 
@@ -117,6 +126,190 @@ func (e *PDFExtractor) findBinary() (string, error) {
 		return "", fmt.Errorf("kg/pdf: pdftotext not in PATH: %w", err)
 	}
 	return p, nil
+}
+
+func extractPDFContentStreamText(content []byte) string {
+	var out strings.Builder
+	searchFrom := 0
+	for {
+		streamIdx := bytes.Index(content[searchFrom:], []byte("stream"))
+		if streamIdx < 0 {
+			break
+		}
+		streamIdx += searchFrom
+		dataStart := streamIdx + len("stream")
+		if dataStart < len(content) && content[dataStart] == '\r' {
+			dataStart++
+		}
+		if dataStart < len(content) && content[dataStart] == '\n' {
+			dataStart++
+		}
+		endRel := bytes.Index(content[dataStart:], []byte("endstream"))
+		if endRel < 0 {
+			break
+		}
+		dataEnd := dataStart + endRel
+		raw := bytes.TrimSpace(content[dataStart:dataEnd])
+		dictStart := streamDictStart(content, streamIdx)
+		dict := content[dictStart:streamIdx]
+		decoded := decodePDFStream(raw, dict)
+		text := extractPDFTextOperators(decoded)
+		if text != "" {
+			if out.Len() > 0 {
+				out.WriteByte('\n')
+			}
+			out.WriteString(text)
+		}
+		searchFrom = dataEnd + len("endstream")
+	}
+	return strings.TrimSpace(reSpaces.ReplaceAllString(out.String(), " "))
+}
+
+func streamDictStart(content []byte, streamIdx int) int {
+	start := streamIdx - 2048
+	if start < 0 {
+		start = 0
+	}
+	if rel := bytes.LastIndex(content[start:streamIdx], []byte("<<")); rel >= 0 {
+		return start + rel
+	}
+	return start
+}
+
+func decodePDFStream(raw, dict []byte) []byte {
+	data := raw
+	if bytes.Contains(dict, []byte("ASCII85Decode")) || bytes.Contains(dict, []byte("/A85")) {
+		src := bytes.TrimSpace(data)
+		src = bytes.TrimPrefix(src, []byte("<~"))
+		src = bytes.TrimSuffix(src, []byte("~>"))
+		dst := make([]byte, len(src)*4/5+8)
+		n, _, err := ascii85.Decode(dst, src, true)
+		if err == nil {
+			data = dst[:n]
+		}
+	}
+	if bytes.Contains(dict, []byte("FlateDecode")) || bytes.Contains(dict, []byte("/Fl")) {
+		r, err := zlib.NewReader(bytes.NewReader(data))
+		if err == nil {
+			defer r.Close()
+			if decoded, err := io.ReadAll(r); err == nil {
+				data = decoded
+			}
+		}
+	}
+	return data
+}
+
+var pdfTextOpPattern = regexp.MustCompile(`(?s)(\((?:\\.|[^\\()])*\)|\[(?:.|\n|\r)*?\])\s*T[Jj]`)
+
+func extractPDFTextOperators(stream []byte) string {
+	matches := pdfTextOpPattern.FindAllSubmatch(stream, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for _, m := range matches {
+		operand := bytes.TrimSpace(m[1])
+		if len(operand) == 0 {
+			continue
+		}
+		if operand[0] == '[' {
+			for _, lit := range extractPDFLiteralStrings(operand) {
+				writePDFText(&out, lit)
+			}
+			continue
+		}
+		writePDFText(&out, decodePDFLiteralString(operand))
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func extractPDFLiteralStrings(data []byte) []string {
+	var values []string
+	for i := 0; i < len(data); i++ {
+		if data[i] != '(' {
+			continue
+		}
+		start := i
+		depth := 0
+		escaped := false
+		for ; i < len(data); i++ {
+			c := data[i]
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth == 0 {
+					values = append(values, decodePDFLiteralString(data[start:i+1]))
+					break
+				}
+			}
+		}
+	}
+	return values
+}
+
+func writePDFText(out *strings.Builder, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if out.Len() > 0 {
+		out.WriteByte(' ')
+	}
+	out.WriteString(text)
+}
+
+func decodePDFLiteralString(lit []byte) string {
+	lit = bytes.TrimSpace(lit)
+	if len(lit) >= 2 && lit[0] == '(' && lit[len(lit)-1] == ')' {
+		lit = lit[1 : len(lit)-1]
+	}
+	var out strings.Builder
+	for i := 0; i < len(lit); i++ {
+		c := lit[i]
+		if c != '\\' || i+1 >= len(lit) {
+			out.WriteByte(c)
+			continue
+		}
+		i++
+		switch lit[i] {
+		case 'n':
+			out.WriteByte('\n')
+		case 'r':
+			out.WriteByte('\r')
+		case 't':
+			out.WriteByte('\t')
+		case 'b', 'f':
+		case '(', ')', '\\':
+			out.WriteByte(lit[i])
+		case '\n':
+		case '\r':
+			if i+1 < len(lit) && lit[i+1] == '\n' {
+				i++
+			}
+		default:
+			if lit[i] >= '0' && lit[i] <= '7' {
+				val := int(lit[i] - '0')
+				for j := 0; j < 2 && i+1 < len(lit) && lit[i+1] >= '0' && lit[i+1] <= '7'; j++ {
+					i++
+					val = val*8 + int(lit[i]-'0')
+				}
+				out.WriteByte(byte(val))
+			} else {
+				out.WriteByte(lit[i])
+			}
+		}
+	}
+	return out.String()
 }
 
 func (e *PDFExtractor) runPdftotext(bin string, args []string) (string, error) {

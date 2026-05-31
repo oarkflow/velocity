@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/oarkflow/velocity"
+	"github.com/oarkflow/velocity/pkg/kg"
 	"github.com/oarkflow/velocity/web"
 )
 
@@ -97,6 +98,12 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 
 	// default cache mode: balanced for good default memory/perf tradeoff
 	db.SetCacheMode("balanced")
+	db.EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
+		Resources:     []kg.ResourceType{kg.ResourceKV, kg.ResourceObject, kg.ResourceSecret, kg.ResourceEnvelope, kg.ResourceEntity},
+		Async:         true,
+		SyncWorkers:   4,
+		MaxValueBytes: 64 << 20,
+	})
 
 	userDB, err := web.NewSQLiteUserStorage(usersDB)
 	if err != nil {
@@ -109,7 +116,8 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 	bootstrapUsername := os.Getenv("VELOCITY_BOOTSTRAP_ADMIN_USER")
 	bootstrapPassword := os.Getenv("VELOCITY_BOOTSTRAP_ADMIN_PASS")
 	if bootstrapUsername != "" && bootstrapPassword != "" {
-		if _, err := userDB.GetUserByUsername(ctx, bootstrapUsername); err != nil {
+		existing, err := userDB.GetUserByUsername(ctx, bootstrapUsername)
+		if err != nil {
 			adminUser := &web.User{
 				Username: bootstrapUsername,
 				Email:    bootstrapUsername + "@localhost",
@@ -120,6 +128,24 @@ func runServe(dataDir, usersDB, httpPort, tcpPort string) {
 				log.Fatalf("failed to create bootstrap admin user: %v", err)
 			}
 			log.Printf("Created bootstrap admin user: %s", bootstrapUsername)
+		} else if _, err := userDB.AuthenticateUser(ctx, bootstrapUsername, bootstrapPassword); err != nil {
+			if err := userDB.DeleteUser(ctx, existing.ID); err != nil {
+				log.Fatalf("failed to reset bootstrap admin user: %v", err)
+			}
+			adminUser := &web.User{
+				Username: bootstrapUsername,
+				Email:    existing.Email,
+				Password: bootstrapPassword,
+				Role:     "admin",
+				Tenant:   existing.Tenant,
+			}
+			if adminUser.Email == "" {
+				adminUser.Email = bootstrapUsername + "@localhost"
+			}
+			if err := userDB.CreateUser(ctx, adminUser); err != nil {
+				log.Fatalf("failed to recreate bootstrap admin user: %v", err)
+			}
+			log.Printf("Reset bootstrap admin password for user: %s", bootstrapUsername)
 		}
 	} else {
 		log.Println("No bootstrap admin configured (set VELOCITY_BOOTSTRAP_ADMIN_USER and VELOCITY_BOOTSTRAP_ADMIN_PASS to enable)")

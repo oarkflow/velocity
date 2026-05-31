@@ -3,6 +3,8 @@ package extractor_test
 import (
 	"archive/zip"
 	"bytes"
+	"compress/zlib"
+	"encoding/ascii85"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -42,6 +44,22 @@ func TestPlainText(t *testing.T) {
 func TestPlainTextWithParams(t *testing.T) {
 	out := mustExtract(t, []byte("hello"), "text/plain; charset=utf-8")
 	assertContains(t, out, "hello")
+}
+
+func TestPDFCompressedContentStreamFallback(t *testing.T) {
+	var compressed bytes.Buffer
+	zw := zlib.NewWriter(&compressed)
+	if _, err := zw.Write([]byte("BT /F1 12 Tf 72 720 Td (merge abort from git manual) Tj ET")); err != nil {
+		t.Fatalf("write zlib: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zlib: %v", err)
+	}
+	encoded := make([]byte, ascii85.MaxEncodedLen(compressed.Len()))
+	n := ascii85.Encode(encoded, compressed.Bytes())
+	pdf := []byte("%PDF-1.4\n1 0 obj\n<< /Filter [ /ASCII85Decode /FlateDecode ] /Length 1 >>\nstream\n" + string(encoded[:n]) + "~>\nendstream\nendobj\n%%EOF")
+	out := mustExtract(t, pdf, "application/pdf")
+	assertContains(t, out, "merge abort")
 }
 
 // ---------------------------------------------------------------------------

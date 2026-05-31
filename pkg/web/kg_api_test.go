@@ -50,6 +50,13 @@ func TestKGAPI_ResourceGraphSyncAndRules(t *testing.T) {
 		t.Fatalf("resource graph status=%d body=%s", status, resp)
 	}
 
+	contextReq := map[string]any{"query": "CID-123 CASE-12345", "limit": 5, "graph_depth": 1, "include_related": true}
+	body, _ = json.Marshal(contextReq)
+	status, resp = request(t, srv, "POST", "/api/v1/kg/context-search", token, bytes.NewReader(body), "application/json")
+	if status != 200 || !strings.Contains(resp, `"hits"`) {
+		t.Fatalf("context search status=%d body=%s", status, resp)
+	}
+
 	status, resp = request(t, srv, "GET", "/api/v1/kg/sync/status", token, nil, "")
 	if status != 200 {
 		t.Fatalf("sync status=%d body=%s", status, resp)

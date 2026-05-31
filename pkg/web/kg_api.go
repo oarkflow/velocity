@@ -30,6 +30,7 @@ func (a *KGAPI) RegisterRoutes(app *fiber.App) {
 	kg.Get("/connectors", a.handleListConnectors)
 	kg.Post("/connectors/import", a.handleConnectorImport)
 	kg.Post("/search", a.handleSearch)
+	kg.Post("/context-search", a.handleContextSearch)
 	kg.Post("/resource-graph", a.handleResourceGraph)
 	kg.Post("/resource-graph/materialize", a.handleMaterializeResourceGraph)
 	kg.Get("/documents/:id", a.handleGetDocument)
@@ -215,6 +216,20 @@ func (a *KGAPI) handleSearch(c fiber.Ctx) error {
 	}
 
 	resp, err := a.kg.Search(c.Context(), &req)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(resp)
+}
+
+func (a *KGAPI) handleContextSearch(c fiber.Ctx) error {
+	var req kg.KGContextSearchRequest
+	if err := json.Unmarshal(c.Body(), &req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON: " + err.Error()})
+	}
+
+	resp, err := a.kg.ContextSearch(c.Context(), &req)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}

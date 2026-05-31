@@ -566,12 +566,16 @@ func createPersistentRelations(ctx context.Context, graph *kg.KnowledgeGraphEngi
 }
 
 func runQueries(ctx context.Context, graph *kg.KnowledgeGraphEngine, cfg demoConfig) {
+	objectProbe := minInt(cfg.Objects, cfg.Records)
+	if objectProbe > 420 {
+		objectProbe = 420
+	}
 	searches := []kg.KGSearchRequest{
 		{Query: "CASE-0000420", Limit: 5},
 		{Query: "CASE-0000420 mitigation owner", MatchMode: "any", Limit: 5, EnableGraph: true, GraphDepth: 2},
 		{Query: "custmer evidnce", Fuzzy: true, FuzzyMaxEdits: 1, Limit: 5},
 		{Query: "KYC policy high risk", MatchMode: "any", Limit: 5},
-		{Query: "large object payload segment compliance evidence", MatchMode: "any", Limit: 5},
+		{Query: objectContentToken(objectProbe), Limit: 5},
 	}
 	if cfg.Records > 420 {
 		tail := cfg.Records
@@ -591,6 +595,19 @@ func runQueries(ctx context.Context, graph *kg.KnowledgeGraphEngine, cfg demoCon
 		fmt.Printf("search query=%q hits=%d%s took=%s\n", req.Query, resp.TotalHits, graphSuffix, time.Since(start).Round(time.Millisecond))
 		for _, hit := range resp.Hits {
 			fmt.Printf("  hit source=%s title=%s score=%.4f\n", hit.Source, hit.Title, hit.Score)
+		}
+		if req.Query == objectContentToken(objectProbe) {
+			foundObjectContent := false
+			for _, hit := range resp.Hits {
+				if hit.Source == objectSource(objectProbe) {
+					foundObjectContent = true
+					break
+				}
+			}
+			if !foundObjectContent {
+				check(fmt.Errorf("object content search %q did not return %s", req.Query, objectSource(objectProbe)))
+			}
+			fmt.Printf("  verified object content source=%s\n", objectSource(objectProbe))
 		}
 	}
 
@@ -658,6 +675,10 @@ func objectSource(i int) string {
 	return fmt.Sprintf("object:evidence/%s/%s.txt", customerID(i), evidenceID(i))
 }
 
+func objectContentToken(i int) string {
+	return fmt.Sprintf("OBJECT-CONTENT-%07d", i)
+}
+
 func policyID(i int) string {
 	return fmt.Sprintf("POLICY-%04d", ((i-1)%1000)+1)
 }
@@ -679,8 +700,8 @@ func envInt(name string, fallback int) int {
 }
 
 func largeEvidenceBody(i, targetBytes int) string {
-	header := fmt.Sprintf("Evidence object %s for %s and %s. KYC policy high risk review references invoice %s and mitigation owner %s. Large object payload segment compliance evidence searchable archive shard %07d.\n",
-		evidenceID(i), customerID(i), caseID(i), invoiceID(i), teams[i%len(teams)], i)
+	header := fmt.Sprintf("Evidence object %s for %s and %s. Object content token %s. KYC policy high risk review references invoice %s and mitigation owner %s. Large object payload segment compliance evidence searchable archive shard %07d.\n",
+		evidenceID(i), customerID(i), caseID(i), objectContentToken(i), invoiceID(i), teams[i%len(teams)], i)
 	if targetBytes <= len(header) {
 		return header
 	}
