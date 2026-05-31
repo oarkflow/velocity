@@ -3,6 +3,7 @@ package kg
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -527,8 +528,15 @@ func (e *KnowledgeGraphEngine) ConnectedComponents(ctx context.Context, query *K
 				}
 			}
 		}
+		sort.Strings(component)
 		components = append(components, component)
 	}
+	sort.Slice(components, func(i, j int) bool {
+		if len(components[i]) == len(components[j]) {
+			return strings.Join(components[i], "\x00") < strings.Join(components[j], "\x00")
+		}
+		return len(components[i]) > len(components[j])
+	})
 	return components, nil
 }
 

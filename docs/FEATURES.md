@@ -75,7 +75,7 @@ For a runnable smoke flow across the complete feature set, use:
 - Rule-based NER for emails, URLs, domains, file paths, hashes, dates, money, organizations, people, business identifiers, API-key-like patterns, and custom regex rules.
 - Lightweight KG search index with all/any/phrase/boolean/prefix matching and opt-in stop-word-aware, n-gram-backed Levenshtein fuzzy fallback search.
 - Persistent first-class KG relations with CRUD, provenance/evidence, confidence, direction, status, revisions, and mutation log records.
-- Ontology definitions and validation for allowed relation types, endpoint types, direction, required fields, and cardinality.
+- Ontology definitions and validation for allowed relation types, endpoint types, direction, required fields, cardinality, and taxonomy hierarchies.
 - Persistent graph query and algorithms for traversal, shortest path, impact/dependency traversal, degree metrics, and connected components.
 - Entity alias management with merge proposals, approval/rejection, canonical redirects, split, and resolve workflows.
 - Entity manager and entity relations with graph traversal, tags, linked secrets, objects, and envelopes.
@@ -83,6 +83,7 @@ For a runnable smoke flow across the complete feature set, use:
 - HNSW vector index, cosine similarity, vector search, hybrid search, graph neighbors, and analytics.
 - Opt-in automatic indexing for KV records, objects, secrets, SQL rows, envelopes, and entity records so normal writes become KG-searchable without per-record `Ingest` calls.
 - Query-driven resource graph discovery with `SearchResourceGraph`, which returns matching resources as nodes and explainable inferred relation edges when resources mention the same extracted entities.
+- Context search with `ContextSearch`, which blends text relevance with persistent KG relation expansion and relation-backed explanations.
 - Materialization of inferred resource graph edges into persistent relation records for later graph query and audit.
 - Connector interfaces, `ImportConnector`, persistent import jobs, HTTP/CLI job controls, and built-in local file, URL, CSV/TSV/JSON structured-row, and static SQL-row helpers for integrations without mandatory external services.
 - Optional host-provided KG authorization filter for embedded production deployments.

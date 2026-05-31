@@ -235,6 +235,64 @@ func TestKGEngine_ResourceGraphEdgeMetadata(t *testing.T) {
 	}
 }
 
+func TestKGEngine_ContextSearchExpandsPersistentRelations(t *testing.T) {
+	dir := t.TempDir()
+	db, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	engine := db.KnowledgeGraph()
+	ctx := context.Background()
+
+	if _, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "incident.txt",
+		MediaType: "text/plain",
+		Title:     "Incident",
+		Content:   []byte("Incident CASE-77777 affects Acme Corp checkout."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Ingest(ctx, &kg.KGIngestRequest{
+		Source:    "runbook.txt",
+		MediaType: "text/plain",
+		Title:     "Runbook",
+		Content:   []byte("Checkout runbook lists mitigation steps and owner rotation."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CreateRelation(ctx, &kg.KGRelationRequest{
+		Source:       "incident.txt",
+		Target:       "runbook.txt",
+		RelationType: "mitigated_by",
+		Direction:    kg.KGRelationDirectionOut,
+		Confidence:   0.9,
+		Evidence:     "Runbook mitigates the incident",
+		SourceKind:   "test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := engine.ContextSearch(ctx, &kg.KGContextSearchRequest{
+		Query:          "CASE-77777",
+		Limit:          5,
+		GraphDepth:     1,
+		IncludeRelated: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRelated := false
+	for _, hit := range resp.Hits {
+		if hit.Source == "runbook.txt" && hit.ContextScore > 0 && len(hit.RelatedRelations) > 0 {
+			foundRelated = true
+		}
+	}
+	if !foundRelated {
+		t.Fatalf("expected context search to include related runbook hit, got %+v", resp.Hits)
+	}
+}
+
 func TestKGEngine_ImportConnector(t *testing.T) {
 	dir := t.TempDir()
 	db, err := New(dir)

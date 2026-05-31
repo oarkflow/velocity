@@ -201,6 +201,7 @@ type KGOntology struct {
 	Version       string                            `json:"version,omitempty"`
 	NodeTypes     map[string]KGOntologyNodeType     `json:"node_types,omitempty"`
 	RelationTypes map[string]KGOntologyRelationType `json:"relation_types,omitempty"`
+	Taxonomies    map[string]KGOntologyTaxonomy     `json:"taxonomies,omitempty"`
 	CreatedAt     time.Time                         `json:"created_at,omitempty"`
 	UpdatedAt     time.Time                         `json:"updated_at,omitempty"`
 }
@@ -208,6 +209,7 @@ type KGOntology struct {
 // KGOntologyNodeType describes node requirements. Nodes are currently implicit.
 type KGOntologyNodeType struct {
 	Type           string   `json:"type"`
+	ParentTypes    []string `json:"parent_types,omitempty"`
 	RequiredFields []string `json:"required_fields,omitempty"`
 	UniqueKeys     []string `json:"unique_keys,omitempty"`
 }
@@ -215,12 +217,27 @@ type KGOntologyNodeType struct {
 // KGOntologyRelationType constrains an edge type.
 type KGOntologyRelationType struct {
 	Type                 string              `json:"type"`
+	ParentTypes          []string            `json:"parent_types,omitempty"`
 	AllowedSources       []string            `json:"allowed_sources,omitempty"`
 	AllowedTargets       []string            `json:"allowed_targets,omitempty"`
 	Direction            KGRelationDirection `json:"direction,omitempty"`
 	RequiredFields       []string            `json:"required_fields,omitempty"`
 	MaxOutgoingPerSource int                 `json:"max_outgoing_per_source,omitempty"`
 	MaxIncomingPerTarget int                 `json:"max_incoming_per_target,omitempty"`
+}
+
+// KGOntologyTaxonomy defines a named hierarchy used to classify graph concepts.
+type KGOntologyTaxonomy struct {
+	Name  string                            `json:"name"`
+	Terms map[string]KGOntologyTaxonomyTerm `json:"terms,omitempty"`
+}
+
+// KGOntologyTaxonomyTerm is a single taxonomy concept with optional synonyms.
+type KGOntologyTaxonomyTerm struct {
+	ID       string   `json:"id"`
+	Label    string   `json:"label,omitempty"`
+	Parent   string   `json:"parent,omitempty"`
+	Synonyms []string `json:"synonyms,omitempty"`
 }
 
 // KGOntologyValidationResult reports whether an ontology or relation is valid.
@@ -393,6 +410,46 @@ type KGSearchResponse struct {
 	QueryTimeMs int64         `json:"query_time_ms"`
 	Mode        KGSearchMode  `json:"mode"`
 	GraphNodes  int           `json:"graph_nodes,omitempty"`
+}
+
+// KGContextSearchRequest searches text and expands/reranks through KG relations.
+type KGContextSearchRequest struct {
+	Query          string              `json:"query"`
+	Limit          int                 `json:"limit,omitempty"`
+	MinScore       float64             `json:"min_score,omitempty"`
+	Filters        map[string]string   `json:"filters,omitempty"`
+	Mode           KGSearchMode        `json:"mode,omitempty"`
+	MatchMode      string              `json:"match_mode,omitempty"`
+	PrefixMatch    bool                `json:"prefix_match,omitempty"`
+	Fuzzy          bool                `json:"fuzzy,omitempty"`
+	FuzzyMaxEdits  int                 `json:"fuzzy_max_edits,omitempty"`
+	EnableVector   bool                `json:"enable_vector,omitempty"`
+	GraphDepth     int                 `json:"graph_depth,omitempty"`
+	RelationTypes  []string            `json:"relation_types,omitempty"`
+	Direction      KGRelationDirection `json:"direction,omitempty"`
+	MinConfidence  float64             `json:"min_confidence,omitempty"`
+	ContextWeight  float64             `json:"context_weight,omitempty"`
+	SearchWeight   float64             `json:"search_weight,omitempty"`
+	IncludeRelated bool                `json:"include_related,omitempty"`
+}
+
+// KGContextSearchHit explains a search result's direct and relational scores.
+type KGContextSearchHit struct {
+	KGSearchHit
+	BaseScore        float64      `json:"base_score,omitempty"`
+	ContextScore     float64      `json:"context_score,omitempty"`
+	FinalScore       float64      `json:"final_score"`
+	MatchKind        string       `json:"match_kind,omitempty"`
+	RelatedRelations []KGRelation `json:"related_relations,omitempty"`
+}
+
+// KGContextSearchResponse returns graph-aware search hits and traversed context.
+type KGContextSearchResponse struct {
+	Hits        []KGContextSearchHit `json:"hits"`
+	Relations   []KGRelation         `json:"relations,omitempty"`
+	TotalHits   int                  `json:"total_hits"`
+	QueryTimeMs int64                `json:"query_time_ms"`
+	Mode        KGSearchMode         `json:"mode"`
 }
 
 // KGResourceGraphRequest asks the KG to search resources and infer a relation graph

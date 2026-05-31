@@ -604,6 +604,29 @@ func ValidateOntologyDefinition(ontology *KGOntology) KGOntologyValidationResult
 			result.Errors = append(result.Errors, fmt.Sprintf("relation %s has negative cardinality", name))
 		}
 	}
+	for name, taxonomy := range ontology.Taxonomies {
+		if strings.TrimSpace(name) == "" {
+			result.Valid = false
+			result.Errors = append(result.Errors, "taxonomy name is required")
+		}
+		for termID, term := range taxonomy.Terms {
+			if strings.TrimSpace(termID) == "" {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("taxonomy %s has empty term id", name))
+				continue
+			}
+			if strings.TrimSpace(term.ID) != "" && term.ID != termID {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("taxonomy %s term %s has mismatched id %s", name, termID, term.ID))
+			}
+			if term.Parent != "" {
+				if _, ok := taxonomy.Terms[term.Parent]; !ok {
+					result.Valid = false
+					result.Errors = append(result.Errors, fmt.Sprintf("taxonomy %s term %s references missing parent %s", name, termID, term.Parent))
+				}
+			}
+		}
+	}
 	return result
 }
 
@@ -751,6 +774,7 @@ func defaultKGOntology() *KGOntology {
 		Version:       "permissive",
 		NodeTypes:     map[string]KGOntologyNodeType{},
 		RelationTypes: map[string]KGOntologyRelationType{},
+		Taxonomies:    map[string]KGOntologyTaxonomy{},
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}

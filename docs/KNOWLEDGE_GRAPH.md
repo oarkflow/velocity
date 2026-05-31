@@ -345,6 +345,21 @@ path, err := graph.ShortestPath(ctx, "service:api", "table:customers", &kg.KGGra
 })
 ```
 
+Search with relation context:
+
+```go
+contextual, err := graph.ContextSearch(ctx, &kg.KGContextSearchRequest{
+	Query:          "CASE-12345 checkout",
+	Limit:          10,
+	GraphDepth:     2,
+	RelationTypes:  []string{"depends_on", "references", "mitigated_by"},
+	IncludeRelated: true,
+})
+for _, hit := range contextual.Hits {
+	fmt.Println(hit.Source, hit.MatchKind, hit.BaseScore, hit.ContextScore)
+}
+```
+
 Materialize inferred resource relations:
 
 ```go
@@ -363,6 +378,14 @@ Apply an ontology:
 ```go
 _, err := graph.CreateOntology(ctx, &kg.KGOntology{
 	Name: "default",
+	Taxonomies: map[string]kg.KGOntologyTaxonomy{
+		"resource": {
+			Terms: map[string]kg.KGOntologyTaxonomyTerm{
+				"service": {ID: "service", Label: "Service"},
+				"table":   {ID: "table", Label: "Database table"},
+			},
+		},
+	},
 	RelationTypes: map[string]kg.KGOntologyRelationType{
 		"depends_on": {
 			AllowedSources: []string{"service"},
