@@ -16,6 +16,21 @@ const (
 	ResourceEntity   ResourceType = "entity"
 )
 
+// KGAuthzResource is the authorization context for a KG result or mutation.
+type KGAuthzResource struct {
+	Kind         string            `json:"kind"`
+	ID           string            `json:"id,omitempty"`
+	Source       string            `json:"source,omitempty"`
+	Target       string            `json:"target,omitempty"`
+	ResourceType ResourceType      `json:"resource_type,omitempty"`
+	RelationType string            `json:"relation_type,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+}
+
+// KGAuthzFilter is an optional host-provided visibility hook. Return false to
+// remove the item from search/graph results or deny explicit graph mutations.
+type KGAuthzFilter func(ctx context.Context, resource KGAuthzResource) bool
+
 // LSM key prefix constants for Knowledge Graph data
 const (
 	kgDocPrefix       = "__kg:doc:"
@@ -27,6 +42,12 @@ const (
 	kgHNSWMeta        = "__kg:hnsw:meta"
 	kgSourcePrefix    = "__kg:src:"
 	kgStatsKey        = "__kg:stats"
+	kgRelationPrefix  = "__kg:rel:"
+	kgOntologyPrefix  = "__kg:ont:"
+	kgAliasPrefix     = "__kg:alias:"
+	kgMergePrefix     = "__kg:merge:"
+	kgJobPrefix       = "__kg:job:"
+	kgMutationPrefix  = "__kg:mut:"
 	// kgChunkSearchPrefix is used for BM25 index registration. It must NOT
 	// include a trailing colon so that prefixMatch (search_index.go) accepts
 	// keys like "__kg:chunk:xxx" where the first char after the prefix is ':'.
@@ -90,18 +111,238 @@ type KGSourceRef struct {
 	EndByte      int          `json:"end_byte,omitempty"`
 }
 
+// KGRelationDirection describes how a relation should be traversed.
+type KGRelationDirection string
+
+const (
+	KGRelationDirectionOut  KGRelationDirection = "out"
+	KGRelationDirectionIn   KGRelationDirection = "in"
+	KGRelationDirectionBoth KGRelationDirection = "both"
+)
+
+// KGRelationStatus captures lifecycle state for persistent graph edges.
+type KGRelationStatus string
+
+const (
+	KGRelationStatusActive  KGRelationStatus = "active"
+	KGRelationStatusPending KGRelationStatus = "pending"
+	KGRelationStatusDeleted KGRelationStatus = "deleted"
+)
+
 // KGRelation describes an inferred or explicit graph edge with explainable evidence.
 type KGRelation struct {
-	Source       string            `json:"source"`
-	Target       string            `json:"target"`
-	RelationType string            `json:"relation_type"`
-	Confidence   float64           `json:"confidence,omitempty"`
-	Evidence     string            `json:"evidence,omitempty"`
-	SourceKind   string            `json:"source_kind,omitempty"`
-	CreatedBy    string            `json:"created_by,omitempty"`
-	CreatedAt    time.Time         `json:"created_at,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	Attributes   map[string]string `json:"attributes,omitempty"`
+	RelationID   string              `json:"relation_id,omitempty"`
+	Source       string              `json:"source"`
+	Target       string              `json:"target"`
+	RelationType string              `json:"relation_type"`
+	Direction    KGRelationDirection `json:"direction,omitempty"`
+	Confidence   float64             `json:"confidence,omitempty"`
+	Evidence     string              `json:"evidence,omitempty"`
+	SourceKind   string              `json:"source_kind,omitempty"`
+	SourceRefs   []KGSourceRef       `json:"source_refs,omitempty"`
+	Status       KGRelationStatus    `json:"status,omitempty"`
+	CreatedBy    string              `json:"created_by,omitempty"`
+	CreatedAt    time.Time           `json:"created_at,omitempty"`
+	UpdatedAt    time.Time           `json:"updated_at,omitempty"`
+	Revision     int64               `json:"revision,omitempty"`
+	Metadata     map[string]string   `json:"metadata,omitempty"`
+	Attributes   map[string]string   `json:"attributes,omitempty"`
+}
+
+// KGRelationRequest creates an explicit persistent graph relation.
+type KGRelationRequest struct {
+	RelationID   string              `json:"relation_id,omitempty"`
+	Source       string              `json:"source"`
+	Target       string              `json:"target"`
+	RelationType string              `json:"relation_type"`
+	Direction    KGRelationDirection `json:"direction,omitempty"`
+	Confidence   float64             `json:"confidence,omitempty"`
+	Evidence     string              `json:"evidence,omitempty"`
+	SourceKind   string              `json:"source_kind,omitempty"`
+	SourceRefs   []KGSourceRef       `json:"source_refs,omitempty"`
+	Status       KGRelationStatus    `json:"status,omitempty"`
+	CreatedBy    string              `json:"created_by,omitempty"`
+	Metadata     map[string]string   `json:"metadata,omitempty"`
+	Attributes   map[string]string   `json:"attributes,omitempty"`
+}
+
+// KGRelationUpdate changes mutable relation metadata while preserving identity.
+type KGRelationUpdate struct {
+	Target       *string              `json:"target,omitempty"`
+	RelationType *string              `json:"relation_type,omitempty"`
+	Direction    *KGRelationDirection `json:"direction,omitempty"`
+	Confidence   *float64             `json:"confidence,omitempty"`
+	Evidence     *string              `json:"evidence,omitempty"`
+	SourceKind   *string              `json:"source_kind,omitempty"`
+	SourceRefs   []KGSourceRef        `json:"source_refs,omitempty"`
+	Status       *KGRelationStatus    `json:"status,omitempty"`
+	Metadata     map[string]string    `json:"metadata,omitempty"`
+	Attributes   map[string]string    `json:"attributes,omitempty"`
+	UpdatedBy    string               `json:"updated_by,omitempty"`
+}
+
+// KGRelationQuery filters persistent relations.
+type KGRelationQuery struct {
+	RelationID     string              `json:"relation_id,omitempty"`
+	Source         string              `json:"source,omitempty"`
+	Target         string              `json:"target,omitempty"`
+	RelationTypes  []string            `json:"relation_types,omitempty"`
+	Direction      KGRelationDirection `json:"direction,omitempty"`
+	Status         KGRelationStatus    `json:"status,omitempty"`
+	MinConfidence  float64             `json:"min_confidence,omitempty"`
+	SourceKind     string              `json:"source_kind,omitempty"`
+	Limit          int                 `json:"limit,omitempty"`
+	IncludeDeleted bool                `json:"include_deleted,omitempty"`
+}
+
+// KGOntology defines optional production constraints for graph data.
+type KGOntology struct {
+	Name          string                            `json:"name"`
+	Version       string                            `json:"version,omitempty"`
+	NodeTypes     map[string]KGOntologyNodeType     `json:"node_types,omitempty"`
+	RelationTypes map[string]KGOntologyRelationType `json:"relation_types,omitempty"`
+	CreatedAt     time.Time                         `json:"created_at,omitempty"`
+	UpdatedAt     time.Time                         `json:"updated_at,omitempty"`
+}
+
+// KGOntologyNodeType describes node requirements. Nodes are currently implicit.
+type KGOntologyNodeType struct {
+	Type           string   `json:"type"`
+	RequiredFields []string `json:"required_fields,omitempty"`
+	UniqueKeys     []string `json:"unique_keys,omitempty"`
+}
+
+// KGOntologyRelationType constrains an edge type.
+type KGOntologyRelationType struct {
+	Type                 string              `json:"type"`
+	AllowedSources       []string            `json:"allowed_sources,omitempty"`
+	AllowedTargets       []string            `json:"allowed_targets,omitempty"`
+	Direction            KGRelationDirection `json:"direction,omitempty"`
+	RequiredFields       []string            `json:"required_fields,omitempty"`
+	MaxOutgoingPerSource int                 `json:"max_outgoing_per_source,omitempty"`
+	MaxIncomingPerTarget int                 `json:"max_incoming_per_target,omitempty"`
+}
+
+// KGOntologyValidationResult reports whether an ontology or relation is valid.
+type KGOntologyValidationResult struct {
+	Valid  bool     `json:"valid"`
+	Errors []string `json:"errors,omitempty"`
+}
+
+// KGGraphQuery requests traversal over persistent relations.
+type KGGraphQuery struct {
+	SeedIDs         []string            `json:"seed_ids,omitempty"`
+	SeedSearch      string              `json:"seed_search,omitempty"`
+	SeedSearchLimit int                 `json:"seed_search_limit,omitempty"`
+	RelationTypes   []string            `json:"relation_types,omitempty"`
+	Depth           int                 `json:"depth,omitempty"`
+	Direction       KGRelationDirection `json:"direction,omitempty"`
+	MinConfidence   float64             `json:"min_confidence,omitempty"`
+	SourceKind      string              `json:"source_kind,omitempty"`
+	Limit           int                 `json:"limit,omitempty"`
+}
+
+// KGGraphNode is an implicit graph node discovered through persistent relations.
+type KGGraphNode struct {
+	ID         string            `json:"id"`
+	NodeType   string            `json:"node_type,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// KGGraphResponse returns persistent graph query results.
+type KGGraphResponse struct {
+	Nodes       []KGGraphNode `json:"nodes"`
+	Relations   []KGRelation  `json:"relations"`
+	QueryTimeMs int64         `json:"query_time_ms"`
+}
+
+// KGMaterializeRelationsRequest persists inferred resource graph edges as
+// first-class relations.
+type KGMaterializeRelationsRequest struct {
+	ResourceGraph KGResourceGraphRequest `json:"resource_graph"`
+	CreatedBy     string                 `json:"created_by,omitempty"`
+	Overwrite     bool                   `json:"overwrite,omitempty"`
+	DryRun        bool                   `json:"dry_run,omitempty"`
+}
+
+// KGMaterializeRelationsResponse summarizes inferred-edge materialization.
+type KGMaterializeRelationsResponse struct {
+	Graph       *KGResourceGraphResponse `json:"graph,omitempty"`
+	Relations   []KGRelation             `json:"relations,omitempty"`
+	Created     int                      `json:"created"`
+	Updated     int                      `json:"updated"`
+	Skipped     int                      `json:"skipped"`
+	Errors      []string                 `json:"errors,omitempty"`
+	QueryTimeMs int64                    `json:"query_time_ms"`
+	DryRun      bool                     `json:"dry_run,omitempty"`
+}
+
+// KGGraphPath is a sequence of nodes and relations.
+type KGGraphPath struct {
+	Nodes     []string     `json:"nodes"`
+	Relations []KGRelation `json:"relations"`
+}
+
+// KGGraphMetrics summarizes graph structure.
+type KGGraphMetrics struct {
+	NodeCount       int            `json:"node_count"`
+	RelationCount   int            `json:"relation_count"`
+	DegreeByNode    map[string]int `json:"degree_by_node,omitempty"`
+	OutDegreeByNode map[string]int `json:"out_degree_by_node,omitempty"`
+	InDegreeByNode  map[string]int `json:"in_degree_by_node,omitempty"`
+}
+
+// KGMutationLogRecord is an idempotent graph mutation entry for replay/rebuild hooks.
+type KGMutationLogRecord struct {
+	MutationID string    `json:"mutation_id"`
+	Action     string    `json:"action"`
+	Entity     string    `json:"entity"`
+	EntityID   string    `json:"entity_id"`
+	CreatedAt  time.Time `json:"created_at"`
+	Actor      string    `json:"actor,omitempty"`
+	Revision   int64     `json:"revision,omitempty"`
+}
+
+// KGEntityAliasRecord redirects an alias or stale entity ID to a canonical ID.
+type KGEntityAliasRecord struct {
+	Alias       string            `json:"alias"`
+	CanonicalID string            `json:"canonical_id"`
+	Reason      string            `json:"reason,omitempty"`
+	CreatedBy   string            `json:"created_by,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+}
+
+// KGMergeStatus captures human approval state for entity merge proposals.
+type KGMergeStatus string
+
+const (
+	KGMergeStatusPending  KGMergeStatus = "pending"
+	KGMergeStatusApproved KGMergeStatus = "approved"
+	KGMergeStatusRejected KGMergeStatus = "rejected"
+)
+
+// KGMergeProposal records a pending/approved/rejected entity canonicalization.
+type KGMergeProposal struct {
+	ProposalID string            `json:"proposal_id"`
+	SourceIDs  []string          `json:"source_ids"`
+	TargetID   string            `json:"target_id"`
+	Reason     string            `json:"reason,omitempty"`
+	Status     KGMergeStatus     `json:"status"`
+	CreatedBy  string            `json:"created_by,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	ReviewedBy string            `json:"reviewed_by,omitempty"`
+	ReviewedAt time.Time         `json:"reviewed_at,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// KGEntityMergeRequest merges one or more source entity IDs into a target ID.
+type KGEntityMergeRequest struct {
+	SourceIDs  []string          `json:"source_ids"`
+	TargetID   string            `json:"target_id"`
+	Reason     string            `json:"reason,omitempty"`
+	CreatedBy  string            `json:"created_by,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
 // SearchMode represents the type of search to perform.
@@ -261,6 +502,38 @@ type KGConnectorImportResponse struct {
 	NextCursor string              `json:"next_cursor,omitempty"`
 	Results    []*KGIngestResponse `json:"results,omitempty"`
 	Errors     []string            `json:"errors,omitempty"`
+}
+
+// KGImportJobStatus describes persistent connector import job lifecycle.
+type KGImportJobStatus string
+
+const (
+	KGImportJobPending   KGImportJobStatus = "pending"
+	KGImportJobRunning   KGImportJobStatus = "running"
+	KGImportJobSucceeded KGImportJobStatus = "succeeded"
+	KGImportJobFailed    KGImportJobStatus = "failed"
+	KGImportJobCancelled KGImportJobStatus = "cancelled"
+)
+
+// KGImportJob records operational status for connector imports.
+type KGImportJob struct {
+	JobID        string            `json:"job_id"`
+	Connector    string            `json:"connector"`
+	ResourceType ResourceType      `json:"resource_type,omitempty"`
+	Cursor       string            `json:"cursor,omitempty"`
+	NextCursor   string            `json:"next_cursor,omitempty"`
+	Limit        int               `json:"limit,omitempty"`
+	Status       KGImportJobStatus `json:"status"`
+	RetryCount   int               `json:"retry_count,omitempty"`
+	Imported     int               `json:"imported,omitempty"`
+	Skipped      int               `json:"skipped,omitempty"`
+	Errors       []string          `json:"errors,omitempty"`
+	Metrics      map[string]int64  `json:"metrics,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	StartedAt    time.Time         `json:"started_at,omitempty"`
+	FinishedAt   time.Time         `json:"finished_at,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 // KGIngestResponse is the response after ingesting a document.

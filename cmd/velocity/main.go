@@ -97,6 +97,26 @@ Commands:
   kg import --connector structured_file --file rows.csv [--table TABLE]
   kg search QUERY [--limit N] [--format text]
   kg graph QUERY [--limit N] [--depth N] [--format text]
+  kg materialize QUERY [--limit N] [--depth N] [--overwrite]
+  kg relation create --source A --target B --type REL [--evidence TEXT]
+  kg relation list [--source A] [--target B] [--type REL] [--format text]
+  kg relation get --id REL_ID
+  kg relation delete --id REL_ID
+  kg query --seed NODE [--depth N] [--type REL] [--format text]
+  kg path --source A --target B [--depth N] [--format text]
+  kg ontology apply --file ontology.json
+  kg ontology validate --file ontology.json
+  kg ontology get [--name default]
+  kg entity merge --target ID --sources A,B [--reason TEXT]
+  kg entity propose-merge --target ID --sources A,B [--reason TEXT]
+  kg entity approve-merge --id PROPOSAL_ID
+  kg entity split --aliases A,B
+  kg entity resolve ID
+  kg job start --connector local_file --path PATH [--limit N] [--async]
+  kg job list [--status succeeded]
+  kg job get --id JOB_ID
+  kg mutations [--limit N]
+  kg rebuild
   kg sync [--async] [--secret-values]
   kg status
   kg analytics
@@ -282,7 +302,7 @@ func getDBPath() string {
 
 func handleKG(db *velocity.DB, ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: velocity kg <ingest|import|search|graph|sync|status|analytics|ner>")
+		return fmt.Errorf("usage: velocity kg <ingest|import|search|graph|materialize|relation|query|path|ontology|entity|job|mutations|rebuild|sync|status|analytics|ner>")
 	}
 	graph := db.KnowledgeGraph()
 	if graph == nil {
@@ -390,6 +410,309 @@ func handleKG(db *velocity.DB, ctx context.Context, args []string) error {
 			return nil
 		}
 		return printJSON(resp)
+	case "materialize":
+		query := strings.Join(positional, " ")
+		if query == "" {
+			query = flags["query"]
+		}
+		if query == "" {
+			return fmt.Errorf("usage: velocity kg materialize QUERY [--limit N] [--depth N] [--overwrite] [--format text]")
+		}
+		resp, err := graph.MaterializeResourceGraph(ctx, &kg.KGMaterializeRelationsRequest{
+			ResourceGraph: kg.KGResourceGraphRequest{
+				Query: query,
+				Limit: parseIntDefault(flags["limit"], 10),
+				Depth: parseIntDefault(flags["depth"], 1),
+			},
+			CreatedBy: flagDefault(flags, "created-by", "cli"),
+			Overwrite: flags["overwrite"] == "true",
+			DryRun:    flags["dry-run"] == "true",
+		})
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			fmt.Printf("created=%d updated=%d skipped=%d relations=%d\n", resp.Created, resp.Updated, resp.Skipped, len(resp.Relations))
+			for _, rel := range resp.Relations {
+				fmt.Printf("%s\t%s -- %s -- %s\n", rel.RelationID, rel.Source, rel.RelationType, rel.Target)
+			}
+			return nil
+		}
+		return printJSON(resp)
+	case "relation":
+		if len(positional) < 1 {
+			return fmt.Errorf("usage: velocity kg relation <create|list|get|delete>")
+		}
+		switch positional[0] {
+		case "create":
+			req := &kg.KGRelationRequest{
+				Source:       flagDefault(flags, "source", ""),
+				Target:       flagDefault(flags, "target", ""),
+				RelationType: flagDefault(flags, "type", flagDefault(flags, "relation-type", "")),
+				Confidence:   parseFloatDefault(flags["confidence"], 1),
+				Evidence:     flags["evidence"],
+				SourceKind:   flags["source-kind"],
+				CreatedBy:    flagDefault(flags, "created-by", "cli"),
+			}
+			rel, err := graph.CreateRelation(ctx, req)
+			if err != nil {
+				return err
+			}
+			if format == "text" {
+				fmt.Printf("%s\t%s -> %s [%s %.2f]\n", rel.RelationID, rel.Source, rel.Target, rel.RelationType, rel.Confidence)
+				return nil
+			}
+			return printJSON(rel)
+		case "list":
+			query := &kg.KGRelationQuery{
+				Source:         flags["source"],
+				Target:         flags["target"],
+				RelationTypes:  splitCSVTrim(firstNonEmptyCLI(flags["type"], flags["relation-type"])),
+				Status:         kg.KGRelationStatus(flags["status"]),
+				MinConfidence:  parseFloatDefault(flags["min-confidence"], 0),
+				Limit:          parseIntDefault(flags["limit"], 0),
+				IncludeDeleted: flags["include-deleted"] == "true",
+			}
+			relations, err := graph.QueryRelations(ctx, query)
+			if err != nil {
+				return err
+			}
+			if format == "text" {
+				for _, rel := range relations {
+					fmt.Printf("%s\t%s -> %s [%s %.2f %s]\n", rel.RelationID, rel.Source, rel.Target, rel.RelationType, rel.Confidence, rel.Status)
+				}
+				return nil
+			}
+			return printJSON(map[string]any{"relations": relations})
+		case "get":
+			id := flagDefault(flags, "id", "")
+			if id == "" && len(positional) > 1 {
+				id = positional[1]
+			}
+			rel, err := graph.GetRelation(ctx, id)
+			if err != nil {
+				return err
+			}
+			return printJSON(rel)
+		case "delete":
+			id := flagDefault(flags, "id", "")
+			if id == "" && len(positional) > 1 {
+				id = positional[1]
+			}
+			if err := graph.DeleteRelation(ctx, id, flagDefault(flags, "actor", "cli")); err != nil {
+				return err
+			}
+			if format == "text" {
+				fmt.Printf("deleted relation=%s\n", id)
+				return nil
+			}
+			return printJSON(map[string]string{"status": "deleted", "relation_id": id})
+		default:
+			return fmt.Errorf("unknown kg relation command: %s", positional[0])
+		}
+	case "query":
+		seeds := splitCSVTrim(flags["seed"])
+		if len(seeds) == 0 {
+			seeds = positional
+		}
+		resp, err := graph.QueryGraph(ctx, &kg.KGGraphQuery{
+			SeedIDs:         seeds,
+			SeedSearch:      flags["seed-search"],
+			SeedSearchLimit: parseIntDefault(flags["seed-search-limit"], 10),
+			Depth:           parseIntDefault(flags["depth"], 1),
+			RelationTypes:   splitCSVTrim(firstNonEmptyCLI(flags["type"], flags["relation-type"])),
+			MinConfidence:   parseFloatDefault(flags["min-confidence"], 0),
+			Limit:           parseIntDefault(flags["limit"], 0),
+		})
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			fmt.Printf("nodes=%d relations=%d\n", len(resp.Nodes), len(resp.Relations))
+			for _, rel := range resp.Relations {
+				fmt.Printf("%s -> %s [%s %.2f]\n", rel.Source, rel.Target, rel.RelationType, rel.Confidence)
+			}
+			return nil
+		}
+		return printJSON(resp)
+	case "path":
+		source := flags["source"]
+		target := flags["target"]
+		if source == "" && len(positional) > 0 {
+			source = positional[0]
+		}
+		if target == "" && len(positional) > 1 {
+			target = positional[1]
+		}
+		path, err := graph.ShortestPath(ctx, source, target, &kg.KGGraphQuery{
+			Depth:         parseIntDefault(flags["depth"], 8),
+			RelationTypes: splitCSVTrim(firstNonEmptyCLI(flags["type"], flags["relation-type"])),
+		})
+		if err != nil {
+			return err
+		}
+		if format == "text" {
+			fmt.Println(strings.Join(path.Nodes, " -> "))
+			return nil
+		}
+		return printJSON(path)
+	case "ontology":
+		if len(positional) < 1 {
+			return fmt.Errorf("usage: velocity kg ontology <apply|validate|get>")
+		}
+		switch positional[0] {
+		case "apply":
+			ontology, err := readOntologyFile(flags["file"])
+			if err != nil {
+				return err
+			}
+			applied, err := graph.CreateOntology(ctx, ontology)
+			if err != nil {
+				return err
+			}
+			return printJSON(applied)
+		case "validate":
+			ontology, err := readOntologyFile(flags["file"])
+			if err != nil {
+				return err
+			}
+			return printJSON(graph.ValidateOntology(ontology))
+		case "get":
+			ontology, err := graph.GetOntology(ctx, flagDefault(flags, "name", "default"))
+			if err != nil {
+				return err
+			}
+			return printJSON(ontology)
+		default:
+			return fmt.Errorf("unknown kg ontology command: %s", positional[0])
+		}
+	case "entity":
+		if len(positional) < 1 {
+			return fmt.Errorf("usage: velocity kg entity <merge|propose-merge|approve-merge|reject-merge|split|resolve|merge-list>")
+		}
+		switch positional[0] {
+		case "merge":
+			aliases, err := graph.MergeEntities(ctx, &kg.KGEntityMergeRequest{
+				SourceIDs: splitCSVTrim(flags["sources"]),
+				TargetID:  flags["target"],
+				Reason:    flags["reason"],
+				CreatedBy: flagDefault(flags, "created-by", "cli"),
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"aliases": aliases})
+		case "propose-merge":
+			proposal, err := graph.ProposeMerge(ctx, &kg.KGEntityMergeRequest{
+				SourceIDs: splitCSVTrim(flags["sources"]),
+				TargetID:  flags["target"],
+				Reason:    flags["reason"],
+				CreatedBy: flagDefault(flags, "created-by", "cli"),
+			})
+			if err != nil {
+				return err
+			}
+			return printJSON(proposal)
+		case "approve-merge":
+			proposal, err := graph.ApproveMerge(ctx, flagDefault(flags, "id", ""), flagDefault(flags, "reviewed-by", "cli"))
+			if err != nil {
+				return err
+			}
+			return printJSON(proposal)
+		case "reject-merge":
+			proposal, err := graph.RejectMerge(ctx, flagDefault(flags, "id", ""), flagDefault(flags, "reviewed-by", "cli"))
+			if err != nil {
+				return err
+			}
+			return printJSON(proposal)
+		case "merge-list":
+			proposals, err := graph.ListMergeProposals(ctx, kg.KGMergeStatus(flags["status"]))
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"proposals": proposals})
+		case "split":
+			if err := graph.SplitEntity(ctx, splitCSVTrim(flags["aliases"]), flagDefault(flags, "actor", "cli")); err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"status": "split", "aliases": splitCSVTrim(flags["aliases"])})
+		case "resolve":
+			id := flagDefault(flags, "id", "")
+			if id == "" && len(positional) > 1 {
+				id = positional[1]
+			}
+			canonical, chain, err := graph.ResolveEntity(ctx, id)
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"entity_id": id, "canonical_id": canonical, "chain": chain})
+		default:
+			return fmt.Errorf("unknown kg entity command: %s", positional[0])
+		}
+	case "job":
+		if len(positional) < 1 {
+			return fmt.Errorf("usage: velocity kg job <start|list|get|retry>")
+		}
+		switch positional[0] {
+		case "start":
+			connectorName := flagDefault(flags, "connector", "local_file")
+			connector, err := kgConnectorFromFlags(connectorName, flags, nil)
+			if err != nil {
+				return err
+			}
+			var job *kg.KGImportJob
+			if flags["async"] == "true" {
+				job, err = graph.StartImportJobAsync(ctx, connector, flags["cursor"], parseIntDefault(flags["limit"], 0))
+			} else {
+				job, err = graph.StartImportJob(ctx, connector, flags["cursor"], parseIntDefault(flags["limit"], 0))
+			}
+			if err != nil {
+				return err
+			}
+			return printJSON(job)
+		case "cancel":
+			job, err := graph.CancelImportJob(ctx, flagDefault(flags, "id", ""))
+			if err != nil {
+				return err
+			}
+			return printJSON(job)
+		case "list":
+			jobs, err := graph.ListImportJobs(ctx, kg.KGImportJobStatus(flags["status"]))
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"jobs": jobs})
+		case "get":
+			job, err := graph.GetImportJob(ctx, flagDefault(flags, "id", ""))
+			if err != nil {
+				return err
+			}
+			return printJSON(job)
+		case "retry":
+			connectorName := flagDefault(flags, "connector", "local_file")
+			connector, err := kgConnectorFromFlags(connectorName, flags, nil)
+			if err != nil {
+				return err
+			}
+			job, err := graph.RetryImportJob(ctx, flagDefault(flags, "id", ""), connector)
+			if err != nil {
+				return err
+			}
+			return printJSON(job)
+		default:
+			return fmt.Errorf("unknown kg job command: %s", positional[0])
+		}
+	case "mutations":
+		records, err := graph.ListMutationLog(ctx, parseIntDefault(flags["limit"], 100))
+		if err != nil {
+			return err
+		}
+		return printJSON(map[string]any{"mutations": records})
+	case "rebuild":
+		if err := graph.RebuildIndexes(ctx); err != nil {
+			return err
+		}
+		return printJSON(map[string]string{"status": "rebuilt"})
 	case "sync":
 		cfg := velocity.KnowledgeGraphAutoIndexConfig{
 			Enabled:      true,
@@ -554,6 +877,37 @@ func firstNonEmptyCLI(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitCSVTrim(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func readOntologyFile(path string) (*kg.KGOntology, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("--file is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ontology file: %w", err)
+	}
+	var ontology kg.KGOntology
+	if err := json.Unmarshal(data, &ontology); err != nil {
+		return nil, fmt.Errorf("invalid ontology JSON: %w", err)
+	}
+	return &ontology, nil
 }
 
 func handleData(db *velocity.DB, ctx context.Context, args []string) error {

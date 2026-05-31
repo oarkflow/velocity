@@ -46,10 +46,19 @@ The KG subsystem can perform these workflows:
 - Search by keyword.
 - Search with full-text match modes, including all terms, any terms, boolean `OR`, quoted phrases, and prefix matching.
 - Use opt-in fuzzy matching for typo-tolerant fallback search.
+- Use a dedicated n-gram candidate index for fuzzy chunk search instead of scanning every chunk first.
 - Search by vector or hybrid mode when an embedder/HNSW index is configured.
 - Filter searches by metadata.
 - Return a resource relation graph from a query with `SearchResourceGraph`.
 - Return explainable inferred resource graph edges with relation type, confidence, evidence, source kind, and metadata.
+- Materialize inferred resource graph edges into persistent first-class relations with deterministic IDs.
+- Persist explicit first-class relations with stable IDs, direction, confidence, provenance/evidence, lifecycle status, timestamps, attributes, revisions, and mutation log records.
+- Define and apply permissive or constrained ontologies for relation validation, including allowed endpoint types, direction, required fields, and basic cardinality.
+- Query the persistent graph with depth, direction, relation type, confidence, and provenance filters.
+- Run graph algorithms for traversal, shortest path, impact traversal, degree metrics, and connected components.
+- Propose, approve, reject, merge, split, and resolve entity aliases while preserving canonical redirects.
+- Run connector imports as persistent jobs with cursor state, status, retry count, errors, timings, metrics, cancellation state, and retry support.
+- Apply an optional host-provided authorization hook to KG search, relation, and graph results.
 - Rerank search hits with a custom reranker.
 - Traverse entity relationships.
 - Return corpus analytics.
@@ -93,6 +102,16 @@ The script runs:
 - `examples/kg_cookbook`
 - an inline embedded KG API example
 - focused KG tests
+
+## Admin UI
+
+The web admin KG tab includes compact single-node controls for:
+
+- KG search and query-time resource graph discovery.
+- Materializing the last inferred resource graph into persistent relations.
+- Persistent graph query by explicit seed or search-seeded traversal.
+- Relation creation and recent relation browsing.
+- Sync status/actions, analytics, custom NER rules, connector import, import job monitoring/cancel, ontology apply, and merge proposal approval.
 
 ## Expected Result
 
@@ -307,6 +326,65 @@ db.EnableKnowledgeGraphAutoIndex(velocity.KnowledgeGraphAutoIndexConfig{
 	Async:         true,
 	MaxValueBytes: 1 << 20,
 })
+```
+
+Create durable relations and query the persistent graph:
+
+```go
+rel, err := graph.CreateRelation(ctx, &kg.KGRelationRequest{
+	Source:       "service:api",
+	Target:       "table:customers",
+	RelationType: "depends_on",
+	Confidence:   0.92,
+	Evidence:     "api reads the customers table",
+	CreatedBy:    "ops",
+})
+
+path, err := graph.ShortestPath(ctx, "service:api", "table:customers", &kg.KGGraphQuery{
+	Depth: 3,
+})
+```
+
+Materialize inferred resource relations:
+
+```go
+materialized, err := graph.MaterializeResourceGraph(ctx, &kg.KGMaterializeRelationsRequest{
+	ResourceGraph: kg.KGResourceGraphRequest{
+		Query: "CASE-12345 Acme Corp",
+		Limit: 20,
+	},
+	CreatedBy: "kg-sync",
+})
+fmt.Println(materialized.Created, materialized.Skipped)
+```
+
+Apply an ontology:
+
+```go
+_, err := graph.CreateOntology(ctx, &kg.KGOntology{
+	Name: "default",
+	RelationTypes: map[string]kg.KGOntologyRelationType{
+		"depends_on": {
+			AllowedSources: []string{"service"},
+			AllowedTargets: []string{"service", "table"},
+			Direction:      kg.KGRelationDirectionOut,
+			RequiredFields: []string{"evidence"},
+		},
+	},
+})
+```
+
+Use entity merge approvals:
+
+```go
+proposal, _ := graph.ProposeMerge(ctx, &kg.KGEntityMergeRequest{
+	SourceIDs: []string{"person:alice-old"},
+	TargetID:  "person:alice",
+	Reason:    "same employee identifier",
+})
+_, _ = graph.ApproveMerge(ctx, proposal.ProposalID, "reviewer")
+canonical, chain, _ := graph.ResolveEntity(ctx, "person:alice-old")
+fmt.Println(canonical, len(chain))
 ```
 
 After that, use ordinary APIs:

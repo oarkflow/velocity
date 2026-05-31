@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	rich "github.com/oarkflow/velocity/pkg/extractor"
 )
 
 // KGExtractor extracts plain text from raw content based on media type.
@@ -14,7 +16,8 @@ type KGExtractor interface {
 	Supports(mediaType string) bool
 }
 
-// DefaultExtractor handles text/plain, text/html, application/json, text/csv.
+// DefaultExtractor handles text/plain, text/html, application/json, text/csv,
+// plus graceful best-effort adapters for PDF, Office-style documents, and email.
 type DefaultExtractor struct{}
 
 var (
@@ -30,7 +33,16 @@ func NewDefaultExtractor() *DefaultExtractor {
 
 func (e *DefaultExtractor) Supports(mediaType string) bool {
 	switch normalizeMediaType(mediaType) {
-	case "text/plain", "text/html", "application/json", "text/csv":
+	case "text/plain", "text/markdown", "text/html", "application/xhtml+xml", "application/json", "text/json",
+		"text/csv", "text/tab-separated-values", "application/csv", "application/pdf", "message/rfc822",
+		"message/rfc2822", "message/email",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+		"application/vnd.oasis.opendocument.text",
+		"application/vnd.oasis.opendocument.spreadsheet",
+		"application/vnd.oasis.opendocument.presentation":
 		return true
 	}
 	return false
@@ -42,14 +54,25 @@ func (e *DefaultExtractor) Extract(content []byte, mediaType string) (string, er
 	}
 
 	switch normalizeMediaType(mediaType) {
-	case "text/plain":
+	case "text/plain", "text/markdown":
 		return string(content), nil
-	case "text/html":
+	case "text/html", "application/xhtml+xml":
 		return extractHTML(content), nil
-	case "application/json":
+	case "application/json", "text/json":
 		return extractJSON(content)
-	case "text/csv":
-		return extractCSV(content), nil
+	case "text/csv", "text/tab-separated-values", "application/csv":
+		return rich.Extract(content, mediaType)
+	case "message/rfc822", "message/rfc2822", "message/email":
+		return rich.Extract(content, mediaType)
+	case "application/pdf",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+		"application/vnd.oasis.opendocument.text",
+		"application/vnd.oasis.opendocument.spreadsheet",
+		"application/vnd.oasis.opendocument.presentation":
+		return rich.Extract(content, mediaType)
 	default:
 		// Best effort: treat as plain text
 		return string(content), nil
@@ -106,18 +129,4 @@ func collectJSONStrings(v any, buf *bytes.Buffer) {
 			collectJSONStrings(av, buf)
 		}
 	}
-}
-
-func extractCSV(content []byte) string {
-	lines := strings.Split(string(content), "\n")
-	var parts []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			// Replace commas with spaces for readability
-			line = strings.ReplaceAll(line, ",", " ")
-			parts = append(parts, line)
-		}
-	}
-	return strings.Join(parts, " ")
 }

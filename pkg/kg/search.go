@@ -29,6 +29,7 @@ type KGSearchEngine struct {
 	indexMu    sync.RWMutex
 	indexDirty bool
 	termIndex  map[string][]string
+	fuzzyIndex map[string][]string
 	chunkText  map[string]string
 	chunkTerms map[string][]string
 	chunkNorm  map[string]string
@@ -44,6 +45,7 @@ func NewKGSearchEngine(db Store, hnsw *HNSWIndex, embedder KGEmbedder, em Entity
 		docCache:   make(map[string]KGDocument),
 		indexDirty: true,
 		termIndex:  make(map[string][]string),
+		fuzzyIndex: make(map[string][]string),
 		chunkText:  make(map[string]string),
 		chunkTerms: make(map[string][]string),
 		chunkNorm:  make(map[string]string),
@@ -331,8 +333,16 @@ func (s *KGSearchEngine) fuzzySearch(req *KGSearchRequest, limit int) []kgFuzzyC
 		maxEdits = 1
 	}
 	s.indexMu.RLock()
-	candidates := make([]kgFuzzyCandidate, 0, min(limit, len(s.chunkText)))
-	for id, terms := range s.chunkTerms {
+	candidateIDs := s.fuzzyCandidateIDsLocked(queryTerms)
+	if len(candidateIDs) == 0 && len(queryTerms) > 0 && len(queryTerms[0]) < 3 {
+		for id := range s.chunkTerms {
+			candidateIDs = append(candidateIDs, id)
+		}
+		sort.Strings(candidateIDs)
+	}
+	candidates := make([]kgFuzzyCandidate, 0, min(limit, len(candidateIDs)))
+	for _, id := range candidateIDs {
+		terms := s.chunkTerms[id]
 		score := fuzzyTokenScore(queryTerms, terms, maxEdits)
 		if score <= 0 {
 			continue
@@ -370,6 +380,7 @@ func (s *KGSearchEngine) ensureTextIndex() error {
 		return err
 	}
 	termIndex := make(map[string][]string, len(keys)*8)
+	fuzzyIndex := make(map[string][]string, len(keys)*12)
 	chunkText := make(map[string]string, len(keys))
 	chunkTerms := make(map[string][]string, len(keys))
 	chunkNorm := make(map[string]string, len(keys))
@@ -391,15 +402,23 @@ func (s *KGSearchEngine) ensureTextIndex() error {
 			}
 			seen[term] = struct{}{}
 			termIndex[term] = append(termIndex[term], chunkID)
+			for _, gram := range tokenNGrams(term, 3) {
+				fuzzyIndex[gram] = append(fuzzyIndex[gram], chunkID)
+			}
 		}
 	}
 	for term, ids := range termIndex {
 		sort.Strings(ids)
 		termIndex[term] = ids
 	}
+	for gram, ids := range fuzzyIndex {
+		sort.Strings(ids)
+		fuzzyIndex[gram] = uniqueSortedStrings(ids)
+	}
 
 	s.indexMu.Lock()
 	s.termIndex = termIndex
+	s.fuzzyIndex = fuzzyIndex
 	s.chunkText = chunkText
 	s.chunkTerms = chunkTerms
 	s.chunkNorm = chunkNorm
@@ -636,6 +655,51 @@ func containsKGToken(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func (s *KGSearchEngine) fuzzyCandidateIDsLocked(queryTerms []string) []string {
+	var candidates []string
+	used := false
+	for _, term := range queryTerms {
+		var termIDs []string
+		for _, gram := range tokenNGrams(term, 3) {
+			termIDs = mergeSortedUniqueStrings(termIDs, s.fuzzyIndex[gram])
+		}
+		if len(termIDs) == 0 {
+			continue
+		}
+		if !used {
+			candidates = append([]string(nil), termIDs...)
+			used = true
+		} else {
+			candidates = mergeSortedUniqueStrings(candidates, termIDs)
+		}
+	}
+	return candidates
+}
+
+func tokenNGrams(term string, n int) []string {
+	if n <= 0 || len(term) < n {
+		return nil
+	}
+	grams := make([]string, 0, len(term)-n+1)
+	for i := 0; i <= len(term)-n; i++ {
+		grams = append(grams, term[i:i+n])
+	}
+	return grams
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func boundedEditDistance(a, b string, max int, prev, curr []int) int {

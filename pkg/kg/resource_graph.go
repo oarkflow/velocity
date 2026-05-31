@@ -97,6 +97,77 @@ func (e *KnowledgeGraphEngine) SearchResourceGraph(ctx context.Context, req *KGR
 	}, nil
 }
 
+// MaterializeResourceGraph persists inferred SearchResourceGraph edges as
+// first-class relations. The operation is deterministic and idempotent by edge
+// endpoints, relation type, and entity key.
+func (e *KnowledgeGraphEngine) MaterializeResourceGraph(ctx context.Context, req *KGMaterializeRelationsRequest) (*KGMaterializeRelationsResponse, error) {
+	if req == nil {
+		req = &KGMaterializeRelationsRequest{}
+	}
+	start := time.Now()
+	graph, err := e.SearchResourceGraph(ctx, &req.ResourceGraph)
+	if err != nil {
+		return nil, err
+	}
+	resp := &KGMaterializeRelationsResponse{
+		Graph:  graph,
+		DryRun: req.DryRun,
+	}
+	createdBy := firstNonEmpty(req.CreatedBy, "kg-materializer")
+	for _, edge := range graph.Edges {
+		if ctx.Err() != nil {
+			resp.Errors = append(resp.Errors, ctx.Err().Error())
+			break
+		}
+		relReq := relationRequestFromResourceEdge(edge, createdBy)
+		if req.DryRun {
+			resp.Relations = append(resp.Relations, relationFromRequest(relReq))
+			resp.Skipped++
+			continue
+		}
+		rel, err := e.CreateRelation(ctx, relReq)
+		if err == nil {
+			resp.Created++
+			resp.Relations = append(resp.Relations, *rel)
+			continue
+		}
+		existing, getErr := e.GetRelation(ctx, relReq.RelationID)
+		if getErr != nil {
+			resp.Skipped++
+			resp.Errors = append(resp.Errors, err.Error())
+			continue
+		}
+		if !req.Overwrite {
+			resp.Skipped++
+			resp.Relations = append(resp.Relations, *existing)
+			continue
+		}
+		confidence := relReq.Confidence
+		evidence := relReq.Evidence
+		sourceKind := relReq.SourceKind
+		status := KGRelationStatusActive
+		updated, updateErr := e.UpdateRelation(ctx, existing.RelationID, &KGRelationUpdate{
+			Confidence: &confidence,
+			Evidence:   &evidence,
+			SourceKind: &sourceKind,
+			SourceRefs: relReq.SourceRefs,
+			Status:     &status,
+			Metadata:   relReq.Metadata,
+			Attributes: relReq.Attributes,
+			UpdatedBy:  createdBy,
+		})
+		if updateErr != nil {
+			resp.Skipped++
+			resp.Errors = append(resp.Errors, updateErr.Error())
+			continue
+		}
+		resp.Updated++
+		resp.Relations = append(resp.Relations, *updated)
+	}
+	resp.QueryTimeMs = time.Since(start).Milliseconds()
+	return resp, nil
+}
+
 func buildKGResourceGraphEdges(nodes []KGResourceGraphNode, entityToNodes map[string][]int, minShared int) []KGResourceGraphEdge {
 	type pairKey struct {
 		a string
@@ -170,6 +241,60 @@ func buildKGResourceGraphEdges(nodes []KGResourceGraphNode, entityToNodes map[st
 		})
 	}
 	return edges
+}
+
+func relationRequestFromResourceEdge(edge KGResourceGraphEdge, createdBy string) *KGRelationRequest {
+	entityKey := ""
+	if edge.Attributes != nil {
+		entityKey = edge.Attributes["entity_key"]
+	}
+	relationID := stableRelationID(edge.Source, edge.RelationType, edge.Target, firstNonEmpty(edge.SourceKind, "inferred")+":"+entityKey)
+	metadata := cloneStringMap(edge.Metadata)
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	metadata["materialized_from"] = "resource_graph"
+	metadata["entity_type"] = edge.Entity.Type
+	metadata["entity_canonical"] = firstNonEmpty(edge.Entity.Canonical, edge.Entity.Surface)
+	return &KGRelationRequest{
+		RelationID:   relationID,
+		Source:       edge.Source,
+		Target:       edge.Target,
+		RelationType: edge.RelationType,
+		Direction:    KGRelationDirectionBoth,
+		Confidence:   edge.Confidence,
+		Evidence:     edge.Evidence,
+		SourceKind:   firstNonEmpty(edge.SourceKind, "inferred"),
+		CreatedBy:    createdBy,
+		Metadata:     metadata,
+		Attributes:   cloneStringMap(edge.Attributes),
+		SourceRefs: []KGSourceRef{
+			{Source: edge.Source, ResourceID: edge.Source},
+			{Source: edge.Target, ResourceID: edge.Target},
+		},
+	}
+}
+
+func relationFromRequest(req *KGRelationRequest) KGRelation {
+	now := time.Now().UTC()
+	return KGRelation{
+		RelationID:   req.RelationID,
+		Source:       req.Source,
+		Target:       req.Target,
+		RelationType: req.RelationType,
+		Direction:    normalizeRelationDirection(req.Direction),
+		Confidence:   req.Confidence,
+		Evidence:     req.Evidence,
+		SourceKind:   req.SourceKind,
+		SourceRefs:   req.SourceRefs,
+		Status:       normalizeRelationStatus(req.Status),
+		CreatedBy:    req.CreatedBy,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Revision:     1,
+		Metadata:     cloneStringMap(req.Metadata),
+		Attributes:   cloneStringMap(req.Attributes),
+	}
 }
 
 func nodesByID(nodes []KGResourceGraphNode, id string) KGResourceGraphNode {

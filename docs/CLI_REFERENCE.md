@@ -128,6 +128,21 @@ velocity kg import --connector structured_file --file ./customers.csv --table cu
 velocity kg search "retention policy" --limit 10
 velocity kg search "retention policy" --format text
 velocity kg graph "CASE-12345" --depth 1 --format text
+velocity kg materialize "CASE-12345" --limit 10 --format text
+velocity kg relation create --source service:api --target table:customers --type depends_on --evidence "api reads customers"
+velocity kg relation list --source service:api --format text
+velocity kg query --seed service:api --depth 2 --format text
+velocity kg path --source service:api --target table:customers --format text
+velocity kg ontology apply --file ./ontology.json
+velocity kg entity propose-merge --target person:alice --sources person:alice-old --reason "same employee id"
+velocity kg entity approve-merge --id merge-...
+velocity kg entity resolve person:alice-old
+velocity kg job start --connector local_file --path ./docs
+velocity kg job start --connector local_file --path ./docs --async
+velocity kg job list --status succeeded
+velocity kg job cancel --id job-...
+velocity kg mutations --limit 50
+velocity kg rebuild
 velocity kg sync
 velocity kg status
 velocity kg analytics

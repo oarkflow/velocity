@@ -1,6 +1,8 @@
 package kg
 
 import (
+	"archive/zip"
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -63,7 +65,50 @@ func TestDefaultExtractor_Supports(t *testing.T) {
 	if !ext.Supports("text/html; charset=utf-8") {
 		t.Fatal("should support text/html with params")
 	}
-	if ext.Supports("application/pdf") {
-		t.Fatal("should not support PDF")
+	if !ext.Supports("application/pdf") {
+		t.Fatal("should support PDF fallback")
+	}
+}
+
+func TestDefaultExtractor_EmailAndBinaryFallbacks(t *testing.T) {
+	ext := NewDefaultExtractor()
+	email := "From: alice@example.test\r\nTo: bob@example.test\r\nSubject: Contract CASE-12345\r\nIgnored: nope\r\n\r\nPlease review the attached policy."
+	text, err := ext.Extract([]byte(email), "message/rfc822")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "Subject: Contract CASE-12345") || strings.Contains(text, "Ignored: nope") || !strings.Contains(text, "attached policy") {
+		t.Fatalf("unexpected email extraction: %q", text)
+	}
+
+	pdfText, err := ext.Extract([]byte("%PDF-1.7\x00 hidden CASE-77777 text\x00%%EOF"), "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pdfText, "CASE-77777") {
+		t.Fatalf("expected printable PDF fallback text: %q", pdfText)
+	}
+}
+
+func TestDefaultExtractor_UsesRichOfficeExtractor(t *testing.T) {
+	ext := NewDefaultExtractor()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Accurate DOCX CASE-90909</w:t></w:r></w:p></w:body></w:document>`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	text, err := ext.Extract(buf.Bytes(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "Accurate DOCX CASE-90909") {
+		t.Fatalf("expected docx text from rich extractor: %q", text)
 	}
 }

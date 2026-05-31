@@ -278,5 +278,7 @@ fi
 
 section "Focused knowledge graph tests"
 run go test -run 'TestKGEngine|TestHNSWIndex|TestRuleBasedNER|TestEntityResolver' .
+run go test ./pkg/extractor
+run go test ./pkg/kg -run 'TestDefaultExtractor|TestMaterializeResourceGraph|TestImportJob|TestGraphQuery|TestPersistentRelations'
 
 section "Knowledge graph demo completed"

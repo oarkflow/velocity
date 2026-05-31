@@ -73,13 +73,19 @@ For a runnable smoke flow across the complete feature set, use:
 - Document ingestion with text extraction from plain text, HTML, and JSON.
 - Sliding-window chunking.
 - Rule-based NER for emails, URLs, domains, file paths, hashes, dates, money, organizations, people, business identifiers, API-key-like patterns, and custom regex rules.
-- Lightweight in-memory KG search index with all/any/phrase/boolean/prefix matching and opt-in fuzzy fallback search.
+- Lightweight KG search index with all/any/phrase/boolean/prefix matching and opt-in n-gram-backed fuzzy fallback search.
+- Persistent first-class KG relations with CRUD, provenance/evidence, confidence, direction, status, revisions, and mutation log records.
+- Ontology definitions and validation for allowed relation types, endpoint types, direction, required fields, and cardinality.
+- Persistent graph query and algorithms for traversal, shortest path, impact/dependency traversal, degree metrics, and connected components.
+- Entity alias management with merge proposals, approval/rejection, canonical redirects, split, and resolve workflows.
 - Entity manager and entity relations with graph traversal, tags, linked secrets, objects, and envelopes.
 - Entity resolution and deduplication.
 - HNSW vector index, cosine similarity, vector search, hybrid search, graph neighbors, and analytics.
 - Opt-in automatic indexing for KV records, objects, secrets, SQL rows, envelopes, and entity records so normal writes become KG-searchable without per-record `Ingest` calls.
 - Query-driven resource graph discovery with `SearchResourceGraph`, which returns matching resources as nodes and explainable inferred relation edges when resources mention the same extracted entities.
-- Connector interfaces, `ImportConnector`, HTTP connector import, CLI connector import, and built-in local file, URL, CSV/TSV/JSON structured-row, and static SQL-row helpers for integrations without mandatory external services.
+- Materialization of inferred resource graph edges into persistent relation records for later graph query and audit.
+- Connector interfaces, `ImportConnector`, persistent import jobs, HTTP/CLI job controls, and built-in local file, URL, CSV/TSV/JSON structured-row, and static SQL-row helpers for integrations without mandatory external services.
+- Optional host-provided KG authorization filter for embedded production deployments.
 
 ## APIs And Interfaces
 
@@ -91,7 +97,7 @@ For a runnable smoke flow across the complete feature set, use:
 - S3-compatible HTTP surface.
 - Enterprise API route group under `/api/v1`.
 - Browser admin UI served from `pkg/web/static`.
-- Knowledge Graph HTTP, CLI, and admin UI surfaces for ingest, search, graph discovery, sync status, analytics, and custom NER rules.
+- Knowledge Graph HTTP, CLI, and admin UI surfaces for ingest, search, graph discovery, persistent relations, ontology, sync status, connector jobs, analytics, and custom NER rules.
 
 ## Resilience And Operations
 

@@ -342,11 +342,16 @@ function setActiveTab(name) {
 qs('#tab-files').addEventListener('click', () => setActiveTab('files'));
 qs('#tab-kg').addEventListener('click', () => setActiveTab('kg'));
 
+let lastKGGraphRequest = null;
+
 async function loadKGDashboard() {
-  const [analytics, status, rules] = await Promise.all([
+  const [analytics, status, rules, jobs, merges, relations] = await Promise.all([
     api('/api/v1/kg/analytics'),
     api('/api/v1/kg/sync/status'),
-    api('/api/v1/kg/ner/rules')
+    api('/api/v1/kg/ner/rules'),
+    api('/api/v1/kg/jobs?status=running'),
+    api('/api/v1/kg/entities/merge?status=pending'),
+    api('/api/v1/kg/relations/query', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({limit:20})})
   ]);
   if (analytics.ok) {
     qs('#kg-analytics').innerHTML = `
@@ -366,6 +371,9 @@ async function loadKGDashboard() {
   if (rules.ok) {
     renderKGRules(rules.body.rules || []);
   }
+  if (jobs.ok) renderKGJobs(jobs.body.jobs || []);
+  if (merges.ok) renderKGMerges(merges.body.proposals || []);
+  if (relations.ok) renderKGRelations(relations.body.relations || []);
 }
 
 function renderKGRules(rules) {
@@ -421,6 +429,7 @@ qs('#kg-search-form').addEventListener('submit', async (ev) => {
     body: JSON.stringify({query, limit, depth:1})
   });
   if (graph.ok) {
+    lastKGGraphRequest = {query, limit, depth:1};
     const edges = graph.body.edges || [];
     qs('#kg-graph').innerHTML = edges.length ? edges.map(edge => `
       <div class="border-b border-gray-200 pb-2">
@@ -429,6 +438,24 @@ qs('#kg-search-form').addEventListener('submit', async (ev) => {
       </div>
     `).join('') : '<div class="text-gray-500">No inferred edges</div>';
   }
+});
+
+qs('#kg-materialize-btn').addEventListener('click', async () => {
+  if (!lastKGGraphRequest) {
+    alert('Run a KG search first.');
+    return;
+  }
+  const r = await api('/api/v1/kg/resource-graph/materialize', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({resource_graph: lastKGGraphRequest, created_by: 'admin-ui'})
+  });
+  if (!r.ok) {
+    alert('Materialize failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  qs('#kg-graph').insertAdjacentHTML('afterbegin', `<div class="text-indigo-700">Materialized ${r.body.created || 0}, skipped ${r.body.skipped || 0}</div>`);
+  loadKGDashboard();
 });
 
 qs('#kg-import-form').addEventListener('submit', async (ev) => {
@@ -454,6 +481,148 @@ qs('#kg-import-form').addEventListener('submit', async (ev) => {
   qs('#kg-import-result').textContent = `Imported ${r.body.imported || 0}, skipped ${r.body.skipped || 0}`;
   loadKGDashboard();
 });
+
+qs('#kg-query-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const seed = String(fd.get('seed') || '').trim();
+  const seedSearch = String(fd.get('seed_search') || '').trim();
+  const depth = Number(fd.get('depth') || 2);
+  const payload = {depth};
+  if (seed) payload.seed_ids = seed.split(',').map(s => s.trim()).filter(Boolean);
+  if (seedSearch) payload.seed_search = seedSearch;
+  const r = await api('/api/v1/kg/query', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    alert('Graph query failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  qs('#kg-persistent-graph').innerHTML = renderRelationList(r.body.relations || [], 'No persistent relations found');
+});
+
+qs('#kg-relation-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const payload = {
+    source: String(fd.get('source') || '').trim(),
+    target: String(fd.get('target') || '').trim(),
+    relation_type: String(fd.get('type') || '').trim(),
+    evidence: String(fd.get('evidence') || '').trim(),
+    created_by: 'admin-ui'
+  };
+  if (!payload.source || !payload.target || !payload.relation_type) return;
+  const r = await api('/api/v1/kg/relations', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    alert('Create relation failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  ev.target.reset();
+  loadKGDashboard();
+});
+
+qs('#kg-load-jobs-btn').addEventListener('click', loadKGJobs);
+
+async function loadKGJobs() {
+  const r = await api('/api/v1/kg/jobs');
+  if (r.ok) renderKGJobs(r.body.jobs || []);
+}
+
+function renderKGJobs(jobs) {
+  qs('#kg-jobs').innerHTML = jobs.length ? jobs.slice(0, 30).map(job => `
+    <div class="border-b border-gray-200 pb-2">
+      <div class="font-medium">${escapeHTML(job.connector || job.job_id)} <span class="text-gray-500">${escapeHTML(job.status || '')}</span></div>
+      <div class="text-xs text-gray-500">imported ${job.imported || 0}, skipped ${job.skipped || 0}</div>
+      ${job.status === 'running' || job.status === 'pending' ? `<button data-job-cancel="${escapeHTML(job.job_id)}" class="mt-1 text-red-700 text-xs">Cancel</button>` : ''}
+    </div>
+  `).join('') : '<div class="text-gray-500">No jobs</div>';
+  document.querySelectorAll('[data-job-cancel]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.getAttribute('data-job-cancel');
+    const r = await api(`/api/v1/kg/jobs/${encodeURIComponent(id)}/cancel`, {method:'POST'});
+    if (!r.ok) alert('Cancel failed: ' + JSON.stringify(r.body));
+    loadKGJobs();
+  }));
+}
+
+qs('#kg-ontology-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  let payload;
+  try {
+    payload = JSON.parse(String(new FormData(ev.target).get('ontology') || '{}'));
+  } catch (err) {
+    qs('#kg-ontology-result').textContent = 'Invalid JSON';
+    return;
+  }
+  const r = await api('/api/v1/kg/ontology', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  qs('#kg-ontology-result').textContent = r.ok ? `Applied ${r.body.name || 'ontology'}` : `Failed: ${JSON.stringify(r.body)}`;
+});
+
+qs('#kg-merge-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const payload = {
+    target_id: String(fd.get('target') || '').trim(),
+    source_ids: String(fd.get('sources') || '').split(',').map(s => s.trim()).filter(Boolean),
+    created_by: 'admin-ui'
+  };
+  if (!payload.target_id || !payload.source_ids.length) return;
+  const r = await api('/api/v1/kg/entities/merge/propose', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!r.ok) {
+    alert('Merge proposal failed: ' + JSON.stringify(r.body));
+    return;
+  }
+  ev.target.reset();
+  loadKGMerges();
+});
+
+async function loadKGMerges() {
+  const r = await api('/api/v1/kg/entities/merge?status=pending');
+  if (r.ok) renderKGMerges(r.body.proposals || []);
+}
+
+function renderKGMerges(proposals) {
+  qs('#kg-merges').innerHTML = proposals.length ? proposals.slice(0, 30).map(p => `
+    <div class="border-b border-gray-200 pb-2">
+      <div class="font-medium">${escapeHTML(p.target_id || '')}</div>
+      <div class="text-xs text-gray-500">${escapeHTML((p.source_ids || []).join(', '))}</div>
+      <button data-merge-approve="${escapeHTML(p.proposal_id)}" class="mt-1 text-blue-700 text-xs">Approve</button>
+    </div>
+  `).join('') : '<div class="text-gray-500">No pending merges</div>';
+  document.querySelectorAll('[data-merge-approve]').forEach(btn => btn.addEventListener('click', async () => {
+    const id = btn.getAttribute('data-merge-approve');
+    const r = await api(`/api/v1/kg/entities/merge/${encodeURIComponent(id)}/approve`, {method:'POST'});
+    if (!r.ok) alert('Approve failed: ' + JSON.stringify(r.body));
+    loadKGMerges();
+  }));
+}
+
+function renderKGRelations(relations) {
+  qs('#kg-relations').innerHTML = renderRelationList(relations, 'No relations');
+}
+
+function renderRelationList(relations, emptyText) {
+  return relations.length ? relations.map(rel => `
+    <div class="border-b border-gray-200 pb-2">
+      <div>${escapeHTML(rel.source)} -> ${escapeHTML(rel.target)}</div>
+      <div class="text-gray-600">${escapeHTML(rel.relation_type)} ${Number(rel.confidence || 0).toFixed(2)} ${escapeHTML(rel.status || '')}</div>
+      <div class="text-xs text-gray-500 truncate">${escapeHTML(rel.evidence || rel.relation_id || '')}</div>
+    </div>
+  `).join('') : `<div class="text-gray-500">${emptyText}</div>`;
+}
 
 qs('#kg-rule-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();

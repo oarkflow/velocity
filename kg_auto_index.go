@@ -306,9 +306,13 @@ func (db *DB) kgAutoIndexObjectRecord(rec *ObjectRecord, content []byte) {
 	for k, v := range extra {
 		meta[k] = v
 	}
+	mediaType := rec.ContentType
+	if meta["kg_content_mode"] == "metadata_only" {
+		mediaType = "text/plain"
+	}
 	db.kgAutoIndexResource(context.Background(), kg.ResourceObject, &kg.KGIngestRequest{
 		Source:    "object:" + rec.Path,
-		MediaType: rec.ContentType,
+		MediaType: mediaType,
 		Title:     rec.Path,
 		Content:   body,
 		Metadata:  meta,
@@ -483,6 +487,18 @@ func looksTextual(data []byte, contentType string) bool {
 	if contentType != "" {
 		if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
 			if strings.HasPrefix(mediaType, "text/") || strings.Contains(mediaType, "json") || strings.Contains(mediaType, "xml") || strings.Contains(mediaType, "yaml") {
+				return true
+			}
+			switch mediaType {
+			case "message/rfc822", "message/rfc2822", "message/email",
+				"application/pdf",
+				"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+				"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+				"application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+				"application/vnd.oasis.opendocument.text",
+				"application/vnd.oasis.opendocument.spreadsheet",
+				"application/vnd.oasis.opendocument.presentation":
 				return true
 			}
 			if strings.HasPrefix(mediaType, "image/") || strings.HasPrefix(mediaType, "audio/") || strings.HasPrefix(mediaType, "video/") || strings.HasPrefix(mediaType, "application/octet-stream") {

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -80,10 +82,14 @@ func connectorImports(ctx context.Context, graph *kg.KnowledgeGraphEngine, dir s
 	filesDir := filepath.Join(dir, "files")
 	check(os.MkdirAll(filesDir, 0755))
 	check(os.WriteFile(filepath.Join(filesDir, "object-note.txt"), []byte("Object note links CUST-1001, CASE-10001, Acme Corp, and file /evidence/acme/report.pdf."), 0600))
+	check(os.WriteFile(filepath.Join(filesDir, "support-email.eml"), []byte("From: analyst@example.test\r\nTo: acme@example.test\r\nSubject: CASE-10001 support update\r\nContent-Type: text/plain\r\n\r\nEmail evidence EVD-7002 confirms Acme Corp remediation owner."), 0600))
+	check(os.WriteFile(filepath.Join(filesDir, "contract.docx"), buildDocx("DOCX contract source confirms CONTRACT-ACME-2026 for CUST-1001."), 0600))
 
 	fileResp, err := graph.ImportConnector(ctx, kg.LocalFileConnector{Root: filesDir}, "", 10)
 	check(err)
 	fmt.Printf("local_file imported=%d skipped=%d\n", fileResp.Imported, fileResp.Skipped)
+	mustHitSource(ctx, graph, "support update EVD-7002", "local email connector", "support-email.eml")
+	mustHitSource(ctx, graph, "DOCX contract source CONTRACT-ACME-2026", "local docx connector", "contract.docx")
 
 	csvPath := filepath.Join(dir, "customers.csv")
 	check(os.WriteFile(csvPath, []byte("id,name,note\n1,Acme Corp,CUST-1001 owns contract CONTRACT-ACME-2026\n2,Globex,CASE-20002 pending review\n"), 0600))
@@ -123,6 +129,12 @@ func autoIndexResources(ctx context.Context, db *velocity.DB, graph *kg.Knowledg
 	check(db.Put([]byte("customers/acme/profile"), []byte("Acme Corp customer profile for CUST-1001 requires SOC2 evidence.")))
 	_, err := db.StoreObject("objects/acme/remediation.txt", "text/plain", "analyst", []byte("EVD-7001 report for Acme Corp CASE-10001 remediation."), nil)
 	check(err)
+	_, err = db.StoreObject("objects/acme/email.eml", "message/rfc822", "analyst", []byte("From: ops@example.test\r\nTo: analyst@example.test\r\nSubject: Encoded Acme update\r\nContent-Type: text/plain\r\n\r\nObject email source references CASE-10001 and EVD-7003."), nil)
+	check(err)
+	_, err = db.StoreObject("objects/acme/contract.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "analyst", buildDocx("Object DOCX source references CUST-1001 and POLICY-9000."), nil)
+	check(err)
+	_, err = db.StoreObject("objects/acme/metadata.json", "application/json", "analyst", []byte(`{"customer":"Acme Corp","case":"CASE-10001","source":"json object source"}`), nil)
+	check(err)
 	secret, err := db.CreateSecret(ctx, velocity.SecretRequest{Name: "acme-prod-api-key", Value: []byte("raw-secret-value-not-indexed"), Owner: "analyst"})
 	check(err)
 	env, err := db.CreateEnvelope(ctx, &velocity.EnvelopeRequest{
@@ -144,6 +156,10 @@ func autoIndexResources(ctx context.Context, db *velocity.DB, graph *kg.Knowledg
 	check(err)
 
 	fmt.Printf("auto-indexed secret_version=%s envelope=%s entity=%s\n", secret.Version, short(env.EnvelopeID), short(entity.EntityID))
+
+	mustHitSource(ctx, graph, "Object email source EVD-7003", "auto-indexed email object", "object:objects/acme/email.eml")
+	mustHitSource(ctx, graph, "Object DOCX source POLICY-9000", "auto-indexed docx object", "object:objects/acme/contract.docx")
+	mustHitSource(ctx, graph, "json object source CASE-10001", "auto-indexed json object", "object:objects/acme/metadata.json")
 
 	resp, err := graph.Search(ctx, &kg.KGSearchRequest{Query: "raw-secret-value-not-indexed", Limit: 5})
 	check(err)
@@ -181,6 +197,23 @@ func searchAndGraph(ctx context.Context, graph *kg.KnowledgeGraphEngine) {
 		fmt.Printf("  edge %s -> %s relation=%s confidence=%.2f evidence=%s\n",
 			edge.Source, edge.Target, edge.RelationType, edge.Confidence, edge.Evidence)
 	}
+	materialized, err := graph.MaterializeResourceGraph(ctx, &kg.KGMaterializeRelationsRequest{
+		ResourceGraph: kg.KGResourceGraphRequest{
+			Query:     "CUST-1001 CASE-10001 Acme Corp",
+			Limit:     20,
+			Depth:     1,
+			MinShared: 1,
+		},
+		CreatedBy: "kg-comprehensive-demo",
+	})
+	check(err)
+	fmt.Printf("materialized_relations created=%d skipped=%d\n", materialized.Created, materialized.Skipped)
+	persistent, err := graph.QueryGraph(ctx, &kg.KGGraphQuery{SeedSearch: "CASE-10001", Depth: 2, Limit: 20})
+	check(err)
+	fmt.Printf("persistent_graph nodes=%d relations=%d\n", len(persistent.Nodes), len(persistent.Relations))
+	if len(persistent.Relations) == 0 {
+		panic("expected persistent graph relations after materialization")
+	}
 }
 
 func deleteCleanup(ctx context.Context, graph *kg.KnowledgeGraphEngine) {
@@ -207,6 +240,38 @@ func analytics(graph *kg.KnowledgeGraphEngine) {
 	fmt.Println("-- analytics --")
 	stats := graph.GetAnalytics()
 	fmt.Printf("documents=%d chunks=%d entities=%d\n", stats.TotalDocuments, stats.TotalChunks, stats.TotalEntities)
+}
+
+func mustHit(ctx context.Context, graph *kg.KnowledgeGraphEngine, query, label string) {
+	resp, err := graph.Search(ctx, &kg.KGSearchRequest{Query: query, Limit: 5, Fuzzy: true, FuzzyMaxEdits: 1})
+	check(err)
+	if resp.TotalHits == 0 {
+		panic(fmt.Sprintf("%s query %q returned no hits", label, query))
+	}
+	fmt.Printf("verified %s hit: query=%q source=%s\n", label, query, resp.Hits[0].Source)
+}
+
+func mustHitSource(ctx context.Context, graph *kg.KnowledgeGraphEngine, query, label, sourceContains string) {
+	resp, err := graph.Search(ctx, &kg.KGSearchRequest{Query: query, Limit: 10, Fuzzy: true, FuzzyMaxEdits: 1})
+	check(err)
+	for _, hit := range resp.Hits {
+		if strings.Contains(hit.Source, sourceContains) {
+			fmt.Printf("verified %s hit: query=%q source=%s\n", label, query, hit.Source)
+			return
+		}
+	}
+	panic(fmt.Sprintf("%s query %q returned no hit from source containing %q", label, query, sourceContains))
+}
+
+func buildDocx(text string) []byte {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("word/document.xml")
+	check(err)
+	_, err = w.Write([]byte(`<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>` + text + `</w:t></w:r></w:p></w:body></w:document>`))
+	check(err)
+	check(zw.Close())
+	return buf.Bytes()
 }
 
 func short(id string) string {
