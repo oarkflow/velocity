@@ -104,6 +104,7 @@ Command:
 
 ```bash
 go run ./examples/kv_search_cookbook
+go run ./examples/reactive_watch_hooks
 go run ./examples/encrypted_search_demo
 go run ./examples/fulltext_demo
 ```

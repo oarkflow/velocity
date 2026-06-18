@@ -26,6 +26,7 @@ That script demonstrates explicit KG ingestion, automatic indexing from normal K
 
 - `examples/main/main.go`: basic embedded usage.
 - `examples/kv_search_cookbook/main.go`: KV search cookbook.
+- `examples/reactive_watch_hooks/main.go`: reactive key, prefix, query watches, subscription lifecycle, and callback hooks.
 - `examples/encrypted_search_demo/main.go`: encrypted search flow.
 - `examples/fulltext_demo/main.go`: full-text search behavior.
 - `examples/search_index_large_demo/main.go`: larger indexed search workload.

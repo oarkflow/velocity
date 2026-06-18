@@ -41,6 +41,23 @@ Core durability mechanisms:
 
 Avoid disabling WAL, fsync, encryption, or close flush outside controlled benchmarks.
 
+## Disaster-Recovery Test Gate
+
+Before a production release, run the reliability suite from the repository root:
+
+```bash
+make reliability-full
+```
+
+For deeper pre-release validation:
+
+```bash
+VELOCITY_DESTRUCTIVE_SOAK_ITERS=1200 make reliability-soak
+make reliability-race
+```
+
+The gate exercises normal and negative conditions: crash-style child-process kills, WAL replay, WAL rotation/truncation, flush checkpoint recovery, corrupted WAL/SSTable rejection, backup restore, tampered backup rejection, SQL transaction crash recovery, reactive watch determinism, web API/security regressions, and example smoke tests.
+
 ## Backup And Restore
 
 Use the embedded backup APIs:
@@ -85,4 +102,3 @@ Source includes:
 - Decommission manager.
 
 Some of these are library building blocks and must be wired by the host application.
-

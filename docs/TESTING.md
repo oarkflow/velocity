@@ -31,6 +31,37 @@ go test ./...
 
 ## Heavier Checks
 
+Reliability and disaster-recovery gate:
+
+```bash
+./scripts/reliability_suite.sh quick
+./scripts/reliability_suite.sh full
+./scripts/reliability_suite.sh soak
+./scripts/reliability_suite.sh race
+```
+
+Equivalent Make targets:
+
+```bash
+make reliability
+make reliability-full
+make reliability-soak
+make reliability-race
+```
+
+Tiers:
+
+- `quick`: focused KV durability, WAL replay/rotation/truncation, corruption rejection, backup/restore, reactive determinism, SQL transaction durability, web API/security tests, and the reactive example smoke test.
+- `full`: `quick` plus the root package suite, examples compile/test suite, and destructive crash/corruption tests for KV and SQL.
+- `soak`: `full` plus longer destructive child-process crash matrices. Tune with `VELOCITY_DESTRUCTIVE_SOAK_ITERS=1200`.
+- `race`: focused reliability-sensitive suites under Go's race detector.
+
+Opt into the million-row SQL workload during soak:
+
+```bash
+VELOCITY_RELIABILITY_MILLION=1 ./scripts/reliability_suite.sh soak
+```
+
 Production suite:
 
 ```bash
@@ -69,5 +100,4 @@ make test-million-sql
 
 ## Current Makefile Caveat
 
-Some Makefile targets reference `cmd/secretr` and `internal/secretr`, which are absent or empty in this checkout. Prefer direct `go test` commands above unless those paths are restored.
-
+Some legacy Makefile targets reference `cmd/secretr` and `internal/secretr`, which are absent or empty in this checkout. The `reliability*`, `test-production`, `test-destructive`, `test-soak`, and direct `go test` commands above target the current Velocity packages.

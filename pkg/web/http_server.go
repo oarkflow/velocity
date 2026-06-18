@@ -1,9 +1,12 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -104,6 +107,7 @@ func (s *HTTPServer) setupRoutes() {
 	api.Delete("/delete/:key", s.handleDelete)
 	api.Post("/indexed", s.handlePutIndexed)
 	api.Post("/search", s.handleSearch)
+	api.Get("/watch", s.handleWatch)
 
 	api.Post("/put", s.handlePut)
 	api.Get("/get/:key", s.handleGet)
@@ -345,6 +349,98 @@ func (s *HTTPServer) handleDelete(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"status": "ok",
 	})
+}
+
+func (s *HTTPServer) handleWatch(c fiber.Ctx) error {
+	key := c.Query("key")
+	prefix := c.Query("prefix")
+	if key != "" && prefix != "" {
+		return fiber.NewError(fiber.StatusBadRequest, "Use key or prefix, not both")
+	}
+	buffer := fiber.Query[int](c, "buffer", 64)
+	if buffer < 1 {
+		buffer = 1
+	}
+	heartbeatSeconds := fiber.Query[int](c, "heartbeat_seconds", 0)
+
+	filter := velocity.WatchFilter{}
+	if key != "" {
+		filter.Key = []byte(key)
+	} else if prefix != "" {
+		filter.Prefix = []byte(prefix)
+	}
+
+	c.Set(fiber.HeaderContentType, "text/event-stream")
+	c.Set(fiber.HeaderCacheControl, "no-cache")
+	c.Set(fiber.HeaderConnection, "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	ctx, cancel := context.WithCancel(c.Context())
+	events := s.db.Watch(ctx, filter, buffer)
+
+	return c.SendStreamWriter(func(w *bufio.Writer) {
+		defer cancel()
+		if _, err := w.WriteString(": connected\n\n"); err != nil {
+			return
+		}
+		if err := w.Flush(); err != nil {
+			return
+		}
+
+		var heartbeatC <-chan time.Time
+		var heartbeat *time.Ticker
+		if heartbeatSeconds > 0 {
+			heartbeat = time.NewTicker(time.Duration(heartbeatSeconds) * time.Second)
+			heartbeatC = heartbeat.C
+			defer heartbeat.Stop()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-heartbeatC:
+				if _, err := w.WriteString(": heartbeat\n\n"); err != nil {
+					return
+				}
+				if err := w.Flush(); err != nil {
+					return
+				}
+			case event, ok := <-events:
+				if !ok {
+					return
+				}
+				if err := writeWatchSSE(w, event); err != nil {
+					return
+				}
+			}
+		}
+	})
+}
+
+func writeWatchSSE(w *bufio.Writer, event velocity.WatchEvent) error {
+	payload := struct {
+		Sequence  uint64 `json:"sequence"`
+		Type      string `json:"type"`
+		Key       string `json:"key"`
+		Value     string `json:"value,omitempty"`
+		Timestamp uint64 `json:"timestamp"`
+		Deleted   bool   `json:"deleted"`
+	}{
+		Sequence:  event.Sequence,
+		Type:      event.Type,
+		Key:       string(event.Key),
+		Value:     string(event.Value),
+		Timestamp: event.Timestamp,
+		Deleted:   event.Deleted,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.Type, data); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 func (s *HTTPServer) handlePutIndexed(c fiber.Ctx) error {

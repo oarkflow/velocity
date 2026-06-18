@@ -12,8 +12,9 @@ TMP_SANDBOX_HOME ?= $(ROOT_DIR)/.tmp_make_sandbox_home
 
 VELOCITY_SQL_MILLION_ROWS ?= 1000000
 VELOCITY_SQL_MILLION_CHUNK ?= 50000
+VELOCITY_DESTRUCTIVE_SOAK_ITERS ?= 800
 
-.PHONY: help build build-secretr build-velocity test test-cli test-cli-commands test-go test-production test-destructive test-soak test-million-sql run-sql-million-example test-all sandbox-smoke clean
+.PHONY: help build build-secretr build-velocity test test-cli test-cli-commands test-go test-production test-destructive test-soak test-million-sql run-sql-million-example reliability reliability-full reliability-soak reliability-race test-all sandbox-smoke clean
 
 help:
 	@echo "Targets:"
@@ -29,6 +30,10 @@ help:
 	@echo "  make test-soak      - Run longer destructive crash/corruption soak tests"
 	@echo "  make test-million-sql - Run the opt-in 1M-row SQL workload"
 	@echo "  make run-sql-million-example - Run the 1M-row SQL example"
+	@echo "  make reliability    - Run quick DB reliability/DR/negative-condition gate"
+	@echo "  make reliability-full - Run full reliability gate including destructive tests"
+	@echo "  make reliability-soak - Run full reliability gate plus longer destructive soak"
+	@echo "  make reliability-race - Run focused reliability tests under the race detector"
 	@echo "  make test-all       - Run CLI and Go tests"
 	@echo "  make sandbox-smoke  - Run sandbox exec smoke checks"
 	@echo "  make clean          - Remove temporary test/build artifacts"
@@ -95,6 +100,18 @@ test-million-sql:
 
 run-sql-million-example:
 	cd examples && VELOCITY_SQL_MILLION_ROWS="$(VELOCITY_SQL_MILLION_ROWS)" VELOCITY_SQL_MILLION_CHUNK="$(VELOCITY_SQL_MILLION_CHUNK)" go run ./sql_million_demo
+
+reliability:
+	bash ./scripts/reliability_suite.sh quick
+
+reliability-full:
+	bash ./scripts/reliability_suite.sh full
+
+reliability-soak:
+	VELOCITY_DESTRUCTIVE_SOAK_ITERS="$(VELOCITY_DESTRUCTIVE_SOAK_ITERS)" bash ./scripts/reliability_suite.sh soak
+
+reliability-race:
+	bash ./scripts/reliability_suite.sh race
 
 test-all: test-cli-commands test-cli test-go
 

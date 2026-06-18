@@ -122,8 +122,12 @@ func (db *DB) PutIndexed(key, value []byte, schema *SearchSchema) error {
 	}
 
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
-	return db.putIndexedLocked(key, value, schema)
+	err := db.putIndexedLocked(key, value, schema)
+	db.mutex.Unlock()
+	if err == nil {
+		db.publishPut(key, value, uint64(time.Now().UnixNano()))
+	}
+	return err
 }
 
 func (db *DB) PutWithIndexFieldPairs(key, value []byte, fields []IndexFieldValue) error {
@@ -132,18 +136,28 @@ func (db *DB) PutWithIndexFieldPairs(key, value []byte, fields []IndexFieldValue
 	}
 
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
 
 	prefix, schema := db.schemaForKeyLocked(key)
 	if schema == nil {
-		return db.put(key, value)
-	}
-	if err := db.put(key, value); err != nil {
+		err := db.put(key, value)
+		db.mutex.Unlock()
+		if err == nil {
+			db.publishPut(key, value, uint64(time.Now().UnixNano()))
+		}
 		return err
 	}
-	return db.indexEntryWithProjectionsLocked(key, value, prefix, schema, func() ([]string, map[string]string, map[string]string) {
+	if err := db.put(key, value); err != nil {
+		db.mutex.Unlock()
+		return err
+	}
+	err := db.indexEntryWithProjectionsLocked(key, value, prefix, schema, func() ([]string, map[string]string, map[string]string) {
 		return buildIndexProjectionsFromFieldPairs(fields, schema)
 	})
+	db.mutex.Unlock()
+	if err == nil {
+		db.publishPut(key, value, uint64(time.Now().UnixNano()))
+	}
+	return err
 }
 
 // SetSearchSchema updates the default schema used by Put().
@@ -646,8 +660,12 @@ func (db *DB) DeleteIndexed(key []byte) error {
 	}
 
 	db.mutex.Lock()
-	defer db.mutex.Unlock()
-	return db.deleteIndexedLocked(key)
+	err := db.deleteIndexedLocked(key)
+	db.mutex.Unlock()
+	if err == nil {
+		db.publishDelete(key, uint64(time.Now().UnixNano()))
+	}
+	return err
 }
 
 func (db *DB) deleteIndexedLocked(key []byte) error {

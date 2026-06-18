@@ -110,6 +110,15 @@ type DB struct {
 	// Knowledge Graph engine
 	kg          *kg.KnowledgeGraphEngine
 	kgAutoIndex *KGAutoIndexer
+
+	// Reactive subscriptions
+	watchMu        sync.RWMutex
+	watchKeys      map[string]map[uint64]*watcher
+	watchPrefixes  map[string]map[uint64]*watcher
+	watchAll       map[uint64]*watcher
+	activeWatchers int64
+	nextWatcherID  uint64
+	nextSequence   uint64
 }
 
 var defaultPath = "./data/velocity"
@@ -345,6 +354,9 @@ func NewWithConfig(cfg Config) (*DB, error) {
 		disableWAL:              cfg.DisableWAL,
 		skipCloseFlush:          cfg.SkipCloseFlush,
 		disableIndexPersistence: cfg.DisableIndexPersistence && cfg.DisableWAL,
+		watchKeys:               make(map[string]map[uint64]*watcher),
+		watchPrefixes:           make(map[string]map[uint64]*watcher),
+		watchAll:                make(map[uint64]*watcher),
 	}
 	if db.nodeID == "" {
 		host, _ := os.Hostname()
@@ -597,6 +609,7 @@ func (db *DB) Put(key, value []byte) error {
 				go db.flushMemTable()
 			}
 		}
+		db.publishPut(key, value, uint64(time.Now().UnixNano()))
 		db.kgAutoIndexKV(key, value)
 		return nil
 	}
@@ -608,6 +621,7 @@ func (db *DB) Put(key, value []byte) error {
 			err = db.putIndexedLocked(key, value, schema)
 			db.mutex.Unlock()
 			if err == nil {
+				db.publishPut(key, value, uint64(time.Now().UnixNano()))
 				db.kgAutoIndexKV(key, value)
 			}
 			return err
@@ -616,6 +630,7 @@ func (db *DB) Put(key, value []byte) error {
 	err = db.put(key, value)
 	db.mutex.Unlock()
 	if err == nil {
+		db.publishPut(key, value, uint64(time.Now().UnixNano()))
 		db.kgAutoIndexKV(key, value)
 	}
 	return err
@@ -665,6 +680,7 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	}
 
 	// Return entry buffer to pool
+	timestamp := e.Timestamp
 	entryPool.Put(e)
 	if db.memTable.Size() > db.memTableSize {
 		// Only trigger flush if not already flushing
@@ -674,6 +690,7 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 	}
 
 	db.mutex.Unlock()
+	db.publishPut(key, value, timestamp)
 	db.kgAutoIndexKV(key, value)
 	return nil
 }
@@ -811,6 +828,7 @@ func (db *DB) Delete(key []byte) error {
 		err = db.deleteIndexedLocked(key)
 		db.mutex.Unlock()
 		if err == nil {
+			db.publishDelete(key, uint64(time.Now().UnixNano()))
 			db.kgAutoDeleteKV(key)
 		}
 		return err
@@ -818,6 +836,7 @@ func (db *DB) Delete(key []byte) error {
 	err = db.deleteLocked(key)
 	db.mutex.Unlock()
 	if err == nil {
+		db.publishDelete(key, uint64(time.Now().UnixNano()))
 		db.kgAutoDeleteKV(key)
 	}
 	return err

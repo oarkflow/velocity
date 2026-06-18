@@ -435,6 +435,8 @@ func (bw *BatchWriter) flushUnsafe() error {
 		}
 	}
 
+	bw.db.publishEntries(bw.entries)
+
 	// Reset batch - reuse underlying array
 	bw.entries = bw.entries[:0]
 	bw.indexFieldPairs = bw.indexFieldPairs[:0]
