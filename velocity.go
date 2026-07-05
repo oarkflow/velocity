@@ -200,8 +200,14 @@ type Config struct {
 	NodeID             string                   // Unique identifier for this node
 	JWTSecret          string                   // Secret for API authentication
 
+	// Security options - encryption is opt-in. By default velocity runs
+	// unencrypted for maximum performance; set EnableEncryption to turn on
+	// at-rest encryption (XChaCha20-Poly1305). Providing MasterKey,
+	// EncryptionKey, or a MasterKeyConfig also enables encryption implicitly.
+	EnableEncryption bool
+
 	// Performance options - disable for maximum throughput benchmarks
-	DisableEncryption       bool // Skip encryption/decryption (INSECURE - benchmarks only)
+	DisableEncryption       bool // Deprecated: encryption is disabled by default; forces encryption off even if key material is provided
 	DisableWAL              bool // Skip WAL writes (data loss risk - benchmarks only)
 	DisableFsync            bool // Skip fsync on WAL writes (data loss risk on crash)
 	DisableIndexPersistence bool // Keep derived search indexes in memory only (benchmarks only)
@@ -224,6 +230,22 @@ type Config struct {
 const (
 	DefaultMaxUploadSize = 100 * 1024 * 1024 // 100 MB
 )
+
+// encryptionEnabled reports whether this configuration should open the
+// database with at-rest encryption. Encryption is opt-in: it is active when
+// EnableEncryption is set or when explicit key material is provided, unless
+// DisableEncryption forces it off.
+func (cfg *Config) encryptionEnabled() bool {
+	if cfg.DisableEncryption {
+		return false
+	}
+	if cfg.EnableEncryption {
+		return true
+	}
+	return len(cfg.MasterKey) > 0 ||
+		len(cfg.EncryptionKey) > 0 ||
+		cfg.MasterKeyConfig != (MasterKeyConfig{})
+}
 
 func New(path ...string) (*DB, error) {
 	cfg := Config{}
@@ -258,12 +280,26 @@ func NewWithConfig(cfg Config) (*DB, error) {
 	var masterKeyManager *MasterKeyManager
 	var wal *WAL
 
-	if cfg.DisableEncryption {
-		// Use no-op crypto for maximum benchmark throughput
+	if !cfg.encryptionEnabled() {
+		// Encryption disabled (the default): use the zero-overhead no-op
+		// crypto provider. Refuse to open a database that was created with
+		// encryption enabled — its data would be unreadable garbage.
+		if hasKeyMarker(currentPath) {
+			return nil, fmt.Errorf("velocity: database at %s was created with encryption enabled; set Config.EnableEncryption (or the --encrypt flag) and provide the same key to open it", currentPath)
+		}
+		if err := createPlaintextMarker(currentPath); err != nil {
+			return nil, err
+		}
 		cryptoProvider = newNoopCryptoProvider()
 		key = cryptoProvider.masterKey
 		masterKeyManager = nil
 	} else {
+		// Refuse to open a plaintext database with encryption enabled — the
+		// existing data was never encrypted and reads would fail to decrypt.
+		if hasPlaintextMarker(currentPath) {
+			return nil, fmt.Errorf("velocity: database at %s was created without encryption; open it with encryption disabled or migrate it to a new encrypted database", currentPath)
+		}
+
 		// Initialize master key configuration if not provided
 		if cfg.MasterKeyConfig == (MasterKeyConfig{}) {
 			cfg.MasterKeyConfig = DefaultMasterKeyConfig()

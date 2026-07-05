@@ -228,6 +228,9 @@ func (cp *CryptoProvider) EncryptStream(plaintext []byte, aad []byte) ([]byte, e
 
 // DecryptStream decrypts data that was encrypted with EncryptStream
 func (cp *CryptoProvider) DecryptStream(data []byte, aad []byte) ([]byte, error) {
+	if cp.noop {
+		return data, nil
+	}
 	if len(data) < chacha20poly1305.NonceSizeX {
 		return nil, fmt.Errorf("invalid encrypted data: too short")
 	}
@@ -325,6 +328,10 @@ func (cp *CryptoProvider) NewDecryptReader(r io.Reader, aad []byte) *DecryptRead
 func (dr *DecryptReader) Read(p []byte) (n int, err error) {
 	if dr.err != nil {
 		return 0, dr.err
+	}
+	if dr.cp.noop {
+		// Data was written as plaintext; pass it through untouched.
+		return dr.r.Read(p)
 	}
 
 	if len(dr.buf) == 0 {
@@ -467,6 +474,26 @@ func verifyKeyMarker(dbPath string, key []byte) error {
 // hasKeyMarker checks if a key marker file exists
 func hasKeyMarker(dbPath string) bool {
 	markerPath := filepath.Join(dbPath, keyMarkerFilename)
+	_, err := os.Stat(markerPath)
+	return err == nil
+}
+
+// plaintextMarkerFilename marks a database created without encryption so it
+// cannot be accidentally reopened in encrypted mode (and vice versa).
+const plaintextMarkerFilename = "plaintext.marker"
+
+// createPlaintextMarker records that this database stores data unencrypted.
+func createPlaintextMarker(dbPath string) error {
+	markerPath := filepath.Join(dbPath, plaintextMarkerFilename)
+	if _, err := os.Stat(markerPath); err == nil {
+		return nil
+	}
+	return os.WriteFile(markerPath, []byte("velocity-plaintext-database-v1\n"), 0600)
+}
+
+// hasPlaintextMarker checks if this database was created without encryption.
+func hasPlaintextMarker(dbPath string) bool {
+	markerPath := filepath.Join(dbPath, plaintextMarkerFilename)
 	_, err := os.Stat(markerPath)
 	return err == nil
 }

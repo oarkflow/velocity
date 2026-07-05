@@ -193,11 +193,11 @@ func (em *EntityManager) CreateEntity(ctx context.Context, req *EntityRequest) (
 
 	// Encrypt data if requested
 	if req.Encrypt && em.db.crypto != nil && len(entity.Data) > 0 {
-		nonce, ciphertext, err := em.db.crypto.Encrypt(entity.Data, []byte(entityID))
+		encrypted, err := em.db.crypto.EncryptStream(entity.Data, []byte(entityID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt entity data: %w", err)
 		}
-		entity.EncryptedData = append(nonce, ciphertext...)
+		entity.EncryptedData = encrypted
 		entity.Data = nil // Clear plaintext data
 	}
 
@@ -293,11 +293,11 @@ func (em *EntityManager) UpdateEntity(ctx context.Context, entityID string, req 
 
 	// Encrypt data if requested
 	if req.Encrypt && em.db.crypto != nil && len(existing.Data) > 0 {
-		nonce, ciphertext, err := em.db.crypto.Encrypt(existing.Data, []byte(entityID))
+		encrypted, err := em.db.crypto.EncryptStream(existing.Data, []byte(entityID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt entity data: %w", err)
 		}
-		existing.EncryptedData = append(nonce, ciphertext...)
+		existing.EncryptedData = encrypted
 		existing.Data = nil // Clear plaintext data
 	}
 
@@ -690,12 +690,7 @@ func (em *EntityManager) loadEntity(entityID string) (*Entity, error) {
 
 	// Decrypt data if encrypted
 	if entity.Encrypted && em.db.crypto != nil && len(entity.EncryptedData) > 0 {
-		if len(entity.EncryptedData) < 24 {
-			return nil, fmt.Errorf("invalid encrypted data")
-		}
-		nonce := entity.EncryptedData[:24]
-		ciphertext := entity.EncryptedData[24:]
-		plaintext, err := em.db.crypto.Decrypt(nonce, ciphertext, []byte(entityID))
+		plaintext, err := em.db.crypto.DecryptStream(entity.EncryptedData, []byte(entityID))
 		if err != nil {
 			return nil, err
 		}

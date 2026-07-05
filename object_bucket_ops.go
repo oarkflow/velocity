@@ -18,13 +18,10 @@ func (db *DB) EncryptCredentialSecret(accessKeyID, secret string) (string, error
 	if db.crypto == nil {
 		return secret, nil
 	}
-	nonce, ciphertext, err := db.crypto.Encrypt([]byte(secret), []byte(accessKeyID))
+	sealed, err := db.crypto.EncryptStream([]byte(secret), []byte(accessKeyID))
 	if err != nil {
 		return "", err
 	}
-	sealed := make([]byte, 0, len(nonce)+len(ciphertext))
-	sealed = append(sealed, nonce...)
-	sealed = append(sealed, ciphertext...)
 	return fmt.Sprintf("%x", sealed), nil
 }
 
@@ -33,12 +30,9 @@ func (db *DB) DecryptCredentialSecret(accessKeyID, encrypted string) (string, er
 	if err != nil {
 		return "", err
 	}
-	if len(sealed) < 24 {
-		return "", fmt.Errorf("credential secret is malformed")
-	}
-	plain, err := db.crypto.Decrypt(sealed[:24], sealed[24:], []byte(accessKeyID))
+	plain, err := db.crypto.DecryptStream(sealed, []byte(accessKeyID))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("credential secret is malformed: %w", err)
 	}
 	return string(plain), nil
 }

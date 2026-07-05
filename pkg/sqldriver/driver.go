@@ -127,6 +127,16 @@ func parseDSN(dsn string) (*velocity.Config, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
+		if raw := values.Get("encrypt"); raw != "" {
+			enabled, err := strconv.ParseBool(raw)
+			if err != nil {
+				return nil, "", err
+			}
+			config.EnableEncryption = enabled
+			if !enabled {
+				config.DisableEncryption = true
+			}
+		}
 		if raw := values.Get("query_cache"); raw != "" {
 			enabled, err := strconv.ParseBool(raw)
 			if err != nil {

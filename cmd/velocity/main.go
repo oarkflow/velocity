@@ -20,11 +20,16 @@ func main() {
 }
 
 func run() error {
+	encrypt := encryptionRequested(os.Args[1:])
+
 	cfg := &velocity.Config{
-		Path: getDBPath(),
-		MasterKeyConfig: velocity.MasterKeyConfig{
+		Path:             getDBPath(),
+		EnableEncryption: encrypt,
+	}
+	if encrypt {
+		cfg.MasterKeyConfig = velocity.MasterKeyConfig{
 			Source: velocity.SystemFile,
-		},
+		}
 	}
 
 	db, err := velocity.NewWithConfig(*cfg)
@@ -37,11 +42,43 @@ func run() error {
 	return app.Run(context.Background(), os.Args)
 }
 
+// encryptionRequested resolves the encryption toggle before the CLI parses
+// flags, because the database must be opened first. Encryption is disabled by
+// default; VELOCITY_ENCRYPT or a global --encrypt flag (before the
+// subcommand) turns it on.
+func encryptionRequested(args []string) bool {
+	enabled := false
+	if raw := os.Getenv("VELOCITY_ENCRYPT"); raw != "" {
+		if v, err := strconv.ParseBool(raw); err == nil {
+			enabled = v
+		}
+	}
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			break // global flags end at the first subcommand
+		}
+		switch arg {
+		case "--encrypt", "--encrypt=true":
+			enabled = true
+		case "--encrypt=false":
+			enabled = false
+		}
+	}
+	return enabled
+}
+
 func buildApp(db *velocity.DB) *cli.Command {
 	return &cli.Command{
 		Name:                 "velocity",
 		Usage:                "Secure database CLI",
 		EnableShellCompletion: true,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:    "encrypt",
+				Usage:   "Enable at-rest encryption (disabled by default; also via VELOCITY_ENCRYPT)",
+				Sources: cli.EnvVars("VELOCITY_ENCRYPT"),
+			},
+		},
 		Commands: []*cli.Command{
 			dataCmd(db),
 			secretCmd(db),

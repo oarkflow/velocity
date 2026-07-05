@@ -1,12 +1,12 @@
 # Velocity
 
-Velocity is an embedded Go storage engine and server toolkit that combines an encrypted key/value database with object storage, SQL access, search indexing, compliance controls, secure envelopes, and knowledge graph capabilities.
+Velocity is an embedded Go storage engine and server toolkit that combines a high-performance key/value database with object storage, SQL access, search indexing, compliance controls, secure envelopes, and knowledge graph capabilities. Encryption at rest is available behind an opt-in flag; by default Velocity runs unencrypted for maximum throughput while keeping WAL durability and fsync enabled for fault tolerance.
 
 The main Go module is `github.com/oarkflow/velocity` and currently declares Go `1.26.0`.
 
 ## What Is Included
 
-- Embedded encrypted KV database with WAL, memtables, SSTables, TTL, scans, pagination, increments, batch writes, cache modes, and graceful shutdown.
+- Embedded KV database with WAL, memtables, SSTables, TTL, scans, pagination, increments, batch writes, cache modes, graceful shutdown, and opt-in at-rest encryption (XChaCha20-Poly1305).
 - SQL driver under `pkg/sqldriver` registered as `velocity` for use with `database/sql`.
 - Native object and folder storage with metadata, ACLs, versioning, object lock, previews, thumbnails, and repair paths.
 - S3-compatible package and route layer with SigV4 authentication, buckets, objects, range reads, multipart upload, tagging, presigned URLs, and bucket-level features.
@@ -48,13 +48,34 @@ func main() {
 }
 ```
 
+### Encryption Is Opt-In
+
+By default Velocity stores data unencrypted for maximum performance. Enable at-rest encryption with a flag:
+
+```go
+// Encrypted database (also implied by providing MasterKey/EncryptionKey/MasterKeyConfig)
+db, err := velocity.NewWithConfig(velocity.Config{
+	Path:             "./velocity_data",
+	EnableEncryption: true,
+})
+```
+
+A database created in one mode cannot be opened in the other: Velocity writes a `plaintext.marker` or `key.marker` at creation time and refuses cross-mode opens rather than serving unreadable data. Migrate by copying data into a fresh database opened in the desired mode.
+
 Build the minimal CLI:
 
 ```bash
 go build -o velocity ./cmd/velocity
 ./velocity data put hello world
 ./velocity data get hello
+
+# Encrypted mode: pass the global --encrypt flag (before the subcommand)
+# or set VELOCITY_ENCRYPT=true
+./velocity --encrypt data put hello world
+./velocity --encrypt data get hello
 ```
+
+The SQL driver accepts an `encrypt` DSN parameter: `velocity://./data?encrypt=true`.
 
 Run the HTTP/TCP server module:
 

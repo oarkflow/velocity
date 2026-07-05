@@ -49,10 +49,10 @@ require (
 	github.com/oarkflow/convert v0.0.5 // indirect
 	github.com/oarkflow/date v0.0.4 // indirect
 	github.com/oarkflow/licensing v0.0.34 // indirect
-	github.com/oarkflow/money v0.0.2 // indirect
+	github.com/oarkflow/money v0.0.3 // indirect
 	github.com/oarkflow/previewer v0.0.7 // indirect
 	github.com/oarkflow/shamir v0.0.2 // indirect
-	github.com/oarkflow/sqlparser v0.0.0-20260322160025-9e8f05a7da94 // indirect
+	github.com/oarkflow/sqlparser v0.0.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.16.0 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect

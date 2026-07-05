@@ -238,13 +238,10 @@ func (db *DB) sealSecretRecord(rec *SecretRecord, value []byte) error {
 	sum := sha256.Sum256(value)
 	rec.Checksum = hex.EncodeToString(sum[:])
 	if db.crypto != nil {
-		nonce, ciphertext, err := db.crypto.Encrypt(value, []byte(rec.Name+":"+rec.Version))
+		sealed, err := db.crypto.EncryptStream(value, []byte(rec.Name+":"+rec.Version))
 		if err != nil {
 			return err
 		}
-		sealed := make([]byte, 0, len(nonce)+len(ciphertext))
-		sealed = append(sealed, nonce...)
-		sealed = append(sealed, ciphertext...)
 		rec.EncryptedValue = hex.EncodeToString(sealed)
 		rec.Value = nil
 		rec.KeyID = "db-master"
@@ -265,10 +262,11 @@ func (db *DB) openSecretRecord(rec *SecretRecord) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(sealed) < 24 {
-		return nil, fmt.Errorf("secret record is malformed")
+	plaintext, err := db.crypto.DecryptStream(sealed, []byte(rec.Name+":"+rec.Version))
+	if err != nil {
+		return nil, fmt.Errorf("secret record is malformed: %w", err)
 	}
-	return db.crypto.Decrypt(sealed[:24], sealed[24:], []byte(rec.Name+":"+rec.Version))
+	return plaintext, nil
 }
 
 func (db *DB) saveSecretRecord(rec *SecretRecord) error {
