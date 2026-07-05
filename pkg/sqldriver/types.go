@@ -107,10 +107,12 @@ func columnTypeFromAST(dt *ast.DataType) (sqlColumnType, error) {
 }
 
 func applyInsertDefaultsAndTypes(table string, meta tableSchemaMeta, data map[string]any, eval *Evaluator) (map[string]any, error) {
-	out := copyStringAnyMap(data)
+	if len(meta.Defaults) == 0 && len(meta.ColumnTypes) == 0 {
+		return data, nil
+	}
 	if len(meta.Defaults) > 0 {
 		for _, col := range meta.Columns {
-			if _, exists := out[col]; exists {
+			if _, exists := data[col]; exists {
 				continue
 			}
 			expr := meta.Defaults[col]
@@ -121,19 +123,31 @@ func applyInsertDefaultsAndTypes(table string, meta tableSchemaMeta, data map[st
 			if err != nil {
 				return nil, fmt.Errorf("velocity driver: default for %s.%s failed: %w", table, col, err)
 			}
-			out[col] = val
+			data[col] = val
 		}
 	}
-	return coerceRowTypes(table, meta, out)
+	if len(meta.ColumnTypes) > 0 {
+		for col, typ := range meta.ColumnTypes {
+			value, exists := data[col]
+			if !exists || value == nil {
+				continue
+			}
+			coerced, err := coerceColumnValue(typ, value)
+			if err != nil {
+				return nil, fmt.Errorf("velocity driver: invalid value for %s.%s (%s): %w", table, col, typ.Name, err)
+			}
+			data[col] = coerced
+		}
+	}
+	return data, nil
 }
 
 func coerceRowTypes(table string, meta tableSchemaMeta, data map[string]any) (map[string]any, error) {
 	if len(meta.ColumnTypes) == 0 {
 		return data, nil
 	}
-	out := copyStringAnyMap(data)
 	for col, typ := range meta.ColumnTypes {
-		value, exists := out[col]
+		value, exists := data[col]
 		if !exists || value == nil {
 			continue
 		}
@@ -141,9 +155,9 @@ func coerceRowTypes(table string, meta tableSchemaMeta, data map[string]any) (ma
 		if err != nil {
 			return nil, fmt.Errorf("velocity driver: invalid value for %s.%s (%s): %w", table, col, typ.Name, err)
 		}
-		out[col] = coerced
+		data[col] = coerced
 	}
-	return out, nil
+	return data, nil
 }
 
 func evalDefaultExpression(expr string, eval *Evaluator) (any, error) {

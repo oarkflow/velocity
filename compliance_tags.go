@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,9 +64,10 @@ type ComplianceResourceRef struct {
 
 // ComplianceTagManager manages compliance tags for paths
 type ComplianceTagManager struct {
-	db   *DB
-	tags map[string][]*ComplianceTag // path -> multiple tags
-	mu   sync.RWMutex
+	db      *DB
+	tags    map[string][]*ComplianceTag // path -> multiple tags
+	mu      sync.RWMutex
+	hasTags atomic.Bool
 
 	consentMgr    *compliance.ConsentManager
 	retentionMgr  *RetentionManager
@@ -220,6 +222,7 @@ func (ctm *ComplianceTagManager) TagPath(ctx context.Context, tag *ComplianceTag
 	// Store in memory - append to support multiple tags per path
 	ctm.tags[tag.Path] = append(ctm.tags[tag.Path], tag)
 	ctm.tags[tag.ResourceID] = append(ctm.tags[tag.ResourceID], tag)
+	ctm.hasTags.Store(true)
 
 	// Persist to database with TagID as unique key
 	data, err := json.Marshal(tag)
@@ -271,6 +274,7 @@ func (ctm *ComplianceTagManager) TagResource(ctx context.Context, ref Compliance
 	if tag.Path != "" {
 		ctm.tags[tag.Path] = append(ctm.tags[tag.Path], tag)
 	}
+	ctm.hasTags.Store(true)
 	data, err := json.Marshal(tag)
 	if err != nil {
 		return fmt.Errorf("failed to marshal tag: %w", err)
@@ -426,6 +430,12 @@ func (ctm *ComplianceTagManager) GetAllTags() []*ComplianceTag {
 
 func (ctm *ComplianceTagManager) HasAnyTags() bool {
 	return len(ctm.GetAllTags()) > 0
+}
+
+// HasAnyTagsFast returns true if any tags have been added, without allocating.
+// Used by hot-path validators to skip compliance checks when no tags exist.
+func (ctm *ComplianceTagManager) HasAnyTagsFast() bool {
+	return ctm.hasTags.Load()
 }
 
 // mergeTags merges multiple tags into a single tag with combined frameworks
@@ -965,6 +975,7 @@ func (ctm *ComplianceTagManager) loadTags() error {
 				ctm.tags[tag.ResourceID] = append(ctm.tags[tag.ResourceID], &tag)
 			}
 		}
+		ctm.hasTags.Store(true)
 	}
 
 	return nil

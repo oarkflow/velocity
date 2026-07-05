@@ -712,7 +712,7 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 
 	// Update cache
 	if db.cache != nil {
-		db.cache.Put(string(key), append([]byte{}, value...))
+		db.cache.Put(string(key), value)
 	}
 
 	// Return entry buffer to pool
@@ -769,7 +769,7 @@ func (db *DB) put(key, value []byte) error {
 
 	// Update cache
 	if db.cache != nil {
-		db.cache.Put(string(key), append([]byte{}, value...))
+		db.cache.Put(string(key), value)
 	}
 
 	if db.memTable.Size() > db.memTableSize {
@@ -808,7 +808,7 @@ func (db *DB) get(key []byte) ([]byte, error) {
 		}
 		value := entry.Value
 		if db.cache != nil {
-			db.cache.Put(keyStr, append([]byte{}, value...))
+			db.cache.Put(keyStr, value)
 		}
 		return value, nil
 	}
@@ -822,7 +822,7 @@ func (db *DB) get(key []byte) ([]byte, error) {
 			}
 			value := entry.Value
 			if db.cache != nil {
-				db.cache.Put(keyStr, append([]byte{}, value...))
+				db.cache.Put(keyStr, value)
 			}
 			return value, nil
 		}
@@ -847,7 +847,7 @@ func (db *DB) get(key []byte) ([]byte, error) {
 				}
 				value := entry.Value
 				if db.cache != nil {
-					db.cache.Put(keyStr, append([]byte{}, value...))
+					db.cache.Put(keyStr, value)
 				}
 				return value, nil
 			}

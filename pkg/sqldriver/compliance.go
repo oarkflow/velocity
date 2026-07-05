@@ -48,6 +48,9 @@ func (e *ExecutorV2) validateSQLColumnsCompliance(ctx context.Context, table str
 }
 
 func validateSQLComplianceRef(ctx context.Context, ctm *velocity.ComplianceTagManager, ref velocity.ComplianceResourceRef, operation string, encrypted bool) error {
+	if !ctm.HasAnyTagsFast() {
+		return nil
+	}
 	result, err := ctm.ValidateResourceOperation(ctx, ref, &velocity.ComplianceOperationRequest{
 		Operation: operation,
 		Actor:     "sql",

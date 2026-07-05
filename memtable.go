@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // Entry represents a key-value pair with metadata
@@ -55,7 +56,7 @@ func (mt *MemTable) Put(key, value []byte) {
 	// Compute checksum without allocating a temporary concatenation
 	entry.checksum = crc32.Update(crc32.ChecksumIEEE(key), crc32.IEEETable, value)
 
-	keyStr := string(key)
+	keyStr := unsafe.String(&entry.Key[0], len(entry.Key))
 	old, loaded := mt.entries.Swap(keyStr, entry)
 	oldSize := int64(0)
 	if loaded {
@@ -77,7 +78,7 @@ func (mt *MemTable) PutEntry(entry *Entry) {
 	e.Deleted = entry.Deleted
 	e.checksum = entry.checksum
 
-	old, loaded := mt.entries.Swap(string(e.Key), e)
+	old, loaded := mt.entries.Swap(unsafe.String(&e.Key[0], len(e.Key)), e)
 	oldSize := int64(0)
 	if loaded {
 		oldSize = storedEntrySize(old)
@@ -179,7 +180,7 @@ func (mt *MemTable) Delete(key []byte) {
 	entry.Deleted = true
 	entry.checksum = crc32.ChecksumIEEE(key)
 
-	mt.entries.Store(string(key), entry)
+	mt.entries.Store(unsafe.String(&entry.Key[0], len(entry.Key)), entry)
 }
 
 // LoadEntries restores a set of entries into the memtable (used during WAL replay).

@@ -1105,7 +1105,7 @@ func (c *Conn) checkInsertConstraintsForData(table string, meta tableSchemaMeta,
 		if hasSeen(txKey) {
 			return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
 		}
-		if c.db.Has([]byte(primaryKey)) {
+		if c.tx == nil && c.db.HasString(primaryKey) {
 			return fmt.Errorf("velocity driver: duplicate primary key on %s.%s", table, meta.PrimaryKey)
 		}
 		markSeen(txKey)

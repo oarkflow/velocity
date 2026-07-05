@@ -24,6 +24,7 @@ type simpleInsertPlan struct {
 	fieldsScratch  []velocity.IndexFieldValue
 	indexScratch   []velocity.IndexFieldValue
 	valuesScratch  []any
+	dataScratch    map[string]any
 	constraints    rawInsertConstraintPlan
 	constraintVer  uint64
 	constraintOK   bool
@@ -73,7 +74,14 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 	if err != nil {
 		return nil, err
 	}
-	data := make(map[string]any, len(p.columns))
+	if p.dataScratch == nil {
+		p.dataScratch = make(map[string]any, len(p.columns))
+	} else {
+		for k := range p.dataScratch {
+			delete(p.dataScratch, k)
+		}
+	}
+	data := p.dataScratch
 	for i, ordinal := range p.paramOrdinals {
 		value, err := namedArgByOrdinal(args, ordinal)
 		if err != nil {
@@ -94,7 +102,7 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 			lastInsertID = int64(id)
 		}
 	}
-	key := []byte(keyString)
+	key := unsafe.Slice(unsafe.StringData(keyString), len(keyString))
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
@@ -111,7 +119,7 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 		copy(ownedKey, key)
 		copy(ownedPayload, payload)
 		if len(ownedKey) > 0 {
-			ownedKeyString = unsafe.String(&ownedKey[0], len(ownedKey))
+			ownedKeyString = string(ownedKey)
 		}
 	}
 	if conn.tx == nil {
@@ -131,7 +139,7 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 	if err := executor.validateSQLRowCompliance(ctx, p.table, string(key), "write", false); err != nil {
 		return nil, err
 	}
-	if err := executor.validateSQLColumnsCompliance(ctx, p.table, mapKeys(data), "write", false); err != nil {
+	if err := executor.validateSQLColumnsCompliance(ctx, p.table, p.columns, "write", false); err != nil {
 		return nil, err
 	}
 	if ownedKeyString != "" {
@@ -145,7 +153,6 @@ func (p *simpleInsertPlan) Exec(ctx context.Context, conn *Conn, args []driver.N
 	if conn.tx == nil {
 		conn.applyKnowledgeGraphMutations([]velocity.Entry{{Key: key, Value: payload}})
 	}
-	p.keyScratch = key[:0]
 	return singleInsertResult(lastInsertID), nil
 }
 
