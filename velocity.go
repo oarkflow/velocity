@@ -1111,7 +1111,7 @@ func (db *DB) incr(key []byte, incr float64, action string) (any, error) {
 func (db *DB) Incr(key []byte, step ...any) (any, error) {
 	var val float64 = 1
 	if len(step) > 0 {
-		if floatVal, ok := convert.ToFloat64(step[0]); ok {
+		if floatVal, err := convert.ToFloat64(step[0]); err == nil {
 			val = floatVal
 		}
 	}
@@ -1121,7 +1121,7 @@ func (db *DB) Incr(key []byte, step ...any) (any, error) {
 func (db *DB) Decr(key []byte, step ...any) (any, error) {
 	var val float64 = 1
 	if len(step) > 0 {
-		if floatVal, ok := convert.ToFloat64(step[0]); ok {
+		if floatVal, err := convert.ToFloat64(step[0]); err == nil {
 			val = floatVal
 		}
 	}

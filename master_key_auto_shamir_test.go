@@ -1,6 +1,7 @@
 package velocity
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -27,7 +28,15 @@ func TestMasterKeyManager_AutoUseShamirShares(t *testing.T) {
 	copy(testKey, []byte("testkeyforvelocitydatabasekey32"))
 
 	// Create Shamir shares
-	shares, err := shamir.Split(testKey, 2, 3)
+	authKey := make([]byte, 32)
+	if _, err := rand.Read(authKey); err != nil {
+		t.Fatalf("Failed to generate Shamir auth key: %v", err)
+	}
+	auth, err := shamir.NewAuthKey(authKey)
+	if err != nil {
+		t.Fatalf("Failed to initialize Shamir auth key: %v", err)
+	}
+	shares, err := shamir.Split(rand.Reader, testKey, 2, 3, auth)
 	if err != nil {
 		t.Fatalf("Failed to create Shamir shares: %v", err)
 	}

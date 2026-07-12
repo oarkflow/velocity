@@ -297,12 +297,6 @@ func (mkm *MasterKeyManager) createShamirShares() ([]byte, error) {
 		}
 	}
 
-	// Split key using Shamir
-	shares, err := shamir.Split(masterKey, mkm.config.ShamirConfig.Threshold, mkm.config.ShamirConfig.TotalShares)
-	if err != nil {
-		return nil, fmt.Errorf("failed to split key: %w", err)
-	}
-
 	// Create shares directory
 	sharesDir := mkm.config.ShamirConfig.SharesPath
 	if sharesDir == "" {
@@ -310,6 +304,14 @@ func (mkm *MasterKeyManager) createShamirShares() ([]byte, error) {
 	}
 	if err := os.MkdirAll(sharesDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create shares directory: %w", err)
+	}
+	auth, err := resolveShamirAuthKey(mkm.config.ShamirConfig.AuthKey)
+	if err != nil {
+		return nil, err
+	}
+	shares, err := shamir.Split(rand.Reader, masterKey, mkm.config.ShamirConfig.Threshold, mkm.config.ShamirConfig.TotalShares, auth)
+	if err != nil {
+		return nil, fmt.Errorf("failed to split key: %w", err)
 	}
 
 	// Save shares to files
@@ -369,7 +371,11 @@ func (mkm *MasterKeyManager) loadShamirShares(sharesDir string) ([]byte, error) 
 	}
 
 	// Try to reconstruct key with all shares
-	masterKey, err := shamir.Combine(allShares)
+	auth, err := resolveShamirAuthKey(mkm.config.ShamirConfig.AuthKey)
+	if err != nil {
+		return nil, err
+	}
+	masterKey, err := shamir.Combine(allShares, auth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reconstruct key: %w", err)
 	}
@@ -408,16 +414,18 @@ func (mkm *MasterKeyManager) ClearCache() {
 
 // createShamirSharesFromKey creates Shamir shares from an existing key
 func (mkm *MasterKeyManager) createShamirSharesFromKey(masterKey []byte, threshold, totalShares int) error {
-	// Split key using Shamir
-	shares, err := shamir.Split(masterKey, threshold, totalShares)
-	if err != nil {
-		return fmt.Errorf("failed to split key: %w", err)
-	}
-
 	// Create shares directory
 	sharesDir := filepath.Join(mkm.dbPath, "key_shares")
 	if err := os.MkdirAll(sharesDir, 0700); err != nil {
 		return fmt.Errorf("failed to create shares directory: %w", err)
+	}
+	auth, err := resolveShamirAuthKey(mkm.config.ShamirConfig.AuthKey)
+	if err != nil {
+		return err
+	}
+	shares, err := shamir.Split(rand.Reader, masterKey, threshold, totalShares, auth)
+	if err != nil {
+		return fmt.Errorf("failed to split key: %w", err)
 	}
 
 	// Save shares to files
@@ -456,6 +464,25 @@ func copyToClipboard(text string) error {
 
 	cmd.Stdin = strings.NewReader(text)
 	return cmd.Run()
+}
+
+func resolveShamirAuthKey(configured string) (*shamir.AuthKey, error) {
+	value := strings.TrimSpace(configured)
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv("VELOCITY_SHAMIR_AUTH_KEY"))
+	}
+	if value == "" {
+		return nil, fmt.Errorf("Shamir authentication key is required in shamir_config.auth_key or VELOCITY_SHAMIR_AUTH_KEY")
+	}
+	key, err := base64.RawStdEncoding.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("Shamir authentication key must be unpadded base64: %w", err)
+	}
+	auth, err := shamir.NewAuthKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Shamir authentication key: %w", err)
+	}
+	return auth, nil
 }
 
 // defaultPromptFunc prompts user for input with hidden input for keys

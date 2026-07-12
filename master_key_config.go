@@ -55,6 +55,10 @@ type ShamirSecretConfig struct {
 
 	// SharesPath is directory to store share files
 	SharesPath string `json:"shares_path"`
+
+	// AuthKey is the base64-encoded HMAC key used to authenticate shares.
+	// VELOCITY_SHAMIR_AUTH_KEY is used when this field is empty.
+	AuthKey string `json:"auth_key,omitempty"`
 }
 
 // DefaultMasterKeyConfig returns sensible defaults
