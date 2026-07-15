@@ -46,12 +46,11 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
-	github.com/oarkflow/convert v0.0.5 // indirect
-	github.com/oarkflow/date v0.0.4 // indirect
+	github.com/oarkflow/convert v0.0.6 // indirect
 	github.com/oarkflow/licensing v0.0.34 // indirect
 	github.com/oarkflow/money v0.0.3 // indirect
 	github.com/oarkflow/previewer v0.0.7 // indirect
-	github.com/oarkflow/shamir v0.0.2 // indirect
+	github.com/oarkflow/shamir v0.0.3 // indirect
 	github.com/oarkflow/sqlparser v0.0.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.16.0 // indirect
@@ -60,10 +59,10 @@ require (
 	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/tidwall/btree v1.8.1 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/term v0.44.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
 )
