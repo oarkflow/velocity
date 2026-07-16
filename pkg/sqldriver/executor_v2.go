@@ -734,6 +734,9 @@ func sqlValueEqual(a, b interface{}) bool {
 }
 
 func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args []driver.NamedValue) (driver.Result, error) {
+	if res, ok, err := e.tryFastPrimaryKeyDelete(ctx, n, args); ok || err != nil {
+		return res, err
+	}
 	rows, err := e.selectMutationRows(ctx, n.From, n.Where, n.Order, n.Limit, args)
 	if err != nil {
 		return nil, err
@@ -771,6 +774,70 @@ func (e *ExecutorV2) executeDelete(ctx context.Context, n *ast.DeleteStmt, args 
 		e.conn.applyKnowledgeGraphMutations(entriesFromKeys(keys, true))
 	}
 	return Result{rowsAffected: int64(len(keys))}, nil
+}
+
+func (e *ExecutorV2) tryFastPrimaryKeyDelete(ctx context.Context, n *ast.DeleteStmt, args []driver.NamedValue) (Result, bool, error) {
+	if n == nil || n.Where == nil || n.Order != nil || n.Limit != nil {
+		return Result{}, false, nil
+	}
+	if len(n.From) != 1 || hasJoinRef(n.From) {
+		return Result{}, false, nil
+	}
+	table, ok := n.From[0].(*ast.SimpleTable)
+	if !ok || table.Alias != nil {
+		return Result{}, false, nil
+	}
+	tableName := qualifiedIdentToString(table.Name)
+	if tableName == "" {
+		return Result{}, false, nil
+	}
+	if _, viewFound, _ := e.loadViewMeta(tableName); viewFound {
+		return Result{}, false, nil
+	}
+	meta, found, err := e.loadTableSchemaMeta(tableName)
+	if err != nil {
+		return Result{}, false, err
+	}
+	primaryKey := "id"
+	if found && meta.PrimaryKey != "" {
+		primaryKey = meta.PrimaryKey
+	}
+	binary, ok := n.Where.(*ast.BinaryExpr)
+	if !ok || binary.Op != lexer.EQ || exprColumnName(binary.Left) != primaryKey {
+		return Result{}, false, nil
+	}
+	if err := e.validateSQLTableCompliance(ctx, tableName, "delete", false); err != nil {
+		return Result{}, false, err
+	}
+	eval := &Evaluator{Args: args, ParamOrder: e.paramOrder}
+	id, err := eval.Eval(binary.Right, nil)
+	if err != nil || id == nil {
+		return Result{}, false, err
+	}
+	if found {
+		if typ, ok := meta.ColumnTypes[primaryKey]; ok {
+			id, err = coerceColumnValue(typ, id)
+			if err != nil {
+				return Result{}, false, err
+			}
+		}
+	}
+	key := appendTableKey(nil, tableName, id)
+	if err := e.validateSQLRowCompliance(ctx, tableName, string(key), "delete", false); err != nil {
+		return Result{}, false, err
+	}
+	if e.conn.tx != nil {
+		if err := e.conn.Delete(key); err != nil {
+			return Result{}, true, err
+		}
+		return Result{rowsAffected: 1}, true, nil
+	}
+	if err := e.conn.db.Delete(key); err != nil {
+		return Result{rowsAffected: 0}, true, nil
+	}
+	e.conn.markRowsChanged([][]byte{key})
+	e.conn.applyKnowledgeGraphMutations([]velocity.Entry{{Key: key, Deleted: true}})
+	return Result{rowsAffected: 1}, true, nil
 }
 
 func deleteTargetTableName(n *ast.DeleteStmt) string {
@@ -1510,7 +1577,9 @@ func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt,
 	}
 	defer root.Close()
 
-	if sel.Where != nil {
+	// Skip the FilterIterator when the search plan fully covers the WHERE clause
+	// because db.Search() already applied the filters via the index.
+	if sel.Where != nil && !planCoversWhere(sel.Where, plan) {
 		root = &FilterIterator{
 			next: root,
 			cond: e.buildWhereCondition(ctx, sel.Where, args),
@@ -1543,6 +1612,38 @@ func (e *ExecutorV2) collectSourceRows(ctx context.Context, sel *ast.SelectStmt,
 		schemaCols = e.defaultStarColumns(sel.From)
 	}
 	return rows, schemaCols, nil
+}
+
+// planCoversWhere returns true when the search plan fully covers the WHERE clause,
+// meaning db.Search() already applied all the filters and a redundant FilterIterator
+// is not needed.
+func planCoversWhere(expr ast.Expr, plan searchPlan) bool {
+	if plan.fullText != "" {
+		return false
+	}
+	if len(plan.filters) == 0 {
+		return false
+	}
+	// Only skip the FilterIterator for simple AND-combined binary comparisons
+	// that match 1:1 with the search plan filters.
+	switch v := expr.(type) {
+	case *ast.BinaryExpr:
+		if v.Op == lexer.AND {
+			return planCoversWhere(v.Left, plan) && planCoversWhere(v.Right, plan)
+		}
+		col := exprColumnName(v.Left)
+		if col == "" {
+			return false
+		}
+		for _, f := range plan.filters {
+			if f.Field == col {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func (e *ExecutorV2) collectSourceRowsWithPlan(ctx context.Context, sel *ast.SelectStmt, args []driver.NamedValue, plan searchPlan, queryLimit int) ([]Row, []string, error) {
