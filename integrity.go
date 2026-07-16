@@ -3,6 +3,7 @@ package velocity
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/oarkflow/velocity/pkg/s3"
@@ -291,39 +292,14 @@ func (im *IntegrityManager) BucketVersioning() *s3.BucketVersioning { return im.
 // helpers
 
 func fileExists(path string) bool {
-	_, err := _osStatForIntegrity(path)
+	_, err := osStatForIntegrity(path)
 	return err == nil
 }
 
-// _osStatForIntegrity wraps os.Stat (indirection for testing)
-var _osStatForIntegrity = _osStat
-
-func _osStat(path string) (interface{}, error) {
-	fi, err := _osStatImpl(path)
-	return fi, err
-}
-
-func _osStatImpl(path string) (interface{}, error) {
-	// use os.Stat
-	type statResult struct{}
-	// simplified existence check
-	f, err := _osOpenForIntegrity(path)
-	if err != nil {
-		return nil, err
-	}
-	f.Close()
-	return nil, nil
-}
-
-var _osOpenForIntegrity = _osOpenImpl
-
-func _osOpenImpl(path string) (*_closerIntf, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-type _closerIntf struct{}
-
-func (c *_closerIntf) Close() error { return nil }
+// osStatForIntegrity is an indirection point for deterministic tests.
+// It defaults to os.Stat and must never be replaced by an open-only check:
+// directories and other valid filesystem objects are legitimate shard paths.
+var osStatForIntegrity = os.Stat
 
 func splitBucketKey(path string) []string {
 	for i, c := range path {

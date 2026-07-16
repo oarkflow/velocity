@@ -2,9 +2,7 @@ package velocity
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -2627,8 +2625,22 @@ func normalizeValue(v any) string {
 }
 
 func hashValue(s string) string {
-	h := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(s))))
-	return hex.EncodeToString(h[:])
+	s = strings.ToLower(strings.TrimSpace(s))
+	// Use FNV-1a for fast hashing. We don't need cryptographic strength here,
+	// just consistent bucketing for index lookups. FNV-1a is ~10x faster than SHA-256.
+	var h uint64 = 14695981039346656037 // FNV offset basis
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211 // FNV prime
+	}
+	// Encode as hex string (16 chars for uint64)
+	var buf [16]byte
+	const hexTable = "0123456789abcdef"
+	for i := 15; i >= 0; i-- {
+		buf[i] = hexTable[h&0xf]
+		h >>= 4
+	}
+	return string(buf[:])
 }
 
 func indexDocIDKey(key []byte) []byte {

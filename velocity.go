@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/oarkflow/convert"
 	"github.com/oarkflow/velocity/pkg/kg"
@@ -636,6 +637,12 @@ func (db *DB) SetPerformanceMode(mode string) {
 }
 
 func (db *DB) Put(key, value []byte) error {
+	if db.closed.Load() {
+		return ErrClosed
+	}
+	if err := validateKV(key, value); err != nil {
+		return err
+	}
 	// Ultra-fast path: when WAL and search index are disabled, skip mutex entirely
 	// sync.Map provides its own thread safety
 	if db.disableWAL && !db.searchIndexEnabled && db.cache == nil {
@@ -674,24 +681,28 @@ func (db *DB) Put(key, value []byte) error {
 
 // PutWithTTL stores a key with a TTL. If ttl <= 0 the key will not expire.
 func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
+	if db.closed.Load() {
+		return ErrClosed
+	}
+	if err := validateKV(key, value); err != nil {
+		return err
+	}
 	db.mutex.Lock()
 
 	// Build entry
 	e := entryPool.Get().(*Entry)
 	e.Key = append(e.Key[:0], key...)
 	e.Value = append(e.Value[:0], value...)
-	e.Timestamp = uint64(time.Now().UnixNano())
+	now := time.Now()
+	e.Timestamp = uint64(now.UnixNano())
 	if ttl > 0 {
-		e.ExpiresAt = uint64(time.Now().Add(ttl).UnixNano())
+		e.ExpiresAt = uint64(now.Add(ttl).UnixNano())
 	} else {
 		e.ExpiresAt = 0
 	}
 	e.Deleted = false
-	// checksum
-	h := crc32.NewIEEE()
-	h.Write(e.Key)
-	h.Write(e.Value)
-	e.checksum = h.Sum32()
+	// Compute checksum without allocating a hash.Hash implementation.
+	e.checksum = crc32.Update(crc32.ChecksumIEEE(e.Key), crc32.IEEETable, e.Value)
 
 	// Write to WAL
 	if !db.disableWAL {
@@ -733,6 +744,9 @@ func (db *DB) PutWithTTL(key, value []byte, ttl time.Duration) error {
 
 // Internal put method without locking - used when already holding a lock
 func (db *DB) put(key, value []byte) error {
+	if err := validateKV(key, value); err != nil {
+		return err
+	}
 	if db.disableWAL {
 		// Fast path: skip entry creation and WAL, write directly to memtable
 		db.memTable.Put(key, value)
@@ -743,11 +757,8 @@ func (db *DB) put(key, value []byte) error {
 		e.Value = append(e.Value[:0], value...)
 		e.Timestamp = uint64(time.Now().UnixNano())
 		e.Deleted = false
-		// Compute checksum using streaming to avoid temporary concatenation
-		h := crc32.NewIEEE()
-		h.Write(e.Key)
-		h.Write(e.Value)
-		e.checksum = h.Sum32()
+		// Compute checksum without allocating a hash.Hash implementation.
+		e.checksum = crc32.Update(crc32.ChecksumIEEE(e.Key), crc32.IEEETable, e.Value)
 
 		// Write to WAL first for durability
 		if db.wal == nil {
@@ -783,81 +794,115 @@ func (db *DB) put(key, value []byte) error {
 }
 
 func (db *DB) Get(key []byte) ([]byte, error) {
-	db.mutex.RLock()
-	defer db.mutex.RUnlock()
-	return db.get(key)
+	return db.GetInto(key, nil)
 }
 
-// Internal get method without locking - used when already holding a lock
+// GetInto appends the value for key to dst. When dst has sufficient capacity,
+// a successful point read performs no result allocation. The returned bytes are
+// owned by the caller and may be safely modified.
+func (db *DB) GetInto(key, dst []byte) ([]byte, error) {
+	if db.closed.Load() {
+		return dst, ErrClosed
+	}
+	if err := validateKey(key); err != nil {
+		return dst, err
+	}
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+	return db.getInto(key, dst)
+}
+
+// Exists reports whether key currently resolves to a live, non-expired value.
+// It avoids materializing a caller-visible value for memtable hits.
+func (db *DB) Exists(key []byte) (bool, error) {
+	if db.closed.Load() {
+		return false, ErrClosed
+	}
+	if err := validateKey(key); err != nil {
+		return false, err
+	}
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	now := uint64(time.Now().UnixNano())
+	if entry := db.memTable.Get(key); entry != nil {
+		return !entry.Deleted && (entry.ExpiresAt == 0 || now <= entry.ExpiresAt), nil
+	}
+	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
+		if entry := db.flushingMemTables[i].Get(key); entry != nil {
+			return !entry.Deleted && (entry.ExpiresAt == 0 || now <= entry.ExpiresAt), nil
+		}
+	}
+	for level := 0; level < len(db.levels); level++ {
+		for i := len(db.levels[level]) - 1; i >= 0; i-- {
+			entry, err := db.levels[level][i].Get(key)
+			if err != nil {
+				return false, err
+			}
+			if entry != nil {
+				return !entry.Deleted && (entry.ExpiresAt == 0 || now <= entry.ExpiresAt), nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// Internal get method without locking - used when already holding a lock.
 func (db *DB) get(key []byte) ([]byte, error) {
-	keyStr := string(key)
+	return db.getInto(key, nil)
+}
+
+func (db *DB) getInto(key, dst []byte) ([]byte, error) {
+	// Use unsafe.String to avoid allocation when converting []byte to string for cache lookup.
+	// This is safe because the cache only reads the string during the Get call.
+	keyStr := unsafe.String(unsafe.SliceData(key), len(key))
 	if db.cache != nil {
-		if val, ok := db.cache.Get(keyStr); ok {
+		if val, ok := db.cache.GetInto(keyStr, dst); ok {
 			return val, nil
 		}
 	}
 
-	// Check memtable first
-	if entry := db.memTable.Get(key); entry != nil {
-		// Check expiry
-		if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
-			return nil, fmt.Errorf("key not found")
+	now := uint64(time.Now().UnixNano())
+	appendEntry := func(entry *Entry) ([]byte, error) {
+		if entry == nil || entry.Deleted || (entry.ExpiresAt != 0 && now > entry.ExpiresAt) {
+			return dst, ErrKeyNotFound
 		}
-		if entry.Deleted {
-			return nil, fmt.Errorf("key not found")
-		}
-		value := entry.Value
+		out := append(dst, entry.Value...)
 		if db.cache != nil {
-			db.cache.Put(keyStr, value)
+			db.cache.Put(keyStr, entry.Value)
 		}
-		return value, nil
+		return out, nil
+	}
+
+	if entry := db.memTable.Get(key); entry != nil {
+		return appendEntry(entry)
 	}
 	for i := len(db.flushingMemTables) - 1; i >= 0; i-- {
 		if entry := db.flushingMemTables[i].Get(key); entry != nil {
-			if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
-				return nil, fmt.Errorf("key not found")
-			}
-			if entry.Deleted {
-				return nil, fmt.Errorf("key not found")
-			}
-			value := entry.Value
-			if db.cache != nil {
-				db.cache.Put(keyStr, value)
-			}
-			return value, nil
+			return appendEntry(entry)
 		}
 	}
-
-	// Check SSTables by level
 	for level := 0; level < len(db.levels); level++ {
-		sstables := db.levels[level]
-		// Search SSTables in reverse order (newest first) within level
-		for i := len(sstables) - 1; i >= 0; i-- {
-			entry, err := sstables[i].Get(key)
+		for i := len(db.levels[level]) - 1; i >= 0; i-- {
+			entry, err := db.levels[level][i].Get(key)
 			if err != nil {
-				return nil, err
+				return dst, err
 			}
 			if entry != nil {
-				// Check expiry
-				if entry.ExpiresAt != 0 && time.Now().UnixNano() > int64(entry.ExpiresAt) {
-					return nil, fmt.Errorf("key not found")
-				}
-				if entry.Deleted {
-					return nil, fmt.Errorf("key not found")
-				}
-				value := entry.Value
-				if db.cache != nil {
-					db.cache.Put(keyStr, value)
-				}
-				return value, nil
+				return appendEntry(entry)
 			}
 		}
 	}
-
-	return nil, fmt.Errorf("key not found")
+	return dst, ErrKeyNotFound
 }
 
 func (db *DB) Delete(key []byte) error {
+	if db.closed.Load() {
+		return ErrClosed
+	}
+	if err := validateKey(key); err != nil {
+		return err
+	}
 	db.mutex.Lock()
 	var err error
 	if db.searchIndexEnabled && !isIndexKey(key) {
@@ -906,6 +951,15 @@ func (db *DB) flushMemTableOnce() (bool, error) {
 	}
 
 	oldMemTable := db.memTable
+	var walCheckpoint int64
+	if db.wal != nil {
+		var err error
+		walCheckpoint, err = db.wal.Checkpoint()
+		if err != nil {
+			db.mutex.Unlock()
+			return false, fmt.Errorf("checkpoint WAL before memtable flush: %w", err)
+		}
+	}
 	db.memTable = NewMemTable()
 	db.flushingMemTables = append(db.flushingMemTables, oldMemTable)
 
@@ -934,10 +988,7 @@ func (db *DB) flushMemTableOnce() (bool, error) {
 	sst, err := NewSSTable(sstPath, entries, db.crypto)
 	if err != nil {
 		db.mutex.Lock()
-		oldMemTable.entries.Range(func(key, value any) bool {
-			db.memTable.entries.Store(key, value)
-			return true
-		})
+		db.memTable.mergeFrom(oldMemTable)
 		db.removeFlushingMemTableLocked(oldMemTable)
 		db.mutex.Unlock()
 		return false, err
@@ -948,10 +999,12 @@ func (db *DB) flushMemTableOnce() (bool, error) {
 	db.removeFlushingMemTableLocked(oldMemTable)
 	db.mutex.Unlock()
 
-	// Truncate WAL after successfully flushing memtable to SSTable
-	if db.wal != nil {
-		if err := db.wal.Truncate(); err != nil {
-			log.Printf("velocity: WAL truncation failed: %v", err)
+	// Remove only the WAL prefix represented by this immutable memtable.
+	// Records appended after the checkpoint belong to the new memtable and must
+	// remain recoverable.
+	if db.wal != nil && walCheckpoint > 0 {
+		if err := db.wal.TruncatePrefix(walCheckpoint); err != nil {
+			log.Printf("velocity: WAL prefix truncation failed: %v", err)
 			return false, err
 		}
 	}

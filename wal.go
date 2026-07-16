@@ -44,11 +44,12 @@ type WAL struct {
 }
 
 func NewWAL(path string, crypto *CryptoProvider) (*WAL, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
 	if crypto == nil {
+		_ = file.Close()
 		return nil, fmt.Errorf("encryption provider is required for WAL")
 	}
 
@@ -111,6 +112,12 @@ var walBufferPool = sync.Pool{
 	New: func() interface{} {
 		return bytes.NewBuffer(make([]byte, 0, WALBufferSize))
 	},
+}
+
+func acquireWALBuffer() *bytes.Buffer {
+	b := walBufferPool.Get().(*bytes.Buffer)
+	b.Reset()
+	return b
 }
 
 func (w *WAL) Write(entry *Entry) error {
@@ -314,15 +321,29 @@ func (w *WAL) syncUnsafe() error {
 	}
 	// Take buffer contents by swapping to a fresh buffer to minimize time holding the lock
 	old := w.buffer
-	w.buffer = bytes.NewBuffer(make([]byte, 0, WALBufferSize))
-	// Write old buffer directly (caller holds lock)
+	w.buffer = acquireWALBuffer()
+	// Write old buffer directly (caller holds lock). On failure, prepend the
+	// unwritten bytes back into the active buffer so a transient filesystem
+	// error cannot silently discard acknowledged WAL records.
 	if _, err := w.file.Write(old.Bytes()); err != nil {
+		restored := bytes.NewBuffer(make([]byte, 0, old.Len()+w.buffer.Len()))
+		_, _ = restored.Write(old.Bytes())
+		_, _ = restored.Write(w.buffer.Bytes())
+		w.buffer = restored
 		return err
 	}
 	if err := w.file.Sync(); err != nil {
+		// The write reached the OS but durability is unknown. Keep a copy for a
+		// retry; replaying a duplicate record is safe because entries carry their
+		// timestamp and last-write semantics.
+		restored := bytes.NewBuffer(make([]byte, 0, old.Len()+w.buffer.Len()))
+		_, _ = restored.Write(old.Bytes())
+		_, _ = restored.Write(w.buffer.Bytes())
+		w.buffer = restored
 		return err
 	}
 	old.Reset()
+	walBufferPool.Put(old)
 	return nil
 }
 
@@ -353,7 +374,7 @@ func (w *WAL) Close() error {
 	// Swap and flush any pending buffer synchronously to ensure durability
 	w.mutex.Lock()
 	old := w.buffer
-	w.buffer = bytes.NewBuffer(make([]byte, 0, WALBufferSize))
+	w.buffer = acquireWALBuffer()
 	w.mutex.Unlock()
 
 	// write remaining buffer before closing
@@ -403,6 +424,112 @@ func (w *WAL) SetSyncOnWrite(enabled bool) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	w.syncOnWrite = enabled
+}
+
+// Checkpoint flushes all records currently buffered and returns the durable byte
+// offset that represents the caller's write set. Records appended after this
+// method returns are strictly after the returned offset.
+func (w *WAL) Checkpoint() (int64, error) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	if err := w.syncUnsafe(); err != nil {
+		return 0, err
+	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+// TruncatePrefix atomically removes the first offset bytes while retaining any
+// records appended after a checkpoint. This is used by memtable flushing so a
+// concurrent write can never be lost by truncating the whole WAL.
+func (w *WAL) TruncatePrefix(offset int64) error {
+	if offset <= 0 {
+		return nil
+	}
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	if err := w.syncUnsafe(); err != nil {
+		return err
+	}
+	info, err := w.file.Stat()
+	if err != nil {
+		return err
+	}
+	if offset > info.Size() {
+		return fmt.Errorf("WAL checkpoint offset %d exceeds file size %d", offset, info.Size())
+	}
+	if offset == info.Size() {
+		if err := w.file.Truncate(0); err != nil {
+			return err
+		}
+		_, err = w.file.Seek(0, io.SeekStart)
+		return err
+	}
+
+	name := w.file.Name()
+	tmpName := name + ".compact.tmp"
+	src, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	if _, err = src.Seek(offset, io.SeekStart); err != nil {
+		src.Close()
+		return err
+	}
+	tmp, err := os.OpenFile(tmpName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		src.Close()
+		return err
+	}
+	_, copyErr := io.Copy(tmp, src)
+	closeSrcErr := src.Close()
+	syncErr := tmp.Sync()
+	closeTmpErr := tmp.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpName)
+		return copyErr
+	}
+	if closeSrcErr != nil {
+		_ = os.Remove(tmpName)
+		return closeSrcErr
+	}
+	if syncErr != nil {
+		_ = os.Remove(tmpName)
+		return syncErr
+	}
+	if closeTmpErr != nil {
+		_ = os.Remove(tmpName)
+		return closeTmpErr
+	}
+
+	if err := w.file.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, name); err != nil {
+		w.file, _ = os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		return err
+	}
+	w.file, err = os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	return syncParentDir(name)
+}
+
+func syncParentDir(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // Truncate truncates the WAL file to zero length after ensuring data has been flushed.
@@ -474,12 +601,12 @@ func (w *WAL) rotateUnlocked() error {
 	}
 	if err := os.Rename(orig, dest); err != nil {
 		// Attempt to reopen original file in case rename failed
-		w.file, _ = os.OpenFile(orig, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		w.file, _ = os.OpenFile(orig, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		return err
 	}
 
 	// Open new WAL file
-	newf, err := os.OpenFile(orig, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	newf, err := os.OpenFile(orig, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		// Try to restore original by renaming back (best-effort)
 		_ = os.Rename(dest, orig)

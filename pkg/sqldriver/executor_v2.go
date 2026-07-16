@@ -1372,7 +1372,23 @@ func fastJSONFieldValue(raw []byte, field string) (any, bool) {
 	if field == "" {
 		return nil, false
 	}
-	pattern := []byte(strconv.Quote(field))
+	// Build pattern inline to avoid allocation from strconv.Quote
+	// Pattern: "field":
+	patternLen := len(field) + 3 // "field":
+	// Use a stack-allocated buffer for small fields
+	var patternBuf [128]byte
+	var pattern []byte
+	if patternLen <= len(patternBuf) {
+		pattern = patternBuf[:0]
+		pattern = append(pattern, '"')
+		pattern = append(pattern, field...)
+		pattern = append(pattern, '"')
+	} else {
+		pattern = make([]byte, 0, patternLen)
+		pattern = append(pattern, '"')
+		pattern = append(pattern, field...)
+		pattern = append(pattern, '"')
+	}
 	for searchFrom := 0; searchFrom < len(raw); {
 		idx := bytes.Index(raw[searchFrom:], pattern)
 		if idx < 0 {
@@ -1421,22 +1437,33 @@ func fastJSONFieldValue(raw []byte, field string) (any, bool) {
 		for end < len(raw) && raw[end] != ',' && raw[end] != '}' {
 			end++
 		}
-		token := strings.TrimSpace(string(raw[i:end]))
-		switch token {
-		case "true":
+		// Fast path: try parsing the token without allocating a string first
+		tok := raw[i:end]
+		// Trim whitespace in-place
+		start := 0
+		for start < len(tok) && isJSONSpaceByte(tok[start]) {
+			start++
+		}
+		end2 := len(tok)
+		for end2 > start && isJSONSpaceByte(tok[end2-1]) {
+			end2--
+		}
+		tok = tok[start:end2]
+		switch {
+		case len(tok) == 4 && tok[0] == 't' && tok[1] == 'r' && tok[2] == 'u' && tok[3] == 'e':
 			return true, true
-		case "false":
+		case len(tok) == 5 && tok[0] == 'f' && tok[1] == 'a' && tok[2] == 'l' && tok[3] == 's' && tok[4] == 'e':
 			return false, true
-		case "null":
+		case len(tok) == 4 && tok[0] == 'n' && tok[1] == 'u' && tok[2] == 'l' && tok[3] == 'l':
 			return nil, true
 		}
-		if n, err := strconv.ParseInt(token, 10, 64); err == nil {
+		if n, err := strconv.ParseInt(string(tok), 10, 64); err == nil {
 			return n, true
 		}
-		if f, err := strconv.ParseFloat(token, 64); err == nil {
+		if f, err := strconv.ParseFloat(string(tok), 64); err == nil {
 			return f, true
 		}
-		return token, true
+		return string(tok), true
 	}
 	return nil, false
 }
@@ -1955,15 +1982,20 @@ func (e *ExecutorV2) tryFastCountSelect(sel *ast.SelectStmt, args []driver.Named
 	if !e.fastCountWhereSupported(sel.Where, args) {
 		return nil, false, nil
 	}
-	if meta, found, err := e.loadTableSchemaMeta(tableName); err != nil {
+	meta, found, err := e.loadTableSchemaMeta(tableName)
+	if err != nil {
 		return nil, true, err
-	} else if found && len(meta.ColumnTypes) > 0 && sel.Where != nil {
-		return nil, false, nil
 	}
 
 	plan := e.extractSearchPlan(sel.Where, args)
 	if plan.fullText != "" {
 		return nil, false, nil
+	}
+	if found && len(meta.ColumnTypes) > 0 {
+		plan, err = e.coerceSearchPlan(tableName, plan)
+		if err != nil {
+			return nil, true, err
+		}
 	}
 	limit := e.extractCount(sel.Limit, args)
 	count, err := e.conn.db.SearchCount(velocity.SearchQuery{

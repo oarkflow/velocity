@@ -20,12 +20,12 @@ func benchConfig(path string) Config {
 
 func benchConfigWithSearch(path string, schemas map[string]*SearchSchema) Config {
 	return Config{
-		Path:                 path,
-		DisableEncryption:    true,
-		DisableWAL:           true,
-		DisableFsync:         true,
-		SearchSchemas:        schemas,
-		SearchIndexEnabled:   true,
+		Path:                    path,
+		DisableEncryption:       true,
+		DisableWAL:              true,
+		DisableFsync:            true,
+		SearchSchemas:           schemas,
+		SearchIndexEnabled:      true,
 		DisableIndexPersistence: true,
 	}
 }
@@ -515,8 +515,8 @@ func BenchmarkSearchFullText(b *testing.B) {
 	b.Run("Phrase", func(b *testing.B) {
 		b.ReportAllocs()
 		q := SearchQuery{
-			Prefix:   "user",
-			FullText: "distributed systems",
+			Prefix:    "user",
+			FullText:  "distributed systems",
 			MatchMode: "phrase",
 		}
 		b.ResetTimer()
@@ -859,5 +859,3 @@ func BenchmarkGetPayloadSizes(b *testing.B) {
 		})
 	}
 }
-
-

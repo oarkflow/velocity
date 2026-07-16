@@ -164,6 +164,20 @@ func NewLRUCache(capacityBytes int) *LRUCache {
 	return c
 }
 
+// GetInto copies a cached value into dst and returns the extended slice.
+// It avoids an allocation when dst has sufficient capacity.
+func (c *LRUCache) GetInto(key string, dst []byte) ([]byte, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	item, exists := c.items[key]
+	if !exists {
+		return dst, false
+	}
+	c.evictList.moveToFront(item.node)
+	return append(dst, item.value...), true
+}
+
 func (c *LRUCache) Get(key string) ([]byte, bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()

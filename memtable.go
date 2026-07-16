@@ -48,7 +48,7 @@ func NewMemTable() *MemTable {
 func (mt *MemTable) Put(key, value []byte) {
 	entry := entryPool.Get().(*Entry)
 	entry.Key = append(entry.Key[:0], key...)
-	entry.KeyString = ""
+	entry.KeyString = string(entry.Key)
 	entry.Value = append(entry.Value[:0], value...)
 	entry.Timestamp = uint64(time.Now().UnixNano())
 	entry.ExpiresAt = 0
@@ -56,8 +56,7 @@ func (mt *MemTable) Put(key, value []byte) {
 	// Compute checksum without allocating a temporary concatenation
 	entry.checksum = crc32.Update(crc32.ChecksumIEEE(key), crc32.IEEETable, value)
 
-	keyStr := unsafe.String(&entry.Key[0], len(entry.Key))
-	old, loaded := mt.entries.Swap(keyStr, entry)
+	old, loaded := mt.entries.Swap(entry.KeyString, entry)
 	oldSize := int64(0)
 	if loaded {
 		oldSize = storedEntrySize(old)
@@ -71,14 +70,14 @@ func (mt *MemTable) PutEntry(entry *Entry) {
 	// Copy key/value into a pooled entry to avoid retaining caller buffers
 	e := entryPool.Get().(*Entry)
 	e.Key = append(e.Key[:0], entry.Key...)
-	e.KeyString = ""
+	e.KeyString = string(e.Key)
 	e.Value = append(e.Value[:0], entry.Value...)
 	e.Timestamp = entry.Timestamp
 	e.ExpiresAt = entry.ExpiresAt
 	e.Deleted = entry.Deleted
 	e.checksum = entry.checksum
 
-	old, loaded := mt.entries.Swap(unsafe.String(&e.Key[0], len(e.Key)), e)
+	old, loaded := mt.entries.Swap(e.KeyString, e)
 	oldSize := int64(0)
 	if loaded {
 		oldSize = storedEntrySize(old)
@@ -92,13 +91,16 @@ func (mt *MemTable) PutEntryOwned(entry *Entry) {
 	e := entryPool.Get().(*Entry)
 	e.Key = entry.Key
 	e.KeyString = entry.KeyString
+	if e.KeyString == "" {
+		e.KeyString = string(e.Key)
+	}
 	e.Value = entry.Value
 	e.Timestamp = entry.Timestamp
 	e.ExpiresAt = entry.ExpiresAt
 	e.Deleted = entry.Deleted
 	e.checksum = entry.checksum
 
-	old, loaded := mt.entries.Swap(string(e.Key), e)
+	old, loaded := mt.entries.Swap(e.KeyString, e)
 	oldSize := int64(0)
 	if loaded {
 		oldSize = storedEntrySize(old)
@@ -121,7 +123,7 @@ func (mt *MemTable) PutEntriesOwned(entries []Entry) {
 		if keyStr == "" {
 			keyStr = string(entry.Key)
 		}
-		stored := Entry{
+		stored := &Entry{
 			Key:       entry.Key,
 			KeyString: keyStr,
 			Value:     entry.Value,
@@ -143,7 +145,12 @@ func (mt *MemTable) PutEntriesOwned(entries []Entry) {
 }
 
 func (mt *MemTable) Get(key []byte) *Entry {
-	return mt.GetString(string(key))
+	if len(key) == 0 {
+		return mt.GetString("")
+	}
+	// The temporary string is used only for the duration of sync.Map.Load and is
+	// never retained. Stored keys always own their backing memory.
+	return mt.GetString(unsafe.String(unsafe.SliceData(key), len(key)))
 }
 
 func (mt *MemTable) GetString(key string) *Entry {
@@ -174,13 +181,19 @@ func storedEntrySize(v any) int64 {
 func (mt *MemTable) Delete(key []byte) {
 	entry := entryPool.Get().(*Entry)
 	entry.Key = append(entry.Key[:0], key...)
-	entry.KeyString = ""
+	entry.KeyString = string(entry.Key)
 	entry.Value = entry.Value[:0]
 	entry.Timestamp = uint64(time.Now().UnixNano())
+	entry.ExpiresAt = 0
 	entry.Deleted = true
 	entry.checksum = crc32.ChecksumIEEE(key)
 
-	mt.entries.Store(unsafe.String(&entry.Key[0], len(entry.Key)), entry)
+	old, loaded := mt.entries.Swap(entry.KeyString, entry)
+	oldSize := int64(0)
+	if loaded {
+		oldSize = storedEntrySize(old)
+	}
+	atomic.AddInt64(&mt.size, int64(len(entry.Key))-oldSize)
 }
 
 // LoadEntries restores a set of entries into the memtable (used during WAL replay).
@@ -188,12 +201,36 @@ func (mt *MemTable) Delete(key []byte) {
 // already exist.
 func (mt *MemTable) LoadEntries(entries []*Entry) {
 	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		if e.KeyString == "" {
+			e.KeyString = string(e.Key)
+		}
+		old, loaded := mt.entries.Swap(e.KeyString, e)
 		oldSize := int64(0)
-		if old, ok := mt.entries.Load(string(e.Key)); ok {
+		if loaded {
 			oldSize = storedEntrySize(old)
 		}
-		mt.entries.Store(string(e.Key), e)
 		atomic.AddInt64(&mt.size, int64(len(e.Key)+len(e.Value))-oldSize)
+	}
+}
+
+// mergeFrom restores entries from an immutable/flushing memtable after a flush
+// failure. Existing entries in mt win because they are newer writes.
+func (mt *MemTable) mergeFrom(src *MemTable) {
+	if src == nil || src == mt {
+		return
+	}
+	var delta int64
+	src.entries.Range(func(key, value any) bool {
+		if _, loaded := mt.entries.LoadOrStore(key, value); !loaded {
+			delta += storedEntrySize(value)
+		}
+		return true
+	})
+	if delta != 0 {
+		atomic.AddInt64(&mt.size, delta)
 	}
 }
 
