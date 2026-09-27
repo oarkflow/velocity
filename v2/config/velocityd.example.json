@@ -1,0 +1,159 @@
+{
+  "plugins": [
+    {
+      "name": "storage-lsm",
+      "enabled": true,
+      "config": {
+        "dir": "./data/velocityd",
+        "always_sync": true
+      }
+    },
+    {
+      "name": "storage-mem",
+      "enabled": false,
+      "config": {
+        "_notes": "In-memory StorageBackend alternative to storage-lsm. Only one storage-* plugin may be enabled at a time \u2014 whichever one is enabled registers the fixed service name 'storage' that every other plugin looks up. Swapping backends is exactly this: flip these two 'enabled' flags, nothing else changes."
+      }
+    },
+    {
+      "name": "crypto-xchacha",
+      "enabled": true,
+      "config": {
+        "key": "",
+        "_notes": "Default crypto provider (XChaCha20-Poly1305). If 'key' is left empty, the plugin generates a random ephemeral key for this process only and logs a Warn \u2014 fine for local/dev, NOT for production, since data becomes unreadable across restarts. Set an explicit persistent key before running against real data."
+      }
+    },
+    {
+      "name": "crypto-fips",
+      "enabled": false,
+      "config": {
+        "_notes": "FIPS-style alternative (AES-256-GCM + PBKDF2) to crypto-xchacha. Only one crypto-* plugin may be enabled at a time, same swap pattern as storage-lsm/storage-mem."
+      }
+    },
+    {
+      "name": "kv",
+      "enabled": true,
+      "config": {
+        "encrypt": false,
+        "_notes": "Optional, off by default (zero behavior change unless set). When true, values (not keys) are encrypted at rest via whichever \"crypto\" service is registered (e.g. crypto-xchacha above) \u2014 Init fails loudly if encrypt is true but no crypto-* plugin is enabled, rather than silently storing plaintext."
+      }
+    },
+    {
+      "name": "object",
+      "enabled": true,
+      "config": {
+        "encrypt": false,
+        "_notes": "Optional, off by default (zero behavior change unless set). When true, values (not keys) are encrypted at rest via whichever \"crypto\" service is registered (e.g. crypto-xchacha above) \u2014 Init fails loudly if encrypt is true but no crypto-* plugin is enabled, rather than silently storing plaintext."
+      }
+    },
+    {
+      "name": "secret",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "auth-jwt",
+      "enabled": true,
+      "config": {
+        "secret": "CHANGE-ME-set-a-real-secret-before-production",
+        "_notes": "REQUIRED. v1 shipped with a default/hardcoded JWT secret that a pentest found allows admin-token forgery. This plugin's Init refuses to start if 'secret' is empty \u2014 there is no built-in fallback. Generate a real random secret (e.g. `openssl rand -base64 48`) and put it here (or better, load it from an environment variable / secret manager in your own deployment tooling) before running against anything real."
+      }
+    },
+    {
+      "name": "auth-ldap",
+      "enabled": false,
+      "config": {}
+    },
+    {
+      "name": "auth-oidc",
+      "enabled": false,
+      "config": {}
+    },
+    {
+      "name": "auth-sts",
+      "enabled": false,
+      "config": {}
+    },
+    {
+      "name": "auth-mfa",
+      "enabled": false,
+      "config": {
+        "_notes": "TOTP/HOTP second-factor (RFC 4226/6238). Disabled by default \u2014 enable once auth-jwt (or another primary Authenticator) is in place, since MFA layers on top of a primary credential rather than replacing one."
+      }
+    },
+    {
+      "name": "compliance",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "replication",
+      "enabled": false,
+      "config": {
+        "_notes": "Gossip-style membership + async, eventually-consistent replication only \u2014 no consensus/quorum protocol. Disabled by default for a single-node deployment; enable for a multi-node cluster."
+      }
+    },
+    {
+      "name": "sql",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "search",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "web",
+      "enabled": true,
+      "config": {
+        "addr": ":8090"
+      }
+    },
+    {
+      "name": "metrics",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "backup",
+      "enabled": true,
+      "config": {
+        "hmac_key": "",
+        "_notes": "HMAC-signed Backup/Restore/Export/Import. Uses its OWN key (independent of the crypto plugin) so backups stay verifiable even if crypto config changes later. Same 'empty generates an ephemeral key + Warn' pattern as crypto-xchacha \u2014 set a persistent 'hmac_key' before relying on this for real disaster recovery."
+      }
+    },
+    {
+      "name": "envelope",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "erasure",
+      "enabled": false,
+      "config": {
+        "_notes": "GF(2^8) erasure coding + bit-rot detection + self-healing, as an opt-in add-on shard store (service name 'erasure'). The object plugin can route large object bodies through it via its own 'use_erasure_for_large_objects'/'erasure_threshold_bytes' config keys once this is enabled \u2014 disabled by default since its background scan loop adds overhead most single-node/dev deployments don't need."
+      }
+    },
+    {
+      "name": "notifications",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "lock",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "extractor",
+      "enabled": true,
+      "config": {}
+    },
+    {
+      "name": "iam",
+      "enabled": true,
+      "config": {}
+    }
+  ]
+}
