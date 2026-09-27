@@ -437,6 +437,49 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 		}
 	}
 
+	// Range-index candidate path: for a single simple table with a
+	// range-shaped WHERE (>, <, >=, <=, BETWEEN, or a plain-prefix LIKE —
+	// see extractRangeCandidate), fetch only the rows whose indexed
+	// column value actually satisfies the bound instead of the whole
+	// table. Tried only after the equality-candidate path above finds
+	// nothing (an equality match, when available, is strictly cheaper).
+	// Exactly like the equality path, this ALWAYS still re-runs the full
+	// WHERE expression against each fetched row via finishSelect — the
+	// index only narrows which rows are fetched.
+	if simple, ok := stmt.From[0].(*ast.SimpleTable); ok && stmt.Where != nil {
+		table := qualifiedName(simple.Name)
+		if schema, err := loadSchema(ctx, kv, table); err == nil {
+			b := newBinder(args).withOuter(outer)
+			if rb, err2 := extractRangeCandidate(ctx, kv, stmt.Where, schema, b); err2 == nil && rb != nil {
+				pks, err3 := rangeLookupPKs(ctx, kv, table, rb)
+				if err3 == nil {
+					incrRangeIndexedLookup()
+					alias := table
+					if simple.Alias != nil {
+						alias = simple.Alias.Unquoted
+					}
+					candidates := make([]api.Row, 0, len(pks))
+					for _, pk := range pks {
+						data, found2, err4 := kv.Get(ctx, rowKey(table, pk))
+						if err4 != nil {
+							return nil, err4
+						}
+						if !found2 {
+							continue // stale index entry (e.g. a concurrent delete) — tolerated, not corruption
+						}
+						var row api.Row
+						if err4 := json.Unmarshal(data, &row); err4 != nil {
+							return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", pk, err4)
+						}
+						candidates = append(candidates, qualifyRow(row, table, alias))
+					}
+					addRangeRowsFetched(int64(len(candidates)))
+					return finishSelect(ctx, kv, stmt, args, outer, candidates)
+				}
+			}
+		}
+	}
+
 	fromRows, err := resolveFrom(ctx, kv, stmt.From[0], args)
 	if err != nil {
 		return nil, err

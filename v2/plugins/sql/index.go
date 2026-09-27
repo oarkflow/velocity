@@ -91,7 +91,11 @@ func indexRow(ctx context.Context, kv api.KVService, table string, schema *Schem
 			return err
 		}
 	}
-	return nil
+	// Maintained from the SAME call site as the equality index above (not
+	// a separate call added at each exec.go write path) so the two
+	// indexes can never drift out of sync with each other — see
+	// range_index.go's package doc comment for what this index covers.
+	return indexRowRange(ctx, kv, table, schema, pk, row)
 }
 
 // unindexRow removes every index entry indexRow would have added for row —
@@ -107,7 +111,7 @@ func unindexRow(ctx context.Context, kv api.KVService, table string, schema *Sch
 			return err
 		}
 	}
-	return nil
+	return unindexRowRange(ctx, kv, table, schema, pk, row)
 }
 
 // indexLookupPKs returns every primary-key string indexed under table.col

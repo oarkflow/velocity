@@ -154,6 +154,45 @@
       "name": "iam",
       "enabled": true,
       "config": {}
+    },
+    {
+      "name": "redisdata",
+      "enabled": true,
+      "config": {
+        "_notes": "Redis-compatible List/Set/Hash/SortedSet/PubSub data structures, atop the same storage backend as everything else."
+      }
+    },
+    {
+      "name": "resp",
+      "enabled": true,
+      "config": {
+        "addr": ":6380",
+        "_notes": "Real RESP2 wire-protocol server — point redis-cli or any Redis client at this port. Listens on :6380 (not Redis's default :6379) so it never collides with a real Redis instance on the same machine. See v2/benchmarks/comparison/redis/RESULTS.md for real measured numbers against actual Redis, including scope limitations (no Lua, transactions, cluster mode, or pipelining-optimized throughput yet)."
+      }
+    },
+    {
+      "name": "document",
+      "enabled": true,
+      "config": {
+        "_notes": "JSON documents with dot-notation Get/Set/Delete (e.g. \"user.address.city\", \"tags.0\"), atop the same storage backend as kv."
+      }
+    },
+    {
+      "name": "configio",
+      "enabled": true,
+      "config": {
+        "_notes": "Export a kv namespace as .env or flat JSON; import .env or nested JSON into a kv namespace (dot-notation flattening)."
+      }
+    },
+    {
+      "name": "sandbox",
+      "enabled": false,
+      "config": {
+        "allowed_commands": [],
+        "default_timeout": "30s",
+        "default_max_output_bytes": 1048576,
+        "_notes": "REQUIRED before enabling: set allowed_commands to an explicit list of binaries this deployment may execute — there is no wildcard default-allow, and an empty list means every Run call is refused (safe, but inert). Disabled by default since it grants subprocess-execution capability, which should be an explicit operator decision, not a default. Never invokes a shell (no /bin/sh -c) — arguments are passed as a literal array, so shell metacharacters in an argument are always inert data. Automatically upgrades to real OS-level sandboxing (macOS sandbox-exec, checked live) when available; SandboxResult.Mode reports exactly which isolation level was actually applied — see plugins/sandbox's doc comment. Use RunWithSecrets to inject values from the secret store as environment variables without ever writing them to disk or logs (this is v2's real implementation of the 'secretr exec' concept v1 only ever referenced in an example, never built)."
+      }
     }
   ]
 }

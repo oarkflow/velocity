@@ -15,8 +15,10 @@ import (
 	authsts "github.com/oarkflow/velocity/v2/plugins/auth-sts"
 	"github.com/oarkflow/velocity/v2/plugins/backup"
 	"github.com/oarkflow/velocity/v2/plugins/compliance"
+	"github.com/oarkflow/velocity/v2/plugins/configio"
 	cryptofips "github.com/oarkflow/velocity/v2/plugins/crypto-fips"
 	cryptoxchacha "github.com/oarkflow/velocity/v2/plugins/crypto-xchacha"
+	"github.com/oarkflow/velocity/v2/plugins/document"
 	"github.com/oarkflow/velocity/v2/plugins/envelope"
 	"github.com/oarkflow/velocity/v2/plugins/erasure"
 	"github.com/oarkflow/velocity/v2/plugins/extractor"
@@ -26,7 +28,10 @@ import (
 	"github.com/oarkflow/velocity/v2/plugins/metrics"
 	"github.com/oarkflow/velocity/v2/plugins/notifications"
 	"github.com/oarkflow/velocity/v2/plugins/object"
+	"github.com/oarkflow/velocity/v2/plugins/redisdata"
 	"github.com/oarkflow/velocity/v2/plugins/replication"
+	"github.com/oarkflow/velocity/v2/plugins/resp"
+	"github.com/oarkflow/velocity/v2/plugins/sandbox"
 	"github.com/oarkflow/velocity/v2/plugins/search"
 	"github.com/oarkflow/velocity/v2/plugins/secret"
 	"github.com/oarkflow/velocity/v2/plugins/sql"
@@ -115,6 +120,23 @@ func AllPlugins(manifest kernel.Manifest) []api.Plugin {
 		notifications.NewPlugin(storageDep),
 		lock.NewPlugin("kv"),
 		extractor.NewPlugin(),
+
+		redisdata.NewPlugin(storageDep),
+		// Listens on :6380 by default (never collides with a real Redis
+		// instance's default :6379) — a real RESP2 wire-protocol server so
+		// existing Redis clients (redis-cli, go-redis, etc.) can talk to
+		// Velocity directly. See v2/benchmarks/comparison/redis/RESULTS.md
+		// for real, repeated head-to-head numbers against actual Redis.
+		resp.NewPlugin("kv"),
+
+		document.NewPlugin(storageDep),
+		configio.NewPlugin("kv"),
+		// SandboxService refuses every Run call until "allowed_commands" is
+		// explicitly configured — there is no wildcard default-allow. Any
+		// manifest enabling "sandbox" MUST set allowed_commands, or the
+		// plugin boots successfully but is permanently inert (a safe
+		// failure mode, not a bug — see plugins/sandbox's own doc comment).
+		sandbox.NewPlugin(),
 	}
 }
 
