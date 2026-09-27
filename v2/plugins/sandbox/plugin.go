@@ -55,10 +55,14 @@ type Plugin struct {
 	defaultTimeout       time.Duration
 	defaultMaxOutputByte int
 
-	// osSandboxTool is the absolute path to a discovered OS-level sandbox
-	// wrapper (currently only macOS's sandbox-exec), or "" if none is
-	// available on this host. Detected once, in Init.
+	// osSandboxTool is the absolute path to a discovered macOS sandbox-exec
+	// binary, or "" if unavailable/not on darwin. Detected once, in Init.
 	osSandboxTool string
+	// bwrapTool is the absolute path to a discovered Linux bubblewrap
+	// (bwrap) binary, or "" if unavailable/not on linux. Detected once, in
+	// Init. Only one of osSandboxTool/bwrapTool is ever non-empty, since
+	// each is gated on its own runtime.GOOS check.
+	bwrapTool string
 
 	log api.Logger
 }
@@ -77,16 +81,27 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	p.defaultTimeout = cfg.Duration("default_timeout", 30*time.Second)
 	p.defaultMaxOutputByte = cfg.Int("default_max_output_bytes", 1<<20) // 1MiB
 
-	// Detect a real OS-level sandbox tool once. Only macOS's sandbox-exec
-	// is wired up today; Linux's bubblewrap (bwrap) is a natural
-	// follow-up with an analogous profile, not implemented here — absence
-	// of either just means SandboxModeRestricted, never a failure to
-	// boot.
-	if runtime.GOOS == "darwin" {
+	// Detect a real OS-level sandbox tool once. macOS uses sandbox-exec,
+	// Linux uses bubblewrap (bwrap) — absence of either (or running on a
+	// platform with neither, e.g. Windows) just means SandboxModeRestricted,
+	// never a failure to boot.
+	switch runtime.GOOS {
+	case "darwin":
 		if path, err := exec.LookPath("sandbox-exec"); err == nil {
 			p.osSandboxTool = path
 		}
+	case "linux":
+		if path, err := exec.LookPath("bwrap"); err == nil {
+			p.bwrapTool = path
+		}
 	}
+	// Windows (and any other platform) has no OS-level sandbox wired up
+	// here — real equivalents exist (Job Objects, AppContainer) but are a
+	// much larger, separate undertaking, explicitly out of scope for this
+	// pass. Run/RunWithSecrets still apply every Go-level control
+	// (allowlist, explicit env, timeout, output bounds) there, and
+	// SandboxResult.Mode correctly reports SandboxModeRestricted rather
+	// than ever claiming stronger isolation than was actually applied.
 
 	if len(p.allowedCommands) == 0 && p.log != nil {
 		p.log.Warn("sandbox: no allowed_commands configured — every Run call will be refused until this deployment's manifest sets one")
@@ -103,6 +118,9 @@ func (p *Plugin) Health() api.Health {
 	defer p.mu.RUnlock()
 	if p.osSandboxTool != "" {
 		return api.Health{Status: "ok", Detail: "os-level sandbox available (" + p.osSandboxTool + ")"}
+	}
+	if p.bwrapTool != "" {
+		return api.Health{Status: "ok", Detail: "os-level sandbox available (" + p.bwrapTool + ")"}
 	}
 	return api.Health{Status: "ok", Detail: "restricted-env-only (no OS-level sandbox tool found)"}
 }
@@ -243,6 +261,67 @@ func sandboxExecProfile(workDir string) string {
 `, workDir)
 }
 
+// standardBwrapROBindCandidates lists the typical FHS paths a dynamically
+// linked Linux binary needs read access to in order to run at all (the
+// dynamic linker, shared libraries, and standard utilities) — not every
+// entry exists on every distribution (e.g. /lib64 is absent on some),
+// which is exactly why the caller filters this list down to paths that
+// actually exist on this host before calling buildBwrapArgs: binding a
+// nonexistent source path is what would make bwrap itself fail at
+// runtime, so filtering in advance avoids that failure mode entirely
+// rather than trying to distinguish "bwrap failed" from "the target
+// program legitimately exited non-zero" after the fact — those look
+// identical from cmd.Run()'s perspective (both are a normal process exit
+// with a nonzero code), so there is no reliable way to tell them apart
+// post-hoc.
+func standardBwrapROBindCandidates() []string {
+	return []string{"/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/resolv.conf", "/etc/ssl"}
+}
+
+// existingPaths filters candidates down to the ones that actually exist
+// on this host (via os.Stat), preserving order.
+func existingPaths(candidates []string) []string {
+	out := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// buildBwrapArgs constructs the real bubblewrap (bwrap) argument list for
+// running targetCmd/targetArgs confined to workDir with the given
+// read-only bind paths. It is a pure function — no filesystem or process
+// access — specifically so its exact output can be unit-tested on any
+// platform (including this development machine, macOS, where bwrap
+// itself cannot run) without needing bwrap to actually be present.
+//
+// Confinement applied: every roBinds path is bound read-only; workDir is
+// bound read-write and made the working directory; /tmp is a fresh,
+// empty tmpfs (not the host's real /tmp); --unshare-net denies network
+// access entirely (matching the intent of the macOS sandbox-exec
+// profile's lack of any "allow network*" rule); --die-with-parent
+// ensures a killed/timed-out parent (see Run's context-based timeout)
+// takes the sandboxed child down with it rather than orphaning it.
+func buildBwrapArgs(workDir string, roBinds []string, targetCmd string, targetArgs []string) []string {
+	args := make([]string, 0, len(roBinds)*3+len(targetArgs)+16)
+	for _, p := range roBinds {
+		args = append(args, "--ro-bind", p, p)
+	}
+	args = append(args,
+		"--tmpfs", "/tmp",
+		"--bind", workDir, workDir,
+		"--chdir", workDir,
+		"--unshare-net",
+		"--die-with-parent",
+		"--",
+		targetCmd,
+	)
+	args = append(args, targetArgs...)
+	return args
+}
+
 // Run implements api.SandboxService.
 func (p *Plugin) Run(ctx context.Context, name string, args []string, opts api.SandboxOptions) (api.SandboxResult, error) {
 	resolved, err := p.resolveAllowed(name)
@@ -292,14 +371,21 @@ func (p *Plugin) Run(ctx context.Context, name string, args []string, opts api.S
 
 	p.mu.RLock()
 	osTool := p.osSandboxTool
+	bwrap := p.bwrapTool
 	p.mu.RUnlock()
 
-	if osTool != "" {
+	switch {
+	case osTool != "":
 		profile := sandboxExecProfile(workDir)
 		fullArgs := append([]string{"-p", profile, resolved}, args...)
 		cmd = exec.CommandContext(runCtx, osTool, fullArgs...)
 		mode = api.SandboxModeOSLevel
-	} else {
+	case bwrap != "":
+		roBinds := existingPaths(standardBwrapROBindCandidates())
+		bwrapArgs := buildBwrapArgs(workDir, roBinds, resolved, args)
+		cmd = exec.CommandContext(runCtx, bwrap, bwrapArgs...)
+		mode = api.SandboxModeOSLevel
+	default:
 		cmd = exec.CommandContext(runCtx, resolved, args...)
 	}
 	cmd.Env = env

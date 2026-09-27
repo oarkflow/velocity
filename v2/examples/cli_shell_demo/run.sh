@@ -21,7 +21,7 @@ cd "$V2_ROOT"
 
 TMPDIR="$(mktemp -d)"
 BIN="$TMPDIR/velocity-cli-demo"
-MANIFEST="$TMPDIR/manifest.json"
+MANIFEST="$TMPDIR/manifest.bcl"
 DATA_DIR="$TMPDIR/data"
 
 cleanup() {
@@ -33,38 +33,134 @@ echo "=== Building the CLI ==="
 go build -o "$BIN" ./cmd/velocity
 echo "OK: built $BIN"
 
-echo "=== Writing a throwaway manifest enabling only what these commands need ==="
+echo "=== Writing a throwaway manifest (BCL) enabling only what these commands need ==="
 mkdir -p "$DATA_DIR"
-cat > "$MANIFEST" <<JSON
-{
-  "plugins": [
-    {"name": "storage-lsm", "enabled": true, "config": {"dir": "$DATA_DIR", "always_sync": true}},
-    {"name": "storage-mem", "enabled": false, "config": {}},
-    {"name": "crypto-xchacha", "enabled": true, "config": {"key": "cli-shell-demo-fixed-32-byte-key"}},
-    {"name": "crypto-fips", "enabled": false, "config": {}},
-    {"name": "kv", "enabled": true, "config": {}},
-    {"name": "object", "enabled": true, "config": {}},
-    {"name": "secret", "enabled": true, "config": {}},
-    {"name": "compliance", "enabled": true, "config": {}},
-    {"name": "search", "enabled": true, "config": {}},
-    {"name": "auth-jwt", "enabled": false, "config": {}},
-    {"name": "auth-ldap", "enabled": false, "config": {}},
-    {"name": "auth-oidc", "enabled": false, "config": {}},
-    {"name": "auth-sts", "enabled": false, "config": {}},
-    {"name": "auth-mfa", "enabled": false, "config": {}},
-    {"name": "metrics", "enabled": false, "config": {}},
-    {"name": "replication", "enabled": false, "config": {}},
-    {"name": "sql", "enabled": false, "config": {}},
-    {"name": "web", "enabled": false, "config": {}},
-    {"name": "backup", "enabled": false, "config": {}},
-    {"name": "envelope", "enabled": false, "config": {}},
-    {"name": "erasure", "enabled": false, "config": {}},
-    {"name": "notifications", "enabled": false, "config": {}},
-    {"name": "lock", "enabled": false, "config": {}},
-    {"name": "extractor", "enabled": false, "config": {}}
-  ]
+cat > "$MANIFEST" <<BCL
+plugin "storage-lsm" {
+  enabled true
+  config {
+    dir "$DATA_DIR"
+    always_sync true
+  }
 }
-JSON
+
+plugin "storage-mem" {
+  enabled false
+  config {}
+}
+
+plugin "crypto-xchacha" {
+  enabled true
+  config {
+    key "cli-shell-demo-fixed-32-byte-key"
+  }
+}
+
+plugin "crypto-fips" {
+  enabled false
+  config {}
+}
+
+plugin "kv" {
+  enabled true
+  config {}
+}
+
+plugin "object" {
+  enabled true
+  config {}
+}
+
+plugin "secret" {
+  enabled true
+  config {}
+}
+
+plugin "compliance" {
+  enabled true
+  config {}
+}
+
+plugin "search" {
+  enabled true
+  config {}
+}
+
+plugin "auth-jwt" {
+  enabled false
+  config {}
+}
+
+plugin "auth-ldap" {
+  enabled false
+  config {}
+}
+
+plugin "auth-oidc" {
+  enabled false
+  config {}
+}
+
+plugin "auth-sts" {
+  enabled false
+  config {}
+}
+
+plugin "auth-mfa" {
+  enabled false
+  config {}
+}
+
+plugin "metrics" {
+  enabled false
+  config {}
+}
+
+plugin "replication" {
+  enabled false
+  config {}
+}
+
+plugin "sql" {
+  enabled false
+  config {}
+}
+
+plugin "web" {
+  enabled false
+  config {}
+}
+
+plugin "backup" {
+  enabled false
+  config {}
+}
+
+plugin "envelope" {
+  enabled false
+  config {}
+}
+
+plugin "erasure" {
+  enabled false
+  config {}
+}
+
+plugin "notifications" {
+  enabled false
+  config {}
+}
+
+plugin "lock" {
+  enabled false
+  config {}
+}
+
+plugin "extractor" {
+  enabled false
+  config {}
+}
+BCL
 echo "OK: wrote $MANIFEST"
 
 CLI() {

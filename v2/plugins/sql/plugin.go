@@ -51,6 +51,12 @@ func (p *Plugin) Version() string { return "0.1.0" }
 
 func (p *Plugin) Dependencies() []string { return []string{p.kvDep} }
 
+// OptionalDependencies lists "tracing" so, when a tracing plugin is
+// enabled, it Inits before this plugin — making the optional
+// Registry.Lookup("tracing") below deterministic rather than a boot-order
+// race, matching the pattern established by plugins/web.
+func (p *Plugin) OptionalDependencies() []string { return []string{"tracing"} }
+
 func (p *Plugin) Init(_ context.Context, k api.Kernel) error {
 	svc := k.Registry().MustLookup("kv")
 	kv, ok := svc.(api.KVService)
@@ -58,6 +64,13 @@ func (p *Plugin) Init(_ context.Context, k api.Kernel) error {
 		return fmt.Errorf("sql: service %q registered under name %q is not an api.KVService (got %T)", p.kvDep, "kv", svc)
 	}
 	p.eng = NewEngine(kv)
+
+	if tSvc, ok := k.Registry().Lookup("tracing"); ok {
+		if tr, ok := tSvc.(api.TracingService); ok {
+			p.eng.SetTracer(tr)
+		}
+	}
+
 	return k.Registry().Provide("sql", p.eng)
 }
 
@@ -71,4 +84,7 @@ func (p *Plugin) Health() api.Health {
 	return api.Health{Status: "ok"}
 }
 
-var _ api.Plugin = (*Plugin)(nil)
+var (
+	_ api.Plugin                         = (*Plugin)(nil)
+	_ api.PluginWithOptionalDependencies = (*Plugin)(nil)
+)

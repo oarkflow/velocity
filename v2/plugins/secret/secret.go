@@ -112,7 +112,7 @@ func (p *Plugin) Set(ctx context.Context, name string, value []byte) (int, error
 	if err := p.putVersion(ctx, name, version, value); err != nil {
 		return 0, err
 	}
-	if err := p.storage.Put(ctx, api.Entry{Key: latestKey(name), Value: []byte(strconv.Itoa(version))}); err != nil {
+	if err := p.storageFor(ctx).Put(ctx, api.Entry{Key: latestKey(name), Value: []byte(strconv.Itoa(version))}); err != nil {
 		return 0, fmt.Errorf("%s: updating latest pointer for %q: %w", pluginName, name, err)
 	}
 
@@ -140,7 +140,7 @@ func (p *Plugin) Get(ctx context.Context, name string, version int) ([]byte, err
 }
 
 func (p *Plugin) Versions(ctx context.Context, name string) ([]api.SecretVersion, error) {
-	it, err := p.storage.Scan(ctx, []byte(versionPrefix(name)))
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(versionPrefix(name)))
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (p *Plugin) Versions(ctx context.Context, name string) ([]api.SecretVersion
 }
 
 func (p *Plugin) Delete(ctx context.Context, name string) error {
-	it, err := p.storage.Scan(ctx, []byte(versionPrefix(name)))
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(versionPrefix(name)))
 	if err != nil {
 		return err
 	}
@@ -182,7 +182,7 @@ func (p *Plugin) Delete(ctx context.Context, name string) error {
 		ops = append(ops, api.BatchOp{Delete: true, Entry: api.Entry{Key: key}})
 	}
 	ops = append(ops, api.BatchOp{Delete: true, Entry: api.Entry{Key: latestKey(name)}})
-	return p.storage.Batch(ctx, ops)
+	return p.storageFor(ctx).Batch(ctx, ops)
 }
 
 // Rotate re-seals the latest version's already-known plaintext under the
@@ -220,11 +220,11 @@ func (p *Plugin) putVersion(ctx context.Context, name string, version int, plain
 	if err != nil {
 		return err
 	}
-	return p.storage.Put(ctx, api.Entry{Key: versionKey(name, version), Value: data})
+	return p.storageFor(ctx).Put(ctx, api.Entry{Key: versionKey(name, version), Value: data})
 }
 
 func (p *Plugin) getVersionPlain(ctx context.Context, name string, version int) ([]byte, error) {
-	data, ok, err := p.storage.Get(ctx, versionKey(name, version))
+	data, ok, err := p.storageFor(ctx).Get(ctx, versionKey(name, version))
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +247,7 @@ func (p *Plugin) getVersionPlain(ctx context.Context, name string, version int) 
 }
 
 func (p *Plugin) latestVersion(ctx context.Context, name string) (int, error) {
-	data, ok, err := p.storage.Get(ctx, latestKey(name))
+	data, ok, err := p.storageFor(ctx).Get(ctx, latestKey(name))
 	if err != nil {
 		return 0, err
 	}

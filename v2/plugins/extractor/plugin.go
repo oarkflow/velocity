@@ -2,7 +2,7 @@
 // extraction from raw bytes, ported from v1's pkg/extractor.
 //
 // Formats: plain text, Markdown, HTML, JSON, CSV (pure stdlib), plus PDF
-// (via the pure-Go github.com/ledongthuc/pdf — deliberately NOT v1's
+// (via the pure-Go github.com/oarkflow/pdf/reader — deliberately NOT v1's
 // os/exec-shells-out-to-pdftotext approach, which only works if that
 // external binary happens to be installed), DOCX and XLSX (ZIP+XML via
 // stdlib archive/zip + encoding/xml), and .eml/RFC 822 email (stdlib

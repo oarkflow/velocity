@@ -148,6 +148,13 @@ type Plugin struct {
 	lifecycleInterval time.Duration
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
+
+	// tracer is non-nil only if a "tracing" service is registered — see
+	// Init. When nil, every span-wrapping block below is a correctness
+	// no-op (skipped entirely), so tracing adds zero behavior/overhead
+	// unless a tracing plugin is actually enabled — same convention as
+	// plugins/kv's Plugin.tracer.
+	tracer api.TracingService
 }
 
 // New constructs the object plugin. storageDep names the storage plugin
@@ -168,7 +175,7 @@ func (p *Plugin) Dependencies() []string { return []string{p.storageDep} }
 // enabled in the manifest, the kernel Inits it before this one so the
 // optional Registry.Lookup calls below are never a boot-order race — same
 // pattern as the web plugin's optional auth/metrics dependencies.
-func (p *Plugin) OptionalDependencies() []string { return []string{"erasure", "crypto"} }
+func (p *Plugin) OptionalDependencies() []string { return []string{"erasure", "crypto", "tracing"} }
 
 func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	p.storage = k.Registry().MustLookup("storage").(api.StorageBackend)
@@ -203,6 +210,12 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 			return fmt.Errorf("object: service registered under \"crypto\" does not implement api.CryptoProvider")
 		}
 		p.crypto = cp
+	}
+
+	if svc, ok := k.Registry().Lookup("tracing"); ok {
+		if tr, ok := svc.(api.TracingService); ok {
+			p.tracer = tr
+		}
 	}
 
 	return k.Registry().Provide(ServiceName, api.ObjectService(p))
@@ -332,7 +345,7 @@ func splitBlocks(data []byte) [][]byte {
 }
 
 func (p *Plugin) CreateBucket(ctx context.Context, bucket string) error {
-	_, ok, err := p.storage.Get(ctx, []byte(bucketMetaKey(bucket)))
+	_, ok, err := p.storageFor(ctx).Get(ctx, []byte(bucketMetaKey(bucket)))
 	if err != nil {
 		return err
 	}
@@ -343,7 +356,7 @@ func (p *Plugin) CreateBucket(ctx context.Context, bucket string) error {
 	if err != nil {
 		return err
 	}
-	return p.storage.Put(ctx, api.Entry{Key: []byte(bucketMetaKey(bucket)), Value: buf})
+	return p.storageFor(ctx).Put(ctx, api.Entry{Key: []byte(bucketMetaKey(bucket)), Value: buf})
 }
 
 func (p *Plugin) DeleteBucket(ctx context.Context, bucket string) error {
@@ -357,11 +370,11 @@ func (p *Plugin) DeleteBucket(ctx context.Context, bucket string) error {
 	if len(objs) > 0 {
 		return ErrBucketNotEmpty
 	}
-	return p.storage.Delete(ctx, []byte(bucketMetaKey(bucket)))
+	return p.storageFor(ctx).Delete(ctx, []byte(bucketMetaKey(bucket)))
 }
 
 func (p *Plugin) requireBucket(ctx context.Context, bucket string) error {
-	_, ok, err := p.storage.Get(ctx, []byte(bucketMetaKey(bucket)))
+	_, ok, err := p.storageFor(ctx).Get(ctx, []byte(bucketMetaKey(bucket)))
 	if err != nil {
 		return err
 	}
@@ -379,7 +392,20 @@ func newVersionID() string {
 	return fmt.Sprintf("%020d-%s", time.Now().UnixNano(), hex.EncodeToString(b[:]))
 }
 
-func (p *Plugin) PutObject(ctx context.Context, bucket, key string, r io.Reader, meta api.ObjectMeta) (api.ObjectMeta, error) {
+func (p *Plugin) PutObject(ctx context.Context, bucket, key string, r io.Reader, meta api.ObjectMeta) (_ api.ObjectMeta, err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "object.PutObject")
+		p.tracer.SetAttribute(ctx, "object.bucket", bucket)
+		p.tracer.SetAttribute(ctx, "object.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	if err := p.requireBucket(ctx, bucket); err != nil {
 		return api.ObjectMeta{}, err
 	}
@@ -436,7 +462,7 @@ func (p *Plugin) PutObject(ctx context.Context, bucket, key string, r io.Reader,
 			ops = append(ops, api.BatchOp{Entry: api.Entry{Key: []byte(blockKey(bucket, key, meta.VersionID, i)), Value: sealed}})
 		}
 	}
-	if err := p.storage.Batch(ctx, ops); err != nil {
+	if err := p.storageFor(ctx).Batch(ctx, ops); err != nil {
 		return api.ObjectMeta{}, err
 	}
 
@@ -461,7 +487,7 @@ func (p *Plugin) readFullBody(ctx context.Context, bucket, key string, rec versi
 	n := blockCount(rec.Meta.Size)
 	body := make([]byte, 0, rec.Meta.Size)
 	for i := 0; i < n; i++ {
-		blk, ok, err := p.storage.Get(ctx, []byte(blockKey(bucket, key, rec.Meta.VersionID, i)))
+		blk, ok, err := p.storageFor(ctx).Get(ctx, []byte(blockKey(bucket, key, rec.Meta.VersionID, i)))
 		if err != nil {
 			return nil, err
 		}
@@ -477,7 +503,20 @@ func (p *Plugin) readFullBody(ctx context.Context, bucket, key string, rec versi
 	return body, nil
 }
 
-func (p *Plugin) GetObject(ctx context.Context, bucket, key, versionID string) (io.ReadCloser, api.ObjectMeta, error) {
+func (p *Plugin) GetObject(ctx context.Context, bucket, key, versionID string) (_ io.ReadCloser, _ api.ObjectMeta, err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "object.GetObject")
+		p.tracer.SetAttribute(ctx, "object.bucket", bucket)
+		p.tracer.SetAttribute(ctx, "object.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	rec, err := p.getVersionRecord(ctx, bucket, key, versionID)
 	if err != nil {
 		return nil, api.ObjectMeta{}, err
@@ -494,7 +533,7 @@ func (p *Plugin) getVersionRecord(ctx context.Context, bucket, key, versionID st
 	if versionID != "" {
 		lookupKey = objectVersionMetaKey(bucket, key, versionID)
 	}
-	buf, ok, err := p.storage.Get(ctx, []byte(lookupKey))
+	buf, ok, err := p.storageFor(ctx).Get(ctx, []byte(lookupKey))
 	if err != nil {
 		return versionRecord{}, err
 	}
@@ -513,7 +552,20 @@ func (p *Plugin) getVersionRecord(ctx context.Context, bucket, key, versionID st
 // can never be deleted, regardless of bypassGovernance. A LockGovernance
 // object under those same conditions can only be deleted when
 // bypassGovernance is true.
-func (p *Plugin) DeleteObject(ctx context.Context, bucket, key, versionID string, bypassGovernance bool) error {
+func (p *Plugin) DeleteObject(ctx context.Context, bucket, key, versionID string, bypassGovernance bool) (err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "object.DeleteObject")
+		p.tracer.SetAttribute(ctx, "object.bucket", bucket)
+		p.tracer.SetAttribute(ctx, "object.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	rec, err := p.getVersionRecord(ctx, bucket, key, versionID)
 	if err != nil {
 		return err
@@ -532,7 +584,7 @@ func (p *Plugin) DeleteObject(ctx context.Context, bucket, key, versionID string
 	if versionID == "" {
 		ops = append(ops, api.BatchOp{Delete: true, Entry: api.Entry{Key: []byte(objectLatestKey(bucket, key))}})
 	}
-	if err := p.storage.Batch(ctx, ops); err != nil {
+	if err := p.storageFor(ctx).Batch(ctx, ops); err != nil {
 		return err
 	}
 	p.publish(ctx, api.TopicObjectDelete, map[string]any{"bucket": bucket, "key": key, "version_id": vID})
@@ -546,9 +598,22 @@ func locked(r api.RetentionPolicy) bool {
 	return !r.RetainUntil.IsZero() && time.Now().Before(r.RetainUntil)
 }
 
-func (p *Plugin) ListObjects(ctx context.Context, bucket, prefix string) ([]api.ObjectMeta, error) {
+func (p *Plugin) ListObjects(ctx context.Context, bucket, prefix string) (_ []api.ObjectMeta, err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "object.ListObjects")
+		p.tracer.SetAttribute(ctx, "object.bucket", bucket)
+		p.tracer.SetAttribute(ctx, "object.prefix", prefix)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	scanPrefix := objectPrefix(bucket) + prefix
-	it, err := p.storage.Scan(ctx, []byte(scanPrefix))
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(scanPrefix))
 	if err != nil {
 		return nil, err
 	}
@@ -583,7 +648,7 @@ func (p *Plugin) PutRetention(ctx context.Context, bucket, key string, policy ap
 		{Entry: api.Entry{Key: []byte(objectLatestKey(bucket, key)), Value: buf}},
 		{Entry: api.Entry{Key: []byte(objectVersionMetaKey(bucket, key, rec.Meta.VersionID)), Value: buf}},
 	}
-	return p.storage.Batch(ctx, ops)
+	return p.storageFor(ctx).Batch(ctx, ops)
 }
 
 func (p *Plugin) SetLifecycle(ctx context.Context, bucket string, rules []api.LifecycleRule) error {
@@ -594,7 +659,7 @@ func (p *Plugin) SetLifecycle(ctx context.Context, bucket string, rules []api.Li
 	if err != nil {
 		return err
 	}
-	return p.storage.Put(ctx, api.Entry{Key: []byte(bucketLifecycleKey(bucket)), Value: buf})
+	return p.storageFor(ctx).Put(ctx, api.Entry{Key: []byte(bucketLifecycleKey(bucket)), Value: buf})
 }
 
 // --- lifecycle scheduler ---
@@ -614,7 +679,7 @@ func (p *Plugin) lifecycleLoop(ctx context.Context) {
 }
 
 func (p *Plugin) runLifecycleOnce(ctx context.Context) {
-	it, err := p.storage.Scan(ctx, []byte("b/"))
+	it, err := p.storageFor(ctx).Scan(ctx, []byte("b/"))
 	if err != nil {
 		if p.log != nil {
 			p.log.Error("object: lifecycle scan failed", "err", err)
@@ -638,7 +703,7 @@ func (p *Plugin) runLifecycleOnce(ctx context.Context) {
 }
 
 func (p *Plugin) applyLifecycle(ctx context.Context, bucket string) {
-	buf, ok, err := p.storage.Get(ctx, []byte(bucketLifecycleKey(bucket)))
+	buf, ok, err := p.storageFor(ctx).Get(ctx, []byte(bucketLifecycleKey(bucket)))
 	if err != nil || !ok {
 		return
 	}
@@ -724,7 +789,7 @@ func (p *Plugin) GetObjectRange(ctx context.Context, bucket, key, versionID stri
 
 	var buf bytes.Buffer
 	for i := firstBlock; i <= lastBlock; i++ {
-		blk, ok, err := p.storage.Get(ctx, []byte(blockKey(bucket, key, rec.Meta.VersionID, i)))
+		blk, ok, err := p.storageFor(ctx).Get(ctx, []byte(blockKey(bucket, key, rec.Meta.VersionID, i)))
 		if err != nil {
 			return nil, api.ObjectMeta{}, err
 		}
@@ -785,14 +850,14 @@ func (p *Plugin) InitiateMultipart(ctx context.Context, bucket, key string) (str
 	if err != nil {
 		return "", err
 	}
-	if err := p.storage.Put(ctx, api.Entry{Key: []byte(multipartInitKey(bucket, key, uploadID)), Value: buf}); err != nil {
+	if err := p.storageFor(ctx).Put(ctx, api.Entry{Key: []byte(multipartInitKey(bucket, key, uploadID)), Value: buf}); err != nil {
 		return "", err
 	}
 	return uploadID, nil
 }
 
 func (p *Plugin) requireMultipart(ctx context.Context, bucket, key, uploadID string) error {
-	_, ok, err := p.storage.Get(ctx, []byte(multipartInitKey(bucket, key, uploadID)))
+	_, ok, err := p.storageFor(ctx).Get(ctx, []byte(multipartInitKey(bucket, key, uploadID)))
 	if err != nil {
 		return err
 	}
@@ -812,7 +877,7 @@ func (p *Plugin) UploadPart(ctx context.Context, bucket, key, uploadID string, p
 	}
 	sum := sha256.Sum256(data)
 	etag := hex.EncodeToString(sum[:])
-	if err := p.storage.Put(ctx, api.Entry{Key: []byte(multipartPartKey(bucket, key, uploadID, partNumber)), Value: data}); err != nil {
+	if err := p.storageFor(ctx).Put(ctx, api.Entry{Key: []byte(multipartPartKey(bucket, key, uploadID, partNumber)), Value: data}); err != nil {
 		return "", err
 	}
 	return etag, nil
@@ -827,7 +892,7 @@ func (p *Plugin) CompleteMultipart(ctx context.Context, bucket, key, uploadID st
 
 	var body bytes.Buffer
 	for _, part := range sorted {
-		data, ok, err := p.storage.Get(ctx, []byte(multipartPartKey(bucket, key, uploadID, part.PartNumber)))
+		data, ok, err := p.storageFor(ctx).Get(ctx, []byte(multipartPartKey(bucket, key, uploadID, part.PartNumber)))
 		if err != nil {
 			return api.ObjectMeta{}, err
 		}
@@ -859,7 +924,7 @@ func (p *Plugin) AbortMultipart(ctx context.Context, bucket, key, uploadID strin
 
 func (p *Plugin) cleanupMultipart(ctx context.Context, bucket, key, uploadID string) {
 	prefix := multipartPrefix(bucket, key, uploadID)
-	it, err := p.storage.Scan(ctx, []byte(prefix))
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(prefix))
 	if err != nil {
 		return
 	}
@@ -869,7 +934,7 @@ func (p *Plugin) cleanupMultipart(ctx context.Context, bucket, key, uploadID str
 		ops = append(ops, api.BatchOp{Delete: true, Entry: api.Entry{Key: append([]byte(nil), it.Key()...)}})
 	}
 	if len(ops) > 0 {
-		_ = p.storage.Batch(ctx, ops)
+		_ = p.storageFor(ctx).Batch(ctx, ops)
 	}
 }
 

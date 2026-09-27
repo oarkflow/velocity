@@ -13,36 +13,41 @@ import (
 	"net/mail"
 	"strings"
 
-	"github.com/ledongthuc/pdf"
+	pdfreader "github.com/oarkflow/pdf/reader"
 
 	"github.com/oarkflow/velocity/v2/api"
 )
 
 // --- PDF ---
 //
-// Uses github.com/ledongthuc/pdf, a pure-Go PDF parser — deliberately NOT
-// v1's approach of shelling out to the external `pdftotext` binary via
+// Uses github.com/oarkflow/pdf/reader, a pure-Go PDF parser operating
+// directly on in-memory bytes (reader.Open) — deliberately NOT v1's
+// approach of shelling out to the external `pdftotext` binary via
 // os/exec, which only works if that binary happens to be installed in the
 // deployment environment. This trades some text-layout fidelity (complex
 // PDFs with unusual font encodings can extract imperfectly) for working
 // out of the box with zero external dependencies, which is the more
 // useful default for an embedded library.
 func extractPDF(content []byte) (api.ExtractedContent, error) {
-	r, err := pdf.NewReader(bytes.NewReader(content), int64(len(content)))
+	r, err := pdfreader.Open(content)
 	if err != nil {
 		return api.ExtractedContent{}, fmt.Errorf("extractor/pdf: %w", err)
 	}
-	textReader, err := r.GetPlainText()
-	if err != nil {
-		return api.ExtractedContent{}, fmt.Errorf("extractor/pdf: %w", err)
-	}
-	text, err := io.ReadAll(textReader)
-	if err != nil {
-		return api.ExtractedContent{}, fmt.Errorf("extractor/pdf: read text: %w", err)
+	numPages := r.NumPages()
+	var sb strings.Builder
+	for page := 0; page < numPages; page++ {
+		text, err := r.ExtractText(page)
+		if err != nil {
+			return api.ExtractedContent{}, fmt.Errorf("extractor/pdf: extract page %d: %w", page, err)
+		}
+		if sb.Len() > 0 && text != "" {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(text)
 	}
 	return api.ExtractedContent{
-		Text:     strings.TrimSpace(string(text)),
-		Metadata: map[string]any{"pages": r.NumPage()},
+		Text:     strings.TrimSpace(sb.String()),
+		Metadata: map[string]any{"pages": numPages},
 	}, nil
 }
 

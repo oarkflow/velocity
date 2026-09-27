@@ -17,8 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // FsyncMode selects which durability guarantee a "durable write" actually
@@ -228,10 +226,15 @@ func openWAL(path string, alwaysSync bool, mode FsyncMode) (*wal, error) {
 }
 
 // doSync performs the actual durable-flush syscall according to
-// l.fsyncMode — see FsyncMode's doc comment for the real tradeoff.
+// l.fsyncMode — see FsyncMode's doc comment for the real tradeoff. The
+// FsyncPosix path is platform-specific (see wal_unix.go/wal_windows.go):
+// on Unix it's the plain fsync(2) syscall via golang.org/x/sys/unix; on
+// Windows it falls back to the same call FsyncFull uses, since Windows has
+// no weaker/faster alternative to FlushFileBuffers at this level — see
+// platformPosixFsync's doc comment in wal_windows.go for why.
 func (l *wal) doSync() error {
 	if l.fsyncMode == FsyncPosix {
-		return unix.Fsync(int(l.f.Fd()))
+		return platformPosixFsync(l.f)
 	}
 	return l.f.Sync()
 }

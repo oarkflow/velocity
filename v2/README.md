@@ -49,7 +49,7 @@ go test ./...
 ### Run the server daemon
 
 ```bash
-go run ./cmd/velocityd -manifest config/velocityd.example.json
+go run ./cmd/velocityd -manifest config/velocityd.example.bcl
 ```
 
 This boots every plugin enabled in the manifest (21 by default) and starts the HTTP/S3 API on `:8090` and a real Redis-compatible RESP server on `:6380`.
@@ -416,27 +416,61 @@ go run ./cmd/velocity search index <key> <json-fields>
 go run ./cmd/velocity search query <query> [limit]
 ```
 
-Every command accepts `-manifest <path>` (default `config/velocityd.example.json`). See [`examples/cli_shell_demo/run.sh`](examples/cli_shell_demo/run.sh) for a complete shell script exercising every command end-to-end.
+Every command accepts `-manifest <path>` (default `config/velocityd.example.bcl`). See [`examples/cli_shell_demo/run.sh`](examples/cli_shell_demo/run.sh) for a complete shell script exercising every command end-to-end.
 
 ---
 
 ## Server daemon & manifest reference
 
-`cmd/velocityd` boots every plugin listed `"enabled": true` in a JSON manifest and runs until `SIGINT`/`SIGTERM`. Two reference manifests are provided:
+`cmd/velocityd` boots every plugin whose block sets `enabled true` in a [BCL](https://github.com/oarkflow/bcl) manifest (loaded via [`github.com/oarkflow/config`](https://github.com/oarkflow/config)) and runs until `SIGINT`/`SIGTERM`. Two reference manifests are provided:
 
-- [`config/velocityd.example.json`](config/velocityd.example.json) — every plugin present (some disabled by default: `storage-mem`, `crypto-fips`, `auth-ldap/oidc/sts/mfa`, `replication`, `erasure` — all opt-in alternates or add-ons).
-- [`config/velocityd.minimal.json`](config/velocityd.minimal.json) — just `storage-mem` + `kv`, demonstrating the minimal-deployment story.
+- [`config/velocityd.example.bcl`](config/velocityd.example.bcl) — every plugin present (some disabled by default: `storage-mem`, `crypto-fips`, `auth-ldap/oidc/sts/mfa`, `replication`, `erasure` — all opt-in alternates or add-ons).
+- [`config/velocityd.minimal.bcl`](config/velocityd.minimal.bcl) — just `storage-mem` + `kv`, demonstrating the minimal-deployment story.
 
-```json
-{
-  "plugins": [
-    { "name": "storage-lsm", "enabled": true, "config": { "dir": "./data", "fsync_mode": "full" } },
-    { "name": "crypto-xchacha", "enabled": true, "config": { "key": "" } },
-    { "name": "kv", "enabled": true, "config": { "encrypt": false } },
-    { "name": "auth-jwt", "enabled": true, "config": { "secret": "CHANGE-ME" } },
-    { "name": "web", "enabled": true, "config": { "addr": ":8090" } },
-    { "name": "resp", "enabled": true, "config": { "addr": ":6380" } }
-  ]
+Each plugin is a repeated, labeled `plugin "<name>" { ... }` block — the label is the plugin name, not a `name` field inside it:
+
+```hcl
+plugin "storage-lsm" {
+  enabled true
+  config {
+    dir "./data"
+    fsync_mode "full"
+  }
+}
+
+plugin "crypto-xchacha" {
+  enabled true
+  config {
+    key ""
+  }
+}
+
+plugin "kv" {
+  enabled true
+  config {
+    encrypt false
+  }
+}
+
+plugin "auth-jwt" {
+  enabled true
+  config {
+    secret "CHANGE-ME"
+  }
+}
+
+plugin "web" {
+  enabled true
+  config {
+    addr ":8090"
+  }
+}
+
+plugin "resp" {
+  enabled true
+  config {
+    addr ":6380"
+  }
 }
 ```
 

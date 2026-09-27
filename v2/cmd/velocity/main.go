@@ -28,8 +28,8 @@ func main() {
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "manifest",
-				Value: "config/velocityd.example.json",
-				Usage: "path to the plugin manifest JSON file",
+				Value: "config/velocityd.example.bcl",
+				Usage: "path to the plugin manifest BCL file",
 			},
 		},
 		Commands: []*cli.Command{
@@ -54,7 +54,7 @@ func main() {
 func withKernel(ctx context.Context, cmd *cli.Command, fn func(ctx context.Context, k *kernel.Kernel) error) error {
 	manifestPath := cmd.Root().String("manifest")
 
-	manifest, err := kernel.LoadManifestJSON(manifestPath)
+	manifest, err := kernel.LoadManifestBCL(manifestPath)
 	if err != nil {
 		return fmt.Errorf("loading manifest %q: %w", manifestPath, err)
 	}

@@ -2,6 +2,7 @@ package resp
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -31,6 +32,19 @@ type Plugin struct {
 
 	addr   string
 	logger api.Logger
+
+	// tlsCertFile/tlsKeyFile enable TLS when both are set (stdlib
+	// crypto/tls only, cross-platform). Both empty (the default) means
+	// plain TCP, unchanged from before TLS support existed.
+	tlsCertFile string
+	tlsKeyFile  string
+
+	// rateOpsPerSec/rateBurst == 0 (the default) disables per-connection
+	// command rate limiting entirely. maxConnections == 0 (the default)
+	// disables the connection cap. All purely additive.
+	rateOpsPerSec  int
+	rateBurst      int
+	maxConnections int
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -105,6 +119,16 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	}
 
 	p.addr = k.Config().Scoped("resp").String("addr", ":6380")
+
+	p.tlsCertFile = k.Config().Scoped("resp").String("tls_cert_file", "")
+	p.tlsKeyFile = k.Config().Scoped("resp").String("tls_key_file", "")
+	if (p.tlsCertFile == "") != (p.tlsKeyFile == "") {
+		return fmt.Errorf("resp: both tls_cert_file and tls_key_file must be set together (or both left empty for plain TCP), got cert=%q key=%q", p.tlsCertFile, p.tlsKeyFile)
+	}
+
+	p.rateOpsPerSec = k.Config().Scoped("resp").Int("rate_limit_ops_per_sec", 0)
+	p.rateBurst = k.Config().Scoped("resp").Int("rate_limit_burst", 0)
+	p.maxConnections = k.Config().Scoped("resp").Int("max_connections", 0)
 	return nil
 }
 
@@ -112,6 +136,14 @@ func (p *Plugin) Start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", p.addr)
 	if err != nil {
 		return fmt.Errorf("resp: listen: %w", err)
+	}
+	if p.tlsCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(p.tlsCertFile, p.tlsKeyFile)
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("resp: loading TLS cert/key: %w", err)
+		}
+		ln = tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}})
 	}
 	p.mu.Lock()
 	p.listener = ln
@@ -147,6 +179,14 @@ func (p *Plugin) acceptLoop() {
 			conn.Close()
 			return
 		}
+		if p.maxConnections > 0 && len(p.accepted) >= p.maxConnections {
+			// Refuse cleanly: close immediately rather than accepting and
+			// hanging, and don't add it to `accepted` (it was never really
+			// "ours" to track or force-close on Stop).
+			p.mu.Unlock()
+			conn.Close()
+			continue
+		}
 		p.accepted[conn] = struct{}{}
 		p.mu.Unlock()
 
@@ -167,6 +207,16 @@ func (p *Plugin) handleConn(conn net.Conn) {
 	r := NewReader(conn)
 	w := NewWriter(conn)
 	ctx := context.Background()
+	cs := &connState{}
+
+	var limiter *tokenBucket
+	if p.rateOpsPerSec > 0 {
+		burst := p.rateBurst
+		if burst <= 0 {
+			burst = p.rateOpsPerSec
+		}
+		limiter = newTokenBucket(float64(p.rateOpsPerSec), float64(burst))
+	}
 
 	for {
 		args, err := r.ReadCommand()
@@ -176,14 +226,33 @@ func (p *Plugin) handleConn(conn net.Conn) {
 		if len(args) == 0 {
 			continue
 		}
+		// Rate limiting applies to every command, including SUBSCRIBE
+		// itself (the one command below that would otherwise hand off the
+		// loop) — an exhausted bucket rejects it with a normal RESP error
+		// and keeps the connection in normal command mode, rather than
+		// silently entering subscriber mode anyway.
+		if limiter != nil && !limiter.Allow() {
+			w.WriteError("ERR rate limit exceeded")
+			if err := w.Flush(); err != nil {
+				return
+			}
+			continue
+		}
 		if isSubscribeCommand(args[0]) {
 			// cmdSubscribe owns the connection's read/write loop for the
 			// rest of its lifetime (real Redis subscriber-mode semantics)
-			// — it never returns control back here.
+			// — it never returns control back here. Real Redis also
+			// disallows SUBSCRIBE inside a MULTI block; this
+			// implementation doesn't special-case that combination,
+			// documented in transaction.go as a narrow, intentional scope
+			// gap.
 			p.cmdSubscribe(ctx, r, w, args)
 			return
 		}
-		p.dispatch(ctx, w, args)
+		// handleTop owns HELLO (RESP3 negotiation) and MULTI/EXEC/DISCARD
+		// (transaction queuing) directly, falling through to the normal
+		// per-command dispatch otherwise — see transaction.go.
+		p.handleTop(ctx, w, args, cs)
 		if err := w.Flush(); err != nil {
 			return
 		}

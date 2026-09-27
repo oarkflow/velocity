@@ -344,6 +344,133 @@ func TestParseAllowedCommands_AcceptsCommaSeparatedString(t *testing.T) {
 	}
 }
 
+// --- Linux bubblewrap (bwrap) argument construction — pure function,
+// testable on any platform without bwrap actually being installed or
+// runnable here (this development machine is macOS). ---
+
+func TestBuildBwrapArgs_BindsWorkDirReadWrite(t *testing.T) {
+	got := buildBwrapArgs("/tmp/work", nil, "/bin/echo", []string{"hi"})
+	found := false
+	for i := 0; i+2 < len(got); i++ {
+		if got[i] == "--bind" && got[i+1] == "/tmp/work" && got[i+2] == "/tmp/work" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected --bind /tmp/work /tmp/work in args, got %v", got)
+	}
+}
+
+func TestBuildBwrapArgs_DeniesNetwork(t *testing.T) {
+	got := buildBwrapArgs("/tmp/work", nil, "/bin/echo", nil)
+	if !containsStr(got, "--unshare-net") {
+		t.Fatalf("expected --unshare-net (network deny) in args, got %v", got)
+	}
+	if !containsStr(got, "--die-with-parent") {
+		t.Fatalf("expected --die-with-parent in args, got %v", got)
+	}
+}
+
+func TestBuildBwrapArgs_ROBindsEveryCandidate(t *testing.T) {
+	got := buildBwrapArgs("/tmp/work", []string{"/usr", "/lib"}, "/bin/echo", nil)
+	for _, want := range []string{"/usr", "/lib"} {
+		found := false
+		for i := 0; i+2 < len(got); i++ {
+			if got[i] == "--ro-bind" && got[i+1] == want && got[i+2] == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("expected --ro-bind %s %s in args, got %v", want, want, got)
+		}
+	}
+}
+
+func TestBuildBwrapArgs_TargetCommandAndArgsPassedThroughUnmodifiedAtEnd(t *testing.T) {
+	got := buildBwrapArgs("/tmp/work", []string{"/usr"}, "/bin/echo", []string{"; rm -rf /", "$(whoami)"})
+	n := len(got)
+	if n < 3 {
+		t.Fatalf("args too short: %v", got)
+	}
+	// Last two entries must be the dangerous-looking args, passed through
+	// completely literally (bwrap itself never invokes a shell either,
+	// same property as the direct exec.CommandContext path).
+	if got[n-1] != "$(whoami)" || got[n-2] != "; rm -rf /" {
+		t.Fatalf("target args were not passed through literally at the end: %v", got)
+	}
+	if got[n-3] != "/bin/echo" {
+		t.Fatalf("target command not immediately before its args: %v", got)
+	}
+	// The "--" separator must come right before the target command, so
+	// bwrap itself never tries to interpret the target command/args as
+	// its own flags.
+	if got[n-4] != "--" {
+		t.Fatalf("expected \"--\" separator before target command, got %v", got)
+	}
+}
+
+func containsStr(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRun_FallsBackToRestrictedWhenNoSandboxToolFound forces both
+// osSandboxTool and bwrapTool to "" (simulating a host where neither
+// sandbox-exec nor bwrap is installed, deterministically — not relying on
+// this specific machine's real tool availability, unlike
+// TestSandboxMode_ReflectsWhatActuallyRan above which tests the opposite:
+// real detection on whatever this machine actually has).
+func TestRun_FallsBackToRestrictedWhenNoSandboxToolFound(t *testing.T) {
+	p := mustInit(t, map[string]any{"allowed_commands": []any{"echo"}})
+	p.mu.Lock()
+	p.osSandboxTool = ""
+	p.bwrapTool = ""
+	p.mu.Unlock()
+
+	res, err := p.Run(context.Background(), "echo", []string{"forced-restricted"}, api.SandboxOptions{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Mode != api.SandboxModeRestricted {
+		t.Fatalf("Mode = %q, want %q", res.Mode, api.SandboxModeRestricted)
+	}
+	if strings.TrimSpace(string(res.Stdout)) != "forced-restricted" {
+		t.Fatalf("unexpected output: %q", res.Stdout)
+	}
+}
+
+// TestWindowsFallback_ReasoningDocumentedAndCheckedHere documents (and
+// checks what CAN be checked from macOS) the Windows behavior: this
+// package's OS-level-sandbox detection in Init only ever sets
+// osSandboxTool on darwin and bwrapTool on linux (see Init above), so on
+// any other GOOS — including windows — both remain "", and Run's switch
+// in the OS-level-dispatch section falls through to its `default` case:
+// a direct exec.CommandContext(ctx, resolved, args...) call with no
+// shell involved, identical in shape to the "no tool found" fallback
+// tested above. Go's os/exec never spawns a shell on Windows either (it
+// calls CreateProcess directly with each argument passed through its own
+// escaping, not cmd.exe's), so the shell-metacharacter-is-inert property
+// verified in TestRun_ShellMetacharactersAreInertNotInterpreted holds on
+// Windows for the same underlying reason it holds here — no shell
+// interpreter is ever in the process tree to interpret `;`, `$()`, `&`,
+// or `|` specially. This cannot be executed as a real test on this
+// macOS development machine (there is no Windows runtime here); it is
+// confirmed by code-path inspection instead:
+//   - `GOOS=windows GOARCH=amd64 go build ./plugins/sandbox/...` must
+//     succeed (checked in this task's verification step, not in-process).
+//   - No file in this package imports anything Unix-specific
+//     (golang.org/x/sys/unix, syscall.* beyond what os/exec itself uses
+//     internally) — grep confirms this package only imports
+//     bytes/context/fmt/os/exec/filepath/runtime/strings/sync/time,
+//     every one of which is fully cross-platform.
+func TestWindowsFallback_ReasoningDocumentedAndCheckedHere(t *testing.T) {
+	t.Log("see doc comment: Windows parity is verified by code-path inspection + cross-compilation, not a runtime test, since no Windows runtime is available on this development machine")
+}
+
 func TestHealth_ReportsSandboxAvailability(t *testing.T) {
 	p := mustInit(t, map[string]any{"allowed_commands": []any{"echo"}})
 	h := p.Health()

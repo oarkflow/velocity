@@ -3,6 +3,7 @@ package sql
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	sqlparser "github.com/oarkflow/sqlparser"
@@ -48,6 +49,11 @@ var parseMu sync.Mutex
 // wires it to.
 type Engine struct {
 	kv api.KVService
+
+	// tracer is nil unless a "tracing" plugin is registered and the owning
+	// Plugin's Init wires it in via SetTracer — nil means Exec/Query create
+	// no spans, purely additive over the pre-tracing behavior.
+	tracer api.TracingService
 }
 
 // NewEngine constructs an Engine backed by kv.
@@ -55,20 +61,61 @@ func NewEngine(kv api.KVService) *Engine {
 	return &Engine{kv: kv}
 }
 
+// SetTracer wires an optional api.TracingService into the engine, so
+// Exec/Query wrap themselves in a span. Called once from Plugin.Init if a
+// "tracing" plugin is registered; a nil/never-called tracer means no
+// spans are created.
+func (e *Engine) SetTracer(t api.TracingService) { e.tracer = t }
+
+// queryType extracts the leading SQL keyword (SELECT/INSERT/UPDATE/...)
+// from query for a span attribute — never the query text itself, to avoid
+// leaking potentially sensitive literal values into trace attributes.
+func queryType(query string) string {
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return "unknown"
+	}
+	return strings.ToUpper(fields[0])
+}
+
 var _ api.SQLEngine = (*Engine)(nil)
 
-func (e *Engine) Exec(ctx context.Context, query string, args ...any) (int64, error) {
+func (e *Engine) Exec(ctx context.Context, query string, args ...any) (n int64, err error) {
+	if e.tracer != nil {
+		var end func()
+		ctx, end = e.tracer.StartSpan(ctx, "sql.Exec")
+		e.tracer.SetAttribute(ctx, "db.operation", queryType(query))
+		defer func() {
+			if err != nil {
+				e.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	parseMu.Lock()
 	defer parseMu.Unlock()
 	stmt, err := sqlparser.ParseStatement(query)
 	if err != nil {
 		return 0, fmt.Errorf("sql: parse error: %w", err)
 	}
-	n, _, err := execStatement(ctx, e.kv, stmt, args)
+	n, _, err = execStatement(ctx, e.kv, stmt, args)
 	return n, err
 }
 
-func (e *Engine) Query(ctx context.Context, query string, args ...any) ([]api.Row, error) {
+func (e *Engine) Query(ctx context.Context, query string, args ...any) (rows []api.Row, err error) {
+	if e.tracer != nil {
+		var end func()
+		ctx, end = e.tracer.StartSpan(ctx, "sql.Query")
+		e.tracer.SetAttribute(ctx, "db.operation", queryType(query))
+		defer func() {
+			if err != nil {
+				e.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	parseMu.Lock()
 	defer parseMu.Unlock()
 	stmt, err := sqlparser.ParseStatement(query)
@@ -82,6 +129,11 @@ func (e *Engine) Query(ctx context.Context, query string, args ...any) ([]api.Ro
 	return selectRows(ctx, e.kv, sel, args, nil)
 }
 
+// Begin's ctx parameter is intentionally unused: api.Tx's Exec/Query take
+// their OWN ctx per call (see tx.go), which is what actually reaches
+// e.kv — so a tenant-scoped ctx works correctly as long as it's passed to
+// each Exec/Query call on the returned Tx, not to Begin itself. Verified,
+// not assumed: see TestTenantIsolation_SQL in plugin_test.go.
 func (e *Engine) Begin(_ context.Context) (api.Tx, error) {
 	return newTx(e), nil
 }

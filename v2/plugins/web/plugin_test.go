@@ -287,7 +287,12 @@ func (c *fakePluginConfig) String(key, def string) string {
 	}
 	return def
 }
-func (c *fakePluginConfig) Int(key string, def int) int                          { return def }
+func (c *fakePluginConfig) Int(key string, def int) int {
+	if v, ok := c.data[key].(int); ok {
+		return v
+	}
+	return def
+}
 func (c *fakePluginConfig) Bool(key string, def bool) bool                       { return def }
 func (c *fakePluginConfig) Duration(key string, def time.Duration) time.Duration { return def }
 func (c *fakePluginConfig) Raw() map[string]any                                  { return c.data }

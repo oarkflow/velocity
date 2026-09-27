@@ -528,11 +528,7 @@ func (p *Plugin) cmdSIsMember(ctx context.Context, w *Writer, args []string) {
 		w.WriteError("ERR " + err.Error())
 		return
 	}
-	if ok {
-		w.WriteInteger(1)
-	} else {
-		w.WriteInteger(0)
-	}
+	w.WriteBoolean(ok)
 }
 
 func (p *Plugin) cmdSCard(ctx context.Context, w *Writer, args []string) {
@@ -645,7 +641,10 @@ func (p *Plugin) cmdHGetAll(ctx context.Context, w *Writer, args []string) {
 		w.WriteError("ERR " + err.Error())
 		return
 	}
-	w.WriteArrayHeader(len(m) * 2)
+	// RESP3 connections get a real map reply; RESP2 connections get the
+	// exact same flat array shape as before (WriteMapHeader falls back to
+	// WriteArrayHeader(n*2) when w.proto < 3) — see protocol.go.
+	w.WriteMapHeader(len(m))
 	for field, val := range m {
 		w.WriteBulkString([]byte(field))
 		w.WriteBulkString(val)

@@ -42,8 +42,9 @@ type Plugin struct {
 
 	kv      api.KVService
 	object  api.ObjectService
-	auth    api.AuthProvider // nil if authDep isn't registered
-	metrics api.MetricsSink  // nil if "metrics" isn't registered
+	auth    api.AuthProvider   // nil if authDep isn't registered
+	metrics api.MetricsSink    // nil if "metrics" isn't registered
+	tracer  api.TracingService // nil if "tracing" isn't registered — no span creation, purely additive
 	logger  api.Logger
 
 	// s3AccessKey/s3SecretKey enable an alternate AWS4-HMAC-SHA256
@@ -52,6 +53,13 @@ type Plugin struct {
 	// simply rejected — there is no fallback "accept anything" mode.
 	s3AccessKey string
 	s3SecretKey string
+
+	// tlsCertFile/tlsKeyFile enable TLS when both are set (stdlib
+	// crypto/tls only, cross-platform). Both empty (the default) means
+	// plain HTTP, unchanged from before TLS support existed. Setting only
+	// one is a configuration error, caught at Init.
+	tlsCertFile string
+	tlsKeyFile  string
 
 	// --- enterprise.go dependencies, all OPTIONAL: nil means the
 	// corresponding route group responds 501 Not Implemented rather than
@@ -72,6 +80,11 @@ type Plugin struct {
 	srv        *http.Server
 	startedMu  sync.Mutex
 	authWarned bool
+	startTime  time.Time // set in Start; used by the /admin dashboard's uptime display
+
+	// rateLimiter is nil (disabled) unless "rate_limit_rps" > 0 in config
+	// — purely additive, zero behavior change for existing manifests.
+	rateLimiter *perClientLimiter
 }
 
 // principalContextKey stores the api.Principal produced by a successful
@@ -133,7 +146,7 @@ func (p *Plugin) OptionalDependencies() []string {
 		// (not the "search.graph"/"compliance"/etc. SERVICE names used
 		// for Registry.Lookup below) get boot priority when enabled, and
 		// are silently skipped when not.
-		"mfa", "notifications", "compliance", "search", "iam",
+		"mfa", "notifications", "compliance", "search", "iam", "tracing",
 	}
 }
 
@@ -171,10 +184,31 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 			p.metrics = ms
 		}
 	}
+	if tSvc, ok := k.Registry().Lookup("tracing"); ok {
+		if tr, ok := tSvc.(api.TracingService); ok {
+			p.tracer = tr
+		}
+	}
 
 	p.addr = k.Config().Scoped("web").String("addr", ":8090")
 	p.s3AccessKey = k.Config().Scoped("web").String("s3_access_key", "")
 	p.s3SecretKey = k.Config().Scoped("web").String("s3_secret_key", "")
+
+	p.tlsCertFile = k.Config().Scoped("web").String("tls_cert_file", "")
+	p.tlsKeyFile = k.Config().Scoped("web").String("tls_key_file", "")
+	if (p.tlsCertFile == "") != (p.tlsKeyFile == "") {
+		return fmt.Errorf("web: both tls_cert_file and tls_key_file must be set together (or both left empty for plain HTTP), got cert=%q key=%q", p.tlsCertFile, p.tlsKeyFile)
+	}
+
+	// rate_limit_rps == 0 (the default) disables rate limiting entirely —
+	// purely additive, zero behavior change for existing manifests.
+	if rps := k.Config().Scoped("web").Int("rate_limit_rps", 0); rps > 0 {
+		burst := k.Config().Scoped("web").Int("rate_limit_burst", 0)
+		if burst <= 0 {
+			burst = rps
+		}
+		p.rateLimiter = newPerClientLimiter(float64(rps), float64(burst))
+	}
 
 	if svc, ok := k.Registry().Lookup("auth.oidc"); ok {
 		if a, ok := svc.(api.Authenticator); ok {
@@ -292,6 +326,22 @@ func (p *Plugin) buildMux() (*routeTable, error) {
 	// network-level ACL, same as most Prometheus deployments do.
 	t.handle("GET /metrics", p.handleMetrics)
 
+	// /healthz and /readyz are intentionally never wrapped in auth or rate
+	// limiting — orchestrator liveness/readiness probes must not depend on
+	// a bearer token or be starved by unrelated traffic exhausting a rate
+	// limit; deployments needing these locked down should front them with
+	// a network-level ACL, same as /metrics above.
+	t.handle("GET /healthz", p.handleHealthz)
+	t.handle("GET /readyz", p.handleReadyz)
+
+	// /admin IS wrapped with p.wrap (auth + rate-limit, same as every
+	// /api/* route) — unlike /metrics/healthz/readyz, this is an
+	// operational dashboard that can reveal plugin configuration details,
+	// so it must not be accidentally exposed unauthenticated just because
+	// the rest of the gateway happens to be locked down.
+	t.handle("GET /admin", p.wrap("GET", "/admin", p.handleAdmin))
+	t.handle("GET /admin/", p.wrap("GET", "/admin/", p.handleAdminRedirect))
+
 	if err := t.err(); err != nil {
 		return nil, err
 	}
@@ -309,6 +359,8 @@ func (p *Plugin) Start(ctx context.Context) error {
 		p.logger.Warn("web: no auth provider registered, /api routes are UNAUTHENTICATED — this is not secure for anything but local/dev use")
 	}
 
+	p.startTime = time.Now()
+
 	p.startedMu.Lock()
 	p.srv = &http.Server{Addr: p.addr, Handler: t.mux}
 	srv := p.srv
@@ -316,7 +368,13 @@ func (p *Plugin) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if p.tlsCertFile != "" {
+			err = srv.ListenAndServeTLS(p.tlsCertFile, p.tlsKeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
@@ -352,16 +410,49 @@ var _ api.Plugin = (*Plugin)(nil)
 
 // --- auth + metrics middleware ---
 
-// wrap applies (in order) the metrics-recording wrapper and, if an
-// AuthProvider is registered, the bearer-token auth check, around a route
-// handler. route is the raw pattern (for metrics labels), not the request
-// path.
+// wrap applies (outermost to innermost) tracing, the rate limiter, the
+// metrics-recording wrapper, and, if an AuthProvider is registered, the
+// bearer-token auth check, around a route handler. Tracing is outermost so
+// a single span covers the whole request — including a rate-limit
+// rejection or an auth failure, both of which are useful to see in a
+// trace, not just successful requests. route is the raw pattern (for
+// metrics/span labels), not the request path.
 func (p *Plugin) wrap(method, route string, h http.HandlerFunc) http.HandlerFunc {
 	handler := h
 	if p.auth != nil {
 		handler = p.requireAuth(handler)
 	}
-	return p.recordMetrics(method, route, handler)
+	handler = p.recordMetrics(method, route, handler)
+	if p.rateLimiter != nil {
+		handler = p.rateLimitMiddleware(handler)
+	}
+	if p.tracer != nil {
+		handler = p.traceRequest(method, route, handler)
+	}
+	return handler
+}
+
+// traceRequest starts a span named "method route" for the whole request,
+// tags it with method/route/status attributes, and records an error on
+// the span if the handler responded with a non-2xx status — so a slow or
+// failing request is visible in a trace, not just a log line. A nil
+// p.tracer means this middleware is never applied (see wrap), so this is
+// purely additive when no "tracing" plugin is enabled.
+func (p *Plugin) traceRequest(method, route string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, end := p.tracer.StartSpan(r.Context(), method+" "+route)
+		defer end()
+		p.tracer.SetAttribute(ctx, "http.method", method)
+		p.tracer.SetAttribute(ctx, "http.route", route)
+
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next(rec, r.WithContext(ctx))
+
+		p.tracer.SetAttribute(ctx, "http.status_code", rec.status)
+		if rec.status >= 400 {
+			p.tracer.RecordError(ctx, fmt.Errorf("web: %s %s responded %d", method, route, rec.status))
+		}
+	}
 }
 
 // requireAuth accepts EITHER a Bearer/JWT token (checked via the

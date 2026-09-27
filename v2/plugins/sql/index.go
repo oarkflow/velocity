@@ -194,8 +194,21 @@ func tryEqualityPair(ctx context.Context, kv api.KVService, colSide, valSide ast
 	if !isCol || !schema.hasColumn(name) {
 		return "", nil, false, nil
 	}
-	if otherName, isOtherCol := columnName(valSide); isOtherCol && schema.hasColumn(otherName) {
-		// Same-table column-to-column comparison — not an index candidate.
+	// Reject only a genuinely UNQUALIFIED same-table column-to-column
+	// comparison (e.g. `order_id = id` within one row, where "id" can only
+	// mean this same schema's own column) — that can never be reduced to
+	// a fixed index bucket. A QUALIFIED reference (e.g. "o.id" in a
+	// correlated `i.order_id = o.id`) is deliberately NOT rejected here
+	// even when its bare final segment happens to collide with one of
+	// THIS schema's own column names (e.g. this table also has its own
+	// "id" column) — a bare-name-only check (columnName) can't tell "o.id"
+	// apart from a same-table "id" reference, which previously caused
+	// every such correlation to be wrongly rejected as "same-table" and
+	// forced onto the full-scan path even though it's a genuine
+	// cross-table correlation. columnRef (qualifier-aware) resolves that
+	// ambiguity: only a truly bare, unqualified reference is checked
+	// against this schema's own columns here.
+	if bare, qualified, isRef := columnRef(valSide); isRef && qualified == "" && schema.hasColumn(bare) {
 		return "", nil, false, nil
 	}
 	v, err := resolve(ctx, kv, valSide, nil, b)

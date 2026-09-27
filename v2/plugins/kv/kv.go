@@ -55,6 +55,20 @@ type Plugin struct {
 	// tests to assert Watch/Close doesn't leak subscriptions.
 	watchMu       sync.Mutex
 	activeWatches int
+
+	// tenancy is non-nil only if a "tenancy" service is registered — see
+	// Init. When nil, tenant key-prefixing (storageFor) still fully
+	// isolates tenants from each other; only quota ENFORCEMENT is skipped
+	// (a lighter-weight mode with isolation but no quota), matching the
+	// documented api.TenantService doc comment.
+	tenancy api.TenantService
+
+	// tracer is non-nil only if a "tracing" service is registered — see
+	// Init. When nil, every span-wrapping block below is a correctness
+	// no-op (skipped entirely), so tracing adds zero behavior/overhead
+	// unless a tracing plugin is actually enabled — same convention as
+	// plugins/sql's Engine.tracer.
+	tracer api.TracingService
 }
 
 // New constructs the kv plugin. storageDep names the storage plugin this
@@ -75,7 +89,7 @@ func (p *Plugin) Dependencies() []string { return []string{p.storageDep} }
 // the manifest, the kernel Inits it before this one so the optional
 // Registry.Lookup("crypto") below is never a boot-order race — same
 // pattern as the object plugin's optional "erasure" dependency.
-func (p *Plugin) OptionalDependencies() []string { return []string{"crypto"} }
+func (p *Plugin) OptionalDependencies() []string { return []string{"crypto", "tenancy", "tracing"} }
 
 func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	p.storage = k.Registry().MustLookup("storage").(api.StorageBackend)
@@ -94,6 +108,18 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 		p.crypto = cp
 	}
 
+	if svc, ok := k.Registry().Lookup("tenancy"); ok {
+		if ts, ok := svc.(api.TenantService); ok {
+			p.tenancy = ts
+		}
+	}
+
+	if svc, ok := k.Registry().Lookup("tracing"); ok {
+		if tr, ok := svc.(api.TracingService); ok {
+			p.tracer = tr
+		}
+	}
+
 	return k.Registry().Provide(ServiceName, api.KVService(p))
 }
 
@@ -108,15 +134,33 @@ func (p *Plugin) Put(ctx context.Context, key string, value []byte) error {
 	return p.PutWithTTL(ctx, key, value, 0)
 }
 
-func (p *Plugin) PutWithTTL(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+func (p *Plugin) PutWithTTL(ctx context.Context, key string, value []byte, ttl time.Duration) (err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "kv.Put")
+		p.tracer.SetAttribute(ctx, "kv.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	if key == "" {
 		return ErrEmptyKey
 	}
+	storage := p.storageFor(ctx)
+
+	if err := p.checkQuota(ctx, storage, key, len(value)); err != nil {
+		return err
+	}
+
 	sealed, err := p.seal(ctx, key, value)
 	if err != nil {
 		return err
 	}
-	if err := p.storage.Put(ctx, api.Entry{Key: []byte(key), Value: sealed, TTL: ttl}); err != nil {
+	if err := storage.Put(ctx, api.Entry{Key: []byte(key), Value: sealed, TTL: ttl}); err != nil {
 		return err
 	}
 	// The event reports the plaintext size (len(value), not len(sealed))
@@ -127,11 +171,23 @@ func (p *Plugin) PutWithTTL(ctx context.Context, key string, value []byte, ttl t
 	return nil
 }
 
-func (p *Plugin) Get(ctx context.Context, key string) ([]byte, bool, error) {
+func (p *Plugin) Get(ctx context.Context, key string) (val []byte, found bool, err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "kv.Get")
+		p.tracer.SetAttribute(ctx, "kv.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	if key == "" {
 		return nil, false, ErrEmptyKey
 	}
-	v, ok, err := p.storage.Get(ctx, []byte(key))
+	v, ok, err := p.storageFor(ctx).Get(ctx, []byte(key))
 	if err != nil || !ok {
 		return v, ok, err
 	}
@@ -173,11 +229,74 @@ func kvAAD(key string) []byte {
 	return []byte("kv:" + key)
 }
 
-func (p *Plugin) Delete(ctx context.Context, key string) error {
+// checkQuota enforces the tenant's quota (if any) BEFORE a write is
+// applied. A no-op when no tenancy service is registered, no tenant is in
+// context, or the tenant has no quota set — this is the "isolation
+// without quota enforcement" lighter-weight mode documented on
+// api.TenantService. Known tradeoff: this calls tenancy.Usage, which
+// scans the tenant's full key range — O(tenant size) per write. Correct
+// and simple; a deployment with very large per-tenant keyspaces and tight
+// write latency requirements would want an incrementally-maintained
+// counter instead, a documented future optimization, not implemented
+// here given this pass's scope.
+func (p *Plugin) checkQuota(ctx context.Context, storage api.StorageBackend, key string, newValueLen int) error {
+	if p.tenancy == nil {
+		return nil
+	}
+	tenantID, ok := api.TenantFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	quota, ok, err := p.tenancy.GetQuota(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("kv: checking quota for tenant %q: %w", tenantID, err)
+	}
+	if !ok || (quota.MaxKeys == 0 && quota.MaxBytes == 0) {
+		return nil
+	}
+
+	existingVal, exists, err := storage.Get(ctx, []byte(key))
+	if err != nil {
+		return fmt.Errorf("kv: checking quota for tenant %q: %w", tenantID, err)
+	}
+	curKeys, curBytes, err := p.tenancy.Usage(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("kv: checking quota for tenant %q: %w", tenantID, err)
+	}
+
+	projectedKeys := curKeys
+	projectedBytes := curBytes - int64(len(existingVal)) + int64(newValueLen)
+	if !exists {
+		projectedKeys++
+		projectedBytes = curBytes + int64(newValueLen)
+	}
+
+	if quota.MaxKeys > 0 && projectedKeys > quota.MaxKeys {
+		return fmt.Errorf("kv: tenant %q quota exceeded: max %d keys", tenantID, quota.MaxKeys)
+	}
+	if quota.MaxBytes > 0 && projectedBytes > quota.MaxBytes {
+		return fmt.Errorf("kv: tenant %q quota exceeded: max %d bytes", tenantID, quota.MaxBytes)
+	}
+	return nil
+}
+
+func (p *Plugin) Delete(ctx context.Context, key string) (err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "kv.Delete")
+		p.tracer.SetAttribute(ctx, "kv.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	if key == "" {
 		return ErrEmptyKey
 	}
-	if err := p.storage.Delete(ctx, []byte(key)); err != nil {
+	if err := p.storageFor(ctx).Delete(ctx, []byte(key)); err != nil {
 		return err
 	}
 	p.publish(ctx, api.TopicKVDelete, map[string]any{"key": key})
@@ -191,7 +310,19 @@ func (p *Plugin) Exists(ctx context.Context, key string) (bool, error) {
 
 // Incr performs a read-modify-write increment. See incrMu doc comment for
 // the concurrency-granularity tradeoff.
-func (p *Plugin) Incr(ctx context.Context, key string, delta int64) (int64, error) {
+func (p *Plugin) Incr(ctx context.Context, key string, delta int64) (result int64, err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "kv.Incr")
+		p.tracer.SetAttribute(ctx, "kv.key", key)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
 	if key == "" {
 		return 0, ErrEmptyKey
 	}
@@ -199,7 +330,7 @@ func (p *Plugin) Incr(ctx context.Context, key string, delta int64) (int64, erro
 	defer p.incrMu.Unlock()
 
 	var cur int64
-	if v, ok, err := p.storage.Get(ctx, []byte(key)); err != nil {
+	if v, ok, err := p.storageFor(ctx).Get(ctx, []byte(key)); err != nil {
 		return 0, err
 	} else if ok {
 		plain, err := p.unseal(ctx, key, v)
@@ -219,7 +350,7 @@ func (p *Plugin) Incr(ctx context.Context, key string, delta int64) (int64, erro
 	if err != nil {
 		return 0, err
 	}
-	if err := p.storage.Put(ctx, api.Entry{Key: []byte(key), Value: sealed}); err != nil {
+	if err := p.storageFor(ctx).Put(ctx, api.Entry{Key: []byte(key), Value: sealed}); err != nil {
 		return 0, err
 	}
 	p.publish(ctx, api.TopicKVPut, map[string]any{"key": key, "size": len(encoded)})
@@ -230,7 +361,7 @@ func (p *Plugin) Incr(ctx context.Context, key string, delta int64) (int64, erro
 // is an O(n) full scan — intended for small keyspaces and tooling. Scan is
 // the paginated, production-safe path for large keyspaces.
 func (p *Plugin) Keys(ctx context.Context, pattern string) ([]string, error) {
-	it, err := p.storage.Scan(ctx, nil)
+	it, err := p.storageFor(ctx).Scan(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -257,15 +388,26 @@ func (p *Plugin) Keys(ctx context.Context, pattern string) ([]string, error) {
 // Scan returns up to limit items with the given prefix, resuming after
 // cursor (the last key seen in the previous page; empty starts at the
 // beginning). nextCursor is empty when there are no more items.
-func (p *Plugin) Scan(ctx context.Context, prefix string, limit int, cursor string) (map[string][]byte, string, error) {
-	it, err := p.storage.Scan(ctx, []byte(prefix))
+func (p *Plugin) Scan(ctx context.Context, prefix string, limit int, cursor string) (items map[string][]byte, nextCursor string, err error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "kv.Scan")
+		p.tracer.SetAttribute(ctx, "kv.prefix", prefix)
+		defer func() {
+			if err != nil {
+				p.tracer.RecordError(ctx, err)
+			}
+			end()
+		}()
+	}
+
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(prefix))
 	if err != nil {
 		return nil, "", err
 	}
 	defer it.Close()
 
-	items := make(map[string][]byte)
-	nextCursor := ""
+	items = make(map[string][]byte)
 	resumed := cursor == ""
 	count := 0
 

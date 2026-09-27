@@ -28,6 +28,7 @@ import (
 	"github.com/oarkflow/velocity/v2/plugins/metrics"
 	"github.com/oarkflow/velocity/v2/plugins/notifications"
 	"github.com/oarkflow/velocity/v2/plugins/object"
+	"github.com/oarkflow/velocity/v2/plugins/raft"
 	"github.com/oarkflow/velocity/v2/plugins/redisdata"
 	"github.com/oarkflow/velocity/v2/plugins/replication"
 	"github.com/oarkflow/velocity/v2/plugins/resp"
@@ -37,6 +38,9 @@ import (
 	"github.com/oarkflow/velocity/v2/plugins/sql"
 	storagelsm "github.com/oarkflow/velocity/v2/plugins/storage-lsm"
 	storagemem "github.com/oarkflow/velocity/v2/plugins/storage-mem"
+	"github.com/oarkflow/velocity/v2/plugins/tenancy"
+	"github.com/oarkflow/velocity/v2/plugins/tracing"
+	"github.com/oarkflow/velocity/v2/plugins/transaction"
 	"github.com/oarkflow/velocity/v2/plugins/web"
 )
 
@@ -54,7 +58,7 @@ import (
 //
 // storageDep/cryptoDep are resolved from the manifest itself (see
 // resolveDep below) rather than hardcoded, so a manifest that enables
-// storage-mem instead of storage-lsm (e.g. config/velocityd.minimal.json)
+// storage-mem instead of storage-lsm (e.g. config/velocityd.minimal.bcl)
 // actually works end to end — swapping which backend plugin is enabled in
 // the manifest is the whole story for changing it, matching what
 // docs/ARCHITECTURE.md promises. A manifest enabling neither, or both,
@@ -137,6 +141,26 @@ func AllPlugins(manifest kernel.Manifest) []api.Plugin {
 		// plugin boots successfully but is permanently inert (a safe
 		// failure mode, not a bug — see plugins/sandbox's own doc comment).
 		sandbox.NewPlugin(),
+
+		tenancy.NewPlugin(storageDep),
+		// Disabled by default in the example manifests — enabling
+		// distributed tracing is an operator decision (it needs a real
+		// OTLP collector to be useful), not a default. Off (empty
+		// otlp_endpoint) means every span is a real no-op via otel's own
+		// no-op tracer, zero overhead.
+		tracing.NewPlugin(),
+		// Cross-plugin atomic transactions only work when participants
+		// (currently kv + secret) share the SAME storage backend instance
+		// — true by default in this manifest, since everything resolves
+		// storageDep to one of storage-lsm/storage-mem.
+		transaction.NewPlugin(),
+		// Disabled by default: real Raft consensus (leader election + log
+		// replication + quorum commit), but a fixed peer set only — no
+		// membership changes, no log compaction/snapshotting yet. See
+		// plugins/raft's own doc comment for the exact scope boundary.
+		// This is separate from and does not replace "replication"
+		// (gossip + async, still the default multi-node story).
+		raft.NewPlugin(storageDep),
 	}
 }
 

@@ -20,18 +20,20 @@ import (
 )
 
 func main() {
-	manifestPath := flag.String("manifest", "config/velocityd.example.json", "path to the plugin manifest JSON file")
+	manifestPath := flag.String("manifest", "config/velocityd.example.bcl", "path to the plugin manifest BCL file")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 15*time.Second, "grace period for shutdown before forcing exit")
+	watchManifest := flag.Bool("watch-manifest", false, "poll the manifest file for changes and hot-reload the kernel when it's edited (also reloads on SIGHUP on non-Windows platforms) — see kernel.Reload's doc comment for exactly what a reload does and refuses")
+	watchInterval := flag.Duration("watch-interval", 2*time.Second, "how often to check the manifest file's mtime when -watch-manifest is set")
 	flag.Parse()
 
-	if err := run(*manifestPath, *shutdownTimeout); err != nil {
+	if err := run(*manifestPath, *shutdownTimeout, *watchManifest, *watchInterval); err != nil {
 		fmt.Fprintln(os.Stderr, "velocityd:", err)
 		os.Exit(1)
 	}
 }
 
-func run(manifestPath string, shutdownTimeout time.Duration) error {
-	manifest, err := kernel.LoadManifestJSON(manifestPath)
+func run(manifestPath string, shutdownTimeout time.Duration, watchManifest bool, watchInterval time.Duration) error {
+	manifest, err := kernel.LoadManifestBCL(manifestPath)
 	if err != nil {
 		return fmt.Errorf("loading manifest %q: %w", manifestPath, err)
 	}
@@ -45,6 +47,21 @@ func run(manifestPath string, shutdownTimeout time.Duration) error {
 		return fmt.Errorf("booting kernel: %w", err)
 	}
 	logHealth(k)
+
+	if watchManifest {
+		absPath := manifestPath
+		go kernel.WatchManifestWithSignal(ctx, absPath, watchInterval, func(newManifest kernel.Manifest) error {
+			log.Println("velocityd: manifest change detected, reloading...")
+			if err := k.Reload(context.Background(), newManifest, bootstrap.AllPlugins(newManifest)); err != nil {
+				log.Println("velocityd: reload failed, previous configuration still running:", err)
+				return err
+			}
+			log.Println("velocityd: reload applied successfully")
+			logHealth(k)
+			return nil
+		})
+		log.Printf("velocityd: watching %q for changes every %s (SIGHUP also triggers a reload on non-Windows)", manifestPath, watchInterval)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

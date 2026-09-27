@@ -31,10 +31,23 @@ type tx struct {
 	eng  *Engine
 	undo []undoFn
 	done bool
+
+	// lastCtx is the ctx from the most recent Exec/Query call, captured
+	// because api.Tx.Rollback() takes no ctx parameter of its own but
+	// still needs to replay undo operations against the SAME KVService
+	// call path Exec used — including any tenant scoping carried in ctx
+	// (see api.WithTenant/TenantFromContext). Using context.Background()
+	// here instead would replay undos against the GLOBAL keyspace even
+	// when the original writes were tenant-scoped, silently failing to
+	// undo them (and potentially touching unrelated global-keyspace data
+	// under a colliding key) — a real bug this field fixes, not a
+	// hypothetical one. Defaults to context.Background() only for the
+	// degenerate case of a Rollback with nothing ever staged.
+	lastCtx context.Context
 }
 
 func newTx(eng *Engine) *tx {
-	return &tx{eng: eng}
+	return &tx{eng: eng, lastCtx: context.Background()}
 }
 
 var _ api.Tx = (*tx)(nil)
@@ -45,6 +58,7 @@ func (t *tx) Exec(ctx context.Context, query string, args ...any) (int64, error)
 	if t.done {
 		return 0, errors.New("sql: transaction already committed or rolled back")
 	}
+	t.lastCtx = ctx
 	parseMu.Lock()
 	stmt, err := sqlparser.ParseStatement(query)
 	if err != nil {
@@ -97,7 +111,7 @@ func (t *tx) Rollback() error {
 		return errors.New("sql: transaction already committed or rolled back")
 	}
 	t.done = true
-	ctx := context.Background()
+	ctx := t.lastCtx
 	var firstErr error
 	for i := len(t.undo) - 1; i >= 0; i-- {
 		if t.undo[i] == nil {

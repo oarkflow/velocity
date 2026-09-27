@@ -166,13 +166,13 @@ extensible" concretely means for this rework:
    an observer relationship, per (d)) — prefer subscribe unless you
    genuinely need a synchronous return value.
 4. Construct it in `cmd/velocityd/main.go`'s `allPlugins()`.
-5. Add an entry for it to a manifest (`v2/config/velocityd.example.json`
+5. Add an entry for it to a manifest (`v2/config/velocityd.example.bcl`
    or your own), with `"enabled": true` and whatever config it reads via
    `k.Config().Scoped(pluginName)`.
 
 That's it. No kernel change, no change to any other plugin. A minimal
-deployment (see `v2/config/velocityd.minimal.json`, which enables only
-`storage-mem` + `kv`) and a full one (`velocityd.example.json`, enabling
+deployment (see `v2/config/velocityd.minimal.bcl`, which enables only
+`storage-mem` + `kv`) and a full one (`velocityd.example.bcl`, enabling
 everything currently built) are both just different manifests against the
 exact same binary.
 

@@ -295,3 +295,69 @@ func TestGetUnknownSecretFails(t *testing.T) {
 		t.Fatalf("expected error for unknown secret")
 	}
 }
+
+func TestTenantIsolation_SameNameDoesNotCollide(t *testing.T) {
+	p, _ := newSecretPlugin(t)
+	ctxA := api.WithTenant(context.Background(), "tenant-a")
+	ctxB := api.WithTenant(context.Background(), "tenant-b")
+
+	if _, err := p.Set(ctxA, "db-password", []byte("a-secret")); err != nil {
+		t.Fatalf("Set (tenant-a): %v", err)
+	}
+	if _, err := p.Set(ctxB, "db-password", []byte("b-secret")); err != nil {
+		t.Fatalf("Set (tenant-b): %v", err)
+	}
+
+	gotA, err := p.Get(ctxA, "db-password", 0)
+	if err != nil || !bytes.Equal(gotA, []byte("a-secret")) {
+		t.Fatalf("tenant-a Get: got %q, err=%v, want %q", gotA, err, "a-secret")
+	}
+	gotB, err := p.Get(ctxB, "db-password", 0)
+	if err != nil || !bytes.Equal(gotB, []byte("b-secret")) {
+		t.Fatalf("tenant-b Get: got %q, err=%v, want %q", gotB, err, "b-secret")
+	}
+
+	// A second version under tenant-a must not affect tenant-b's version
+	// history for the same secret name.
+	if _, err := p.Set(ctxA, "db-password", []byte("a-secret-v2")); err != nil {
+		t.Fatalf("Set v2 (tenant-a): %v", err)
+	}
+	versA, err := p.Versions(ctxA, "db-password")
+	if err != nil || len(versA) != 2 {
+		t.Fatalf("tenant-a Versions: got %d versions, err=%v, want 2", len(versA), err)
+	}
+	versB, err := p.Versions(ctxB, "db-password")
+	if err != nil || len(versB) != 1 {
+		t.Fatalf("tenant-b Versions: got %d versions, err=%v, want 1 (must be unaffected by tenant-a's v2)", len(versB), err)
+	}
+
+	// No-tenant context must never see either tenant's data under the same
+	// name (proves isolation isn't just "different value," but a truly
+	// separate keyspace).
+	if _, err := p.Get(context.Background(), "db-password", 0); err == nil {
+		t.Fatalf("no-tenant Get unexpectedly found a secret that only exists under tenant-a/tenant-b scopes")
+	}
+}
+
+func TestTenantIsolation_DeleteDoesNotCrossTenants(t *testing.T) {
+	p, _ := newSecretPlugin(t)
+	ctxA := api.WithTenant(context.Background(), "tenant-a")
+	ctxB := api.WithTenant(context.Background(), "tenant-b")
+
+	if _, err := p.Set(ctxA, "shared-name", []byte("a-val")); err != nil {
+		t.Fatalf("Set (tenant-a): %v", err)
+	}
+	if _, err := p.Set(ctxB, "shared-name", []byte("b-val")); err != nil {
+		t.Fatalf("Set (tenant-b): %v", err)
+	}
+	if err := p.Delete(ctxA, "shared-name"); err != nil {
+		t.Fatalf("Delete (tenant-a): %v", err)
+	}
+	if _, err := p.Get(ctxA, "shared-name", 0); err == nil {
+		t.Fatalf("tenant-a's secret should be deleted")
+	}
+	gotB, err := p.Get(ctxB, "shared-name", 0)
+	if err != nil || !bytes.Equal(gotB, []byte("b-val")) {
+		t.Fatalf("tenant-b's secret must survive tenant-a's Delete: got %q, err=%v", gotB, err)
+	}
+}

@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/oarkflow/sqlparser/ast"
 	"github.com/oarkflow/sqlparser/lexer"
 
 	"github.com/oarkflow/velocity/v2/api"
 )
+
+// disableOuterIndexProbe is a test/benchmark-only escape hatch that
+// reverts resolve()'s row==nil outer-row fallback to its pre-fix
+// behavior (always erroring), so BenchmarkCorrelatedExists can report a
+// real before/after number for the identical query against identical
+// data, rather than an estimate. Never read outside a test binary.
+var disableOuterIndexProbe int32
 
 // columnRef reports whether expr is a column reference, returning its bare
 // name (e.g. "id") and, for a qualified reference (e.g. "a.id"), the
@@ -65,6 +73,25 @@ func resolve(ctx context.Context, kv api.KVService, expr ast.Expr, row api.Row, 
 	}
 	if bare, qualified, ok := columnRef(expr); ok {
 		if row == nil {
+			// No current (inner) row yet — this happens when resolving a
+			// value BEFORE any row has been fetched, e.g.
+			// extractEqualityCandidate/extractRangeCandidate probing a
+			// WHERE clause to decide whether an index lookup is possible
+			// (see index.go/range_index.go). The only thing resolvable in
+			// that state is a QUALIFIED reference into the OUTER row of a
+			// correlated subquery's condition (e.g. "o.id" in
+			// `i.order_id = o.id`) — that value is already fully
+			// determined independent of which inner row we're about to
+			// look at, so it's safe to resolve here. This is what lets
+			// extractEqualityCandidate/extractRangeCandidate recognize a
+			// correlated equality/range condition as an indexable
+			// candidate instead of forcing every correlated subquery onto
+			// the full-scan path.
+			if qualified != "" && b != nil && b.outer != nil && atomic.LoadInt32(&disableOuterIndexProbe) == 0 {
+				if v, present := b.outer[qualified]; present {
+					return v, nil
+				}
+			}
 			return nil, fmt.Errorf("sql: column reference %q not valid in this context", bare)
 		}
 		// A QUALIFIED reference (e.g. "o.id") is checked against the inner

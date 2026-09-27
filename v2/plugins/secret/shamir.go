@@ -2,10 +2,13 @@ package secret
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/oarkflow/shamir"
@@ -29,10 +32,23 @@ import (
 // shareMeta is persisted so a later CombineMasterKey call can verify it
 // reconstructed the correct key, without this plugin ever storing the
 // shares themselves.
+//
+// AuthKeyB64 is shamir v0.0.3's now-mandatory per-share HMAC-SHA256
+// tamper-evidence key (Split/Combine reject a nil *shamir.AuthKey as of
+// this version — verified against the library's own source, this isn't
+// an assumption). It is generated fresh per SplitMasterKey call and
+// persisted alongside the fingerprint, in the SAME storage trust
+// boundary — so it protects against accidental share corruption or
+// combining the wrong set of shares (this plugin's actual, stated threat
+// model), not against an attacker who already has read access to this
+// plugin's own storage (who also never finds the master key or the
+// shares here, so the blast radius is unchanged from before this
+// library version required an explicit key).
 type shareMeta struct {
 	Threshold   int       `json:"threshold"`
 	TotalShares int       `json:"total_shares"`
 	Fingerprint string    `json:"fingerprint"` // sha256(masterKey), hex
+	AuthKeyB64  string    `json:"auth_key_b64"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -43,13 +59,28 @@ func fingerprint(key []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// newRandomAuthKey generates a fresh 32-byte key and wraps it as a
+// *shamir.AuthKey (shamir.NewAuthKey rejects keys shorter than 16 bytes;
+// 32 is the library's own recommendation).
+func newRandomAuthKey() (*shamir.AuthKey, []byte, error) {
+	raw := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, raw); err != nil {
+		return nil, nil, fmt.Errorf("generating auth key: %w", err)
+	}
+	ak, err := shamir.NewAuthKey(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("shamir.NewAuthKey: %w", err)
+	}
+	return ak, raw, nil
+}
+
 // SplitMasterKey splits masterKey into totalShares parts requiring any
-// threshold of them to reconstruct (github.com/oarkflow/shamir's
-// Split/Combine — a straight Shamir's Secret Sharing scheme over
-// GF(2^8), no separate auth-key wrapper in this library version, unlike
-// v1's shamir.Split(rand.Reader, key, t, n, authKey) signature). Persists
-// only threshold/totalShares/a fingerprint of masterKey, never the key or
-// the shares.
+// threshold of them to reconstruct, via github.com/oarkflow/shamir's real
+// Split/Combine (a Shamir's Secret Sharing scheme over GF(2^8)). Persists
+// threshold/totalShares/a fingerprint of masterKey and the per-share
+// AuthKey (see shareMeta's doc comment for why persisting the AuthKey is
+// safe given this plugin's threat model) — but never the master key or
+// the shares themselves.
 func (p *Plugin) SplitMasterKey(ctx context.Context, masterKey []byte, threshold, totalShares int) ([][]byte, error) {
 	if threshold < 2 {
 		return nil, fmt.Errorf("%s: threshold must be >= 2, got %d", pluginName, threshold)
@@ -57,7 +88,11 @@ func (p *Plugin) SplitMasterKey(ctx context.Context, masterKey []byte, threshold
 	if totalShares < threshold {
 		return nil, fmt.Errorf("%s: totalShares (%d) must be >= threshold (%d)", pluginName, totalShares, threshold)
 	}
-	shares, err := shamir.Split(masterKey, threshold, totalShares)
+	authKey, authKeyRaw, err := newRandomAuthKey()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", pluginName, err)
+	}
+	shares, err := shamir.Split(rand.Reader, masterKey, threshold, totalShares, authKey)
 	if err != nil {
 		return nil, fmt.Errorf("%s: shamir split: %w", pluginName, err)
 	}
@@ -66,6 +101,7 @@ func (p *Plugin) SplitMasterKey(ctx context.Context, masterKey []byte, threshold
 		Threshold:   threshold,
 		TotalShares: totalShares,
 		Fingerprint: fingerprint(masterKey),
+		AuthKeyB64:  base64.StdEncoding.EncodeToString(authKeyRaw),
 		CreatedAt:   time.Now().UTC(),
 	}
 	data, err := json.Marshal(meta)
@@ -82,27 +118,41 @@ func (p *Plugin) SplitMasterKey(ctx context.Context, masterKey []byte, threshold
 // (per the persisted shareMeta) and verifies the result's fingerprint
 // matches what SplitMasterKey recorded, catching a caller accidentally
 // combining the wrong/corrupted shares before it's used for anything.
+//
+// Requires shareMeta to have been persisted by a prior SplitMasterKey
+// call on this same plugin instance/storage — shamir v0.0.3's Combine
+// needs the SAME *shamir.AuthKey Split was given (nil is not accepted),
+// so without persisted metadata there is no way to recover the key.
 func (p *Plugin) CombineMasterKey(ctx context.Context, shares [][]byte) ([]byte, error) {
-	key, err := shamir.Combine(shares)
-	if err != nil {
-		return nil, fmt.Errorf("%s: shamir combine: %w", pluginName, err)
-	}
-
 	data, ok, err := p.storage.Get(ctx, []byte(masterKeyMetaKey))
 	if err != nil {
 		return nil, fmt.Errorf("%s: reading share metadata: %w", pluginName, err)
 	}
-	if ok {
-		var meta shareMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
-			return nil, fmt.Errorf("%s: corrupt share metadata: %w", pluginName, err)
-		}
-		if len(shares) < meta.Threshold {
-			return nil, fmt.Errorf("%s: %d shares provided, threshold is %d", pluginName, len(shares), meta.Threshold)
-		}
-		if fingerprint(key) != meta.Fingerprint {
-			return nil, fmt.Errorf("%s: combined key does not match the original master key's fingerprint — wrong or corrupted shares", pluginName)
-		}
+	if !ok {
+		return nil, fmt.Errorf("%s: no share metadata found — CombineMasterKey requires a prior SplitMasterKey call on this storage", pluginName)
+	}
+	var meta shareMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("%s: corrupt share metadata: %w", pluginName, err)
+	}
+	if len(shares) < meta.Threshold {
+		return nil, fmt.Errorf("%s: %d shares provided, threshold is %d", pluginName, len(shares), meta.Threshold)
+	}
+	authKeyRaw, err := base64.StdEncoding.DecodeString(meta.AuthKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("%s: corrupt persisted auth key: %w", pluginName, err)
+	}
+	authKey, err := shamir.NewAuthKey(authKeyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: reconstructing auth key: %w", pluginName, err)
+	}
+
+	key, err := shamir.Combine(shares, authKey)
+	if err != nil {
+		return nil, fmt.Errorf("%s: shamir combine: %w", pluginName, err)
+	}
+	if fingerprint(key) != meta.Fingerprint {
+		return nil, fmt.Errorf("%s: combined key does not match the original master key's fingerprint — wrong or corrupted shares", pluginName)
 	}
 	return key, nil
 }
