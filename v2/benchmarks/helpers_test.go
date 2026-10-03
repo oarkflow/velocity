@@ -41,11 +41,22 @@ func bootKV(b *testing.B, storageName string) (api.KVService, func()) {
 	return svc.(api.KVService), func() { _ = k.Shutdown(ctx) }
 }
 
-// bootObject boots storage-lsm + object.
+// bootObject boots storage-lsm + object with the default fsync mode
+// (F_FULLFSYNC on Darwin — real power-loss durability at real cost).
 func bootObject(b *testing.B) (api.ObjectService, func()) {
 	b.Helper()
+	return bootObjectFsync(b, "full")
+}
+
+// bootObjectFsync boots storage-lsm + object with the given fsync_mode
+// ("full" or "posix") — see plugins/storage-lsm's FsyncMode doc for the
+// durability trade. Object Put commits through a Batch, which is
+// unconditionally durable, so this knob is exactly what controls the
+// per-PutObject commit cost.
+func bootObjectFsync(b *testing.B, fsyncMode string) (api.ObjectService, func()) {
+	b.Helper()
 	manifest := kernel.Manifest{Plugins: []kernel.PluginSpec{
-		{Name: "storage-lsm", Enabled: true, Config: map[string]any{"dir": b.TempDir()}},
+		{Name: "storage-lsm", Enabled: true, Config: map[string]any{"dir": b.TempDir(), "fsync_mode": fsyncMode}},
 		{Name: "object", Enabled: true},
 	}}
 	k := kernel.New(manifest)

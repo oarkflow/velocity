@@ -1,133 +1,128 @@
 # Velocity v2 — Benchmark Results
 
-These are real numbers from `go test -bench=. -benchmem ./benchmarks/...`,
-run in-process against the actual plugin implementations (booted through
-the same `kernel.Boot` path production uses — no shortcuts), not
-estimates. This closes a gap flagged directly by the project owner: v1 had
-benchmark *infrastructure* (`benchmarks/sql_comparison`) but never
-committed actual numbers; v2 previously had no benchmarks at all.
+Real numbers from `go test -bench=. -benchmem`, run in-process against the
+actual plugin implementations (booted through the same `kernel.Boot` path
+production uses — no shortcuts), not estimates.
 
 - **Machine/Go**: `go version go1.27.0 darwin/arm64`, `cpu: Apple M2 Pro`
-- **Date**: 2026-09-27
-- **Method**: `go test -bench=. -benchmem -benchtime=1s -run=^$ ./benchmarks/...`
-- **Caveat**: single machine, single run, `-benchtime=1s` — these are
-  representative orders of magnitude, not a rigorous statistical result.
-  For a real regression-tracking setup, run each benchmark multiple times
-  with `-count=10` and compare with
-  [`benchstat`](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat)
-  (not done here for time).
+- **Date**: 2026-10-03 (re-run with `-count=3`; medians quoted. Supersedes
+  the 2026-09-27 capture)
+- **Method**: `go test -bench=. -benchmem -benchtime=1s -count=3 -run=^$ .`
+- **Caveats**: single machine. Write-path timings on this host varied up to
+  ~10x across the day (APFS background activity), so treat durable-write
+  numbers as order-of-magnitude and re-verify on your hardware. Two
+  numbers in the 2026-09-27 capture (`ObjectGet_1MB` at 44.7µs,
+  `KVPut_StorageLSM` at 6.4µs) could not be reproduced on any code state
+  checked (committed HEAD or working tree) and are corrected below —
+  flagged explicitly rather than quietly dropped.
 
-## Raw output
-
-Crypto, KV, Object, and Search benchmarks (one run):
-
-```
-goos: darwin
-goarch: arm64
-pkg: github.com/oarkflow/velocity/v2/benchmarks
-cpu: Apple M2 Pro
-BenchmarkEncrypt_XChaCha20_1KB-10     612211      1882 ns/op    544.07 MB/s      2328 B/op     3 allocs/op
-BenchmarkEncrypt_XChaCha20_1MB-10        993   1200498 ns/op    873.45 MB/s   2113574 B/op     3 allocs/op
-BenchmarkDecrypt_XChaCha20_1KB-10     808039      1509 ns/op    678.49 MB/s      1024 B/op     1 allocs/op
-BenchmarkDecrypt_XChaCha20_1MB-10       1023   1158021 ns/op    905.49 MB/s   1048580 B/op     1 allocs/op
-BenchmarkEncrypt_FIPS_1KB-10         1740051     736.4 ns/op   1390.55 MB/s      2320 B/op     3 allocs/op
-BenchmarkEncrypt_FIPS_1MB-10             3769   303300 ns/op   3457.23 MB/s   2113564 B/op     3 allocs/op
-BenchmarkDecrypt_FIPS_1KB-10          4194847     289.8 ns/op   3533.59 MB/s      1024 B/op     1 allocs/op
-BenchmarkDecrypt_FIPS_1MB-10             6018   213418 ns/op   4913.25 MB/s   1048580 B/op     1 allocs/op
-BenchmarkKVPut_StorageLSM-10           186285      6445 ns/op       672 B/op    14 allocs/op
-BenchmarkKVPut_StorageMem-10          2193175     526.6 ns/op       750 B/op     8 allocs/op
-BenchmarkKVGet_StorageLSM-10          9003062     131.1 ns/op       151 B/op     3 allocs/op
-BenchmarkKVGet_StorageMem-10         10060666     119.7 ns/op       151 B/op     3 allocs/op
-BenchmarkKVDelete_StorageLSM-10       2112907     534.2 ns/op       455 B/op     9 allocs/op
-BenchmarkKVDelete_StorageMem-10       3140011     446.3 ns/op       391 B/op     5 allocs/op
-BenchmarkKVScan_StorageLSM-10               82  14064299 ns/op  10466090 B/op  113220 allocs/op
-BenchmarkKVScan_StorageMem-10                84  13803551 ns/op  10462362 B/op  112976 allocs/op
-BenchmarkObjectPut_1KB-10                  378   2900643 ns/op      5492 B/op     54 allocs/op
-BenchmarkObjectPut_64KB-10                 354   3123947 ns/op    141545 B/op     66 allocs/op
-BenchmarkObjectPut_1MB-10                  229   5402412 ns/op   2231400 B/op     74 allocs/op
-BenchmarkObjectGet_1KB-10                656719      1812 ns/op      1835 B/op    10 allocs/op
-BenchmarkObjectGet_64KB-10               195847      6036 ns/op     66424 B/op    10 allocs/op
-BenchmarkObjectGet_1MB-10                 27694     44746 ns/op   1049481 B/op    10 allocs/op
-BenchmarkObjectList-10                      564   1965094 ns/op   1229195 B/op   8077 allocs/op
-BenchmarkFullTextIndex-10                 18211     63966 ns/op      9730 B/op   184 allocs/op
-BenchmarkFullTextQuery-10                   328   3504345 ns/op   2351589 B/op  16487 allocs/op
-BenchmarkVectorUpsert_Dim12-10              6518    884653 ns/op    188260 B/op  1673 allocs/op
-BenchmarkVectorSearch_1000-10               8698    139592 ns/op     51680 B/op   475 allocs/op
-BenchmarkVectorSearch_10000-10              5881    221723 ns/op     80908 B/op   540 allocs/op
-PASS
-ok      github.com/oarkflow/velocity/v2/benchmarks     120.692s
-```
-
-SQL benchmarks (separate run, same machine, immediately after):
+## Raw output (medians of 3)
 
 ```
-goos: darwin
-goarch: arm64
-pkg: github.com/oarkflow/velocity/v2/benchmarks
-cpu: Apple M2 Pro
-BenchmarkSQLInsert-10               121204      9840 ns/op      2364 B/op      49 allocs/op
-BenchmarkSQLSelectByPK-10           332206      3648 ns/op      1709 B/op      31 allocs/op
-BenchmarkSQLSelectWhereScan-10           21  49057022 ns/op  36170534 B/op  412814 allocs/op
-PASS
-ok      github.com/oarkflow/velocity/v2/benchmarks     7.566s
-```
+BenchmarkEncrypt_XChaCha20_1KB     2129 ns/op    481 MB/s    2328 B/op   3 allocs/op
+BenchmarkEncrypt_XChaCha20_1MB  1358390 ns/op    772 MB/s  2113570 B/op   3 allocs/op
+BenchmarkDecrypt_XChaCha20_1KB    1644 ns/op    623 MB/s    1024 B/op   1 allocs/op
+BenchmarkDecrypt_XChaCha20_1MB  1173975 ns/op    893 MB/s  1048580 B/op   1 allocs/op
+BenchmarkEncrypt_FIPS_1KB          856 ns/op   1197 MB/s    2320 B/op   3 allocs/op
+BenchmarkEncrypt_FIPS_1MB       325515 ns/op   3221 MB/s  2113561 B/op   3 allocs/op
+BenchmarkDecrypt_FIPS_1KB          353 ns/op   2900 MB/s    1024 B/op   1 allocs/op
+BenchmarkDecrypt_FIPS_1MB       222908 ns/op   4704 MB/s  1048581 B/op   1 allocs/op
 
-(Run separately with `-bench=^BenchmarkSQL` only because `plugins/sql` was
-being edited by a parallel agent at the moment of the first full run;
-both runs are real, on the same machine, back to back.)
+BenchmarkKVPut_StorageLSM         3620 ns/op    2888 B/op     32 allocs/op
+BenchmarkKVPut_StorageMem          575 ns/op     376 B/op      5 allocs/op
+BenchmarkKVGet_StorageLSM          176 ns/op     160 B/op      4 allocs/op
+BenchmarkKVGet_StorageMem          155 ns/op     151 B/op      3 allocs/op
+BenchmarkKVDelete_StorageLSM      2076 ns/op    1277 B/op     17 allocs/op
+BenchmarkKVDelete_StorageMem       341 ns/op      39 B/op      2 allocs/op
+BenchmarkKVScan_StorageLSM     28514886 ns/op  35909657 B/op  59979 allocs/op  (5,000-key prefix)
+BenchmarkKVScan_StorageMem     20482391 ns/op  10462444 B/op  112976 allocs/op
+
+BenchmarkObjectPut_1KB          3660930 ns/op    6873 B/op     38 allocs/op
+BenchmarkObjectPut_64KB         5552594 ns/op  185603 B/op     57 allocs/op
+BenchmarkObjectPut_1MB         23545987 ns/op 10134119 B/op    273 allocs/op
+BenchmarkObjectPut_1KB_fast      121235 ns/op    8950 B/op     53 allocs/op   (fsync_mode: posix)
+BenchmarkObjectPut_1MB_fast    36280498 ns/op 11699910 B/op    307 allocs/op   (noisy, see below)
+BenchmarkObjectGet_1KB            3200 ns/op    3085 B/op     15 allocs/op
+BenchmarkObjectGet_64KB          68251 ns/op  180323 B/op     18 allocs/op
+BenchmarkObjectGet_1MB          916286 ns/op  3189110 B/op     54 allocs/op
+BenchmarkObjectList             4224164 ns/op  1697528 B/op   5072 allocs/op
+
+BenchmarkFullTextIndex           32329 ns/op    8291 B/op    114 allocs/op
+BenchmarkFullTextQuery         8162161 ns/op  4777679 B/op  10315 allocs/op  (2,000 docs)
+BenchmarkVectorUpsert_Dim12    1522798 ns/op  186374 B/op   1650 allocs/op
+BenchmarkVectorSearch_1000      226807 ns/op   51470 B/op    466 allocs/op
+BenchmarkVectorSearch_10000     188221 ns/op   79766 B/op    492 allocs/op
+
+BenchmarkSQLInsert               17392 ns/op    9425 B/op    127 allocs/op
+BenchmarkSQLSelectByPK            4151 ns/op    1785 B/op     32 allocs/op
+BenchmarkSQLSelectWhereScan    14201427 ns/op 10968916 B/op  147744 allocs/op  (10,000 rows)
+```
 
 ## What this tells you
 
-**Crypto (XChaCha20-Poly1305 vs. FIPS AES-256-GCM)**: at both 1KB and 1MB,
-FIPS AES-GCM is measurably *faster* than XChaCha20-Poly1305 on this
-machine (e.g. 1MB decrypt: 4913 MB/s FIPS vs. 905 MB/s XChaCha20) — this
-is expected on Apple silicon, which has hardware AES instructions but no
-hardware ChaCha20 acceleration. This is the opposite of the common
-assumption that ChaCha20 is always faster than AES-GCM — that's only true
-on hardware *without* AES-NI/ARMv8 crypto extensions. v2's architecture
-lets you pick either via the manifest with zero code changes, so this is
-a real, actionable per-deployment choice, not a fixed trade-off.
+**Crypto**: FIPS AES-GCM is ~2-5x faster than XChaCha20-Poly1305 on Apple
+Silicon (hardware AES, no hardware ChaCha) — e.g. 1MB decrypt 4704 vs 893
+MB/s. Pick via the manifest; this is a per-deployment choice, not a fixed
+trade-off.
 
-**KV (storage-lsm vs. storage-mem)**: Put is ~12x slower on storage-lsm
-than storage-mem (6445 ns/op vs. 526.6 ns/op) — the WAL fsync/durability
-cost, exactly as expected. Get is nearly identical between the two
-(131 ns vs. 120 ns) since reads don't touch the WAL. Scan is the slowest
-KV operation by far on both backends (~14ms for a 5000-key prefix scan) —
-this reflects the current paginated-Scan implementation's cost, not a
-storage-engine difference (LSM and Mem are within 2% of each other here),
-and is a reasonable target for future optimization work.
+**KV**: Put on `storage-lsm` (no per-write fsync; batched WAL + checkpoint
+durability) is ~6x slower than `storage-mem` (3.6µs vs 0.6µs) — the WAL
+append + memtable cost. Get is backend-independent (~176ns) since reads
+never touch the WAL. Durable per-write costs (fsync) are in
+`../comparison/RESULTS.md`, where the durability modes are compared
+honestly against other engines.
 
-**Object storage**: Put cost is dominated by fixed overhead, not payload
-size, until 1MB (2.9ms at 1KB vs. 5.4ms at 1MB) — versioning/metadata
-bookkeeping cost is the current bottleneck at small sizes, not I/O
-bandwidth. Get scales much more linearly with size (1.8µs at 1KB up to
-44.7µs at 1MB) and is far cheaper than Put across the board, as expected
-for a versioned store where writes do more bookkeeping than reads.
+**KV Scan (5,000-key prefix)**: ~28ms on storage-lsm with 35.9MB / 60k
+allocs — the map-materializing `kv.Scan` API is the cost, not storage.
+SQL's scan paths now stream (`api.KVStreamScanner`) instead; the KV-level
+`Scan` (map API) remains the heavy variant by design. Still an open
+optimization target for callers that need whole-prefix maps.
 
-**Search**: full-text Index is cheap (64µs/doc) but Query over 2000
-indexed docs is comparatively expensive (3.5ms) — the current full-text
-query path has room for optimization (e.g. precomputed term postings
-rather than a per-query scan, if that's what's happening under the hood).
-HNSW vector Search is the standout result: going from 1,000 to 10,000
-indexed vectors only increased search latency from 139µs to 221µs
-(~1.6x for a 10x data increase) — this is exactly the sub-linear scaling
-HNSW is supposed to provide, and matches the 100% recall result the
-search plugin's own test suite already reported.
+**Object storage**: Put cost is dominated by ONE durable commit per
+PutObject (metadata + every block in a single storage `Batch`) — the
+`_fast` variants prove it: `fsync_mode: posix` drops 1KB Put from ~3.7ms
+to ~0.12ms (~30x) with no other change. The 2026-09-27 claim that this was
+"versioning/metadata bookkeeping cost" was wrong; CPU profiles attribute
+>80% of it to the fsync syscall (F_FULLFSYNC on Darwin). `ObjectPut_1MB_fast`
+is deliberately reported as measured (noisy, 22-45ms across runs) — a 1MB
+WAL append + fsync on this host is where the day's fsync jitter shows most.
+`ObjectGet_1MB` is ~0.9ms (4 blocks of 256KB); the 2026-09-27 figure of
+44.7µs was not reproducible on any code state (it predates per-block range
+storage) and is retracted.
 
-**SQL**: point-lookup SELECT by primary key (3648 ns/op) is roughly
-13,400x faster than a full-table-scan SELECT with a WHERE filter over
-10,000 rows (49ms) — this is the expected, currently-undocumented cost of
-v2's SQL plugin having no secondary indexing yet (every non-PK WHERE
-clause is a full scan, as its own package doc admits). This number is the
-concrete argument for prioritizing secondary indexes in a future pass,
-not a vague "SQL feels slow" impression.
+**Search**: full-text Index ~32µs/doc. Full-text Query over 2,000 docs is
+8.2ms — slower than the 3.5ms of the 09-27 capture and not explained by
+code changes (no search-plugin changes between); reported as measured. HNSW
+vector Search scales sub-linearly: 227µs at 1k vectors, 188µs at 10k
+(10x data, no latency growth — matching the plugin's 100% recall tests).
+
+**SQL**: `SELECT ... WHERE age > 50` over 10,000 rows is **14.2ms**
+(previously 49-55ms) after switching full-table and index walks to the
+streaming KV scan path — 3.5x faster and 4x fewer bytes allocated
+(11MB vs 45MB). Point SELECT by PK is 4.2µs. SQLInsert is 17µs including
+amortized memtable flush/compaction.
+
+## What changed since 2026-09-27 (and why the numbers moved)
+
+- **storage-lsm rework** (landed): streaming sstWriter, refcounted
+  pread-based sstables, size-tiered compaction, lazy value reads on scan.
+- **WAL record encoding** is now allocation-free (the header scratch no
+  longer heap-escapes through `bufio.Writer.Write`; `readRecord` uses one
+  combined key/value allocation + `crc32.Update` instead of three
+  allocations + a hash object). KVPut writes: 57 → 32 allocs/op; compaction
+  merges scale with it.
+- **Commit coalescing** (`commit_interval`): see
+  `../comparison/RESULTS.md` — 200 staged writes covered by 1 fsync.
+- **Streaming scans** (`api.KVStreamScanner`): SQL scan 49ms → 14ms.
+- Two 09-27 figures (`ObjectGet_1MB` 44.7µs, `KVPut` 6.4µs/672B/14 allocs)
+  could not be reproduced and are superseded by the table above.
 
 ## Re-running
 
 ```sh
-cd v2
-go test -bench=. -benchmem -benchtime=1s -run=^$ ./benchmarks/...
+cd v2/benchmarks
+go test -bench=. -benchmem -benchtime=1s -count=3 -run=^$ .
 ```
 
-Pass `-benchtime=5s -count=10` and pipe through `benchstat` for a more
-statistically rigorous comparison across code changes.
+For statistical rigor across code changes, use `-count=10` and
+[`benchstat`](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat).

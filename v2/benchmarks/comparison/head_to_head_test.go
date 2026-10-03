@@ -29,6 +29,13 @@ var factories = []factory{
 	// specifically to make the SQLite comparison apples-to-apples on
 	// durability — see plugins/storage-lsm's FsyncMode doc comment.
 	{"velocity-fast", func(dir string) (KVEngine, error) { return NewVelocityEngineFast(dir) }},
+	// velocity-async uses commit_interval: 1ms with always_sync: false —
+	// Puts return at staging speed and one background fsync/ms durably
+	// covers the window (bounded 1ms staleness, like Redis AOF everysec).
+	// A DIFFERENT durability class from the two modes above; compare it
+	// against engines configured at comparable bounded-staleness, not
+	// against per-write-fsync modes. See NewVelocityEngineAsync's doc.
+	{"velocity-async", func(dir string) (KVEngine, error) { return NewVelocityEngineAsync(dir) }},
 	{"sqlite", func(dir string) (KVEngine, error) { return NewSQLiteEngine(filepath.Join(dir, "bench.db")) }},
 	{"boltdb", func(dir string) (KVEngine, error) { return NewBoltEngine(filepath.Join(dir, "bench.bolt")) }},
 }

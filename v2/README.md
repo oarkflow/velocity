@@ -172,12 +172,12 @@ A plugin can declare `OptionalDependencies()` (e.g. `web` optionally depends on 
 
 Two interchangeable `"storage"` providers, both implementing `api.StorageBackend` (`Get/Put/Delete/Batch/Scan/Snapshot/Close`):
 
-- **`storage-lsm`** — a real LSM engine: WAL with configurable fsync (`fsync_mode: "full"` for real power-loss survival via `F_FULLFSYNC`, or `"posix"`/`"fast"` for plain `fsync(2)`, matching SQLite's actual default guarantee — see [Benchmarks](#benchmarks)), group-commit (concurrent writers' fsyncs coalesce — 25x fewer syscalls under load, verified), memtable → immutable SSTable flush, Bloom filters, tiered compaction. Crash-recovery, torn-write tolerance, and crash-during-flush are all directly tested (`v2/productiontest/`).
+- **`storage-lsm`** — a real LSM engine: WAL with configurable fsync (`fsync_mode: "full"` for real power-loss survival via `F_FULLFSYNC`, or `"posix"`/`"fast"` for plain `fsync(2)`, matching SQLite's actual default guarantee — see [Benchmarks](#benchmarks)), group-commit (concurrent writers' fsyncs coalesce — 25x fewer syscalls under load, verified), optional commit coalescing (`commit_interval` — one fsync per interval covers every staged write, bounded staleness, `Engine.Sync()` as the durability barrier), memtable → immutable SSTable flush, Bloom filters, tiered compaction. Crash-recovery, torn-write tolerance, and crash-during-flush are all directly tested (`v2/productiontest/`).
 - **`storage-mem`** — pure in-memory, zero durability, for tests/embedding/pure-cache use.
 
 ```go
 storagelsm.New() // constructor
-// config: dir, always_sync, fsync_mode ("full"|"posix"|"fast"), checkpoint_interval, reap_interval
+// config: dir, always_sync, fsync_mode ("full"|"posix"|"fast"), commit_interval (e.g. "1ms", 0=off), checkpoint_interval, reap_interval
 ```
 
 ### Key-Value
@@ -512,17 +512,18 @@ Real, reproducible numbers — not estimates — committed in three places:
 - [`benchmarks/comparison/RESULTS.md`](benchmarks/comparison/RESULTS.md) — Velocity vs. real SQLite vs. real BoltDB.
 - [`benchmarks/comparison/redis/RESULTS.md`](benchmarks/comparison/redis/RESULTS.md) — Velocity's RESP server vs. real Redis 8.10.2.
 
-**Headline, honest findings** (Apple M2 Pro, go1.27.0 — re-verify on your own hardware, `go test -bench=. ./benchmarks/...`):
+**Headline, honest findings** (Apple M2 Pro, go1.27.0, 2026-10-03 —
+re-verify on your own hardware, `go test -bench=. ./benchmarks/...`):
 
 | Comparison | Result |
 |---|---|
-| KV Get vs. SQLite / BoltDB | **5-44x faster** |
-| KV Put, single, `fsync_mode: full` (true power-loss durability) vs. SQLite | 264x slower — different durability guarantees, not a fair fight (SQLite's `synchronous=FULL` on macOS uses plain `fsync`, not `F_FULLFSYNC`) |
-| KV Put, single, `fsync_mode: posix` (matched durability) vs. SQLite | 3.6x slower |
-| KV Put, sustained batch (5,000 unique keys), matched durability vs. SQLite | **1.53x faster** |
-| SQL indexed range query (`WHERE age > 50`, low selectivity) | 69.8ms → ~55ms after indexing (modest, honestly reported — selectivity-dependent) |
-| Redis GET/SET/INCR/LPUSH/SADD via real RESP wire protocol vs. real Redis | **Not slower**, 5-10% faster, reproduced 3x — but single-command, non-pipelined, narrow feature surface (see caveats in the linked RESULTS.md) |
-| HNSW vector search, 1k → 10k vectors | 140µs → 222µs (sub-linear scaling) |
+| KV Get vs. SQLite / BoltDB | **34x / 4.3x faster** (127ns vs 4.3µs / 547ns) |
+| KV Put, single, `fsync_mode: full` (true power-loss durability) vs. SQLite | 2.85ms — different durability guarantees, not a fair fight (nothing else on the table survives real power loss) |
+| KV Put, single, `fsync_mode: posix` (fsync per write) | 25.7µs — beats SQLite wherever SQLite really commits (fresh unique inserts 42µs, rollback-journal 313µs); SQLite's warm-update 6.7µs does **not** pay a per-statement fsync (verified: `synchronous=FULL` costs the same as `OFF` there — see `benchmarks/comparison/RESULTS.md`) |
+| KV Put, commit-coalescing mode (`commit_interval: 1ms`, bounded 1ms staleness) | **467ns/op; 5,000-key durable bulk load 1.5µs/key — 29x faster than SQLite** |
+| SQL indexed/scan query (`WHERE age > 50`, 10k rows) | **14.2ms** (was 49-55ms) after streaming-scan rework |
+| Redis GET/SET/INCR/LPUSH/SADD via real RESP wire protocol vs. real Redis 8.10.2 | **Not slower** (faster on GET/INCR/LPUSH); **pipelined SET throughput ~1.25x faster than Redis** (the previously-untested regime) — see caveats in the linked RESULTS.md |
+| HNSW vector search, 1k → 10k vectors | 227µs → 188µs (sub-linear scaling) |
 
 Every RESULTS.md file states its methodology and caveats explicitly — read them before quoting a number out of context.
 

@@ -3,6 +3,7 @@ package comparison
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/oarkflow/velocity/v2/api"
 	"github.com/oarkflow/velocity/v2/kernel"
@@ -25,7 +26,7 @@ type VelocityEngine struct {
 // power-loss survival, at real hardware cost. See NewVelocityEngineFast
 // for the SQLite-durability-equivalent variant.
 func NewVelocityEngine(dir string) (*VelocityEngine, error) {
-	return newVelocityEngine(dir, "full")
+	return newVelocityEngine(dir, "full", 0)
 }
 
 // NewVelocityEngineFast boots storage-lsm with fsync_mode: "posix" — the
@@ -39,12 +40,35 @@ func NewVelocityEngine(dir string) (*VelocityEngine, error) {
 // reported a 264x gap that was actually measuring two different
 // guarantees, not two implementations of the same one.
 func NewVelocityEngineFast(dir string) (*VelocityEngine, error) {
-	return newVelocityEngine(dir, "posix")
+	return newVelocityEngine(dir, "posix", 0)
 }
 
-func newVelocityEngine(dir, fsyncMode string) (*VelocityEngine, error) {
+// NewVelocityEngineAsync boots storage-lsm in the commit-coalescing mode
+// (fsync_mode: "posix", always_sync: false, commit_interval: 1ms): every
+// Put returns at in-memory staging speed and one background fsync per
+// millisecond durably covers everything staged in that window (bounded
+// staleness — at most 1ms of writes can be lost on a power failure, the
+// same class of guarantee as Redis AOF everysec or PostgreSQL
+// synchronous_commit=off). This is the mode that answers "what does
+// Velocity cost when I don't need per-write durability latency" — it is
+// NOT a durability-matched comparison against always_sync engines, and
+// the RESULTS.md reading must keep those guarantees separate.
+func NewVelocityEngineAsync(dir string) (*VelocityEngine, error) {
+	return newVelocityEngine(dir, "posix", time.Millisecond)
+}
+
+func newVelocityEngine(dir, fsyncMode string, commitInterval time.Duration) (*VelocityEngine, error) {
+	alwaysSync := commitInterval == 0
+	cfg := map[string]any{
+		"dir":         dir,
+		"always_sync": alwaysSync,
+		"fsync_mode":  fsyncMode,
+	}
+	if commitInterval > 0 {
+		cfg["commit_interval"] = commitInterval.String()
+	}
 	manifest := kernel.Manifest{Plugins: []kernel.PluginSpec{
-		{Name: "storage-lsm", Enabled: true, Config: map[string]any{"dir": dir, "always_sync": true, "fsync_mode": fsyncMode}},
+		{Name: "storage-lsm", Enabled: true, Config: cfg},
 		{Name: "kv", Enabled: true},
 	}}
 	k := kernel.New(manifest)

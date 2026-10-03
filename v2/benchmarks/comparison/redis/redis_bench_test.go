@@ -251,3 +251,65 @@ func BenchmarkSAddSMembers(b *testing.B) {
 		}
 	})
 }
+
+// --- pipelined throughput (redis-benchmark methodology) ---
+//
+// The single-command benchmarks above measure per-command LATENCY through
+// one round trip each. Real Redis's peak throughput claim comes from
+// pipelining — many commands in flight per round trip — which is exactly
+// what redis-benchmark does and what the earlier RESULTS.md explicitly
+// flagged as untested here. Each iteration of these benchmarks sends one
+// pipeline of pipelineDepth commands in a single round trip; the reported
+// ns/op is PER PIPELINE, so per-command cost is ns/op / pipelineDepth,
+// and throughput is pipelineDepth / ns/op * 1e9 ops/sec.
+
+const pipelineDepth = 64
+
+func benchPipelineSet(b *testing.B, client *goredis.Client, tag string) {
+	b.Run(tag, func(b *testing.B) {
+		ctx := context.Background()
+		b.ReportAllocs()
+		for b.Loop() {
+			pipe := client.Pipeline()
+			for j := 0; j < pipelineDepth; j++ {
+				pipe.Set(ctx, fmt.Sprintf("pipe-%s-%d", tag, j), "hello world value", 0)
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func benchPipelineGet(b *testing.B, client *goredis.Client, tag string) {
+	b.Run(tag, func(b *testing.B) {
+		ctx := context.Background()
+		for j := 0; j < 1000; j++ {
+			if err := client.Set(ctx, fmt.Sprintf("pg-%s-%d", tag, j), "hello world value", 0).Err(); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ReportAllocs()
+		i := 0
+		for b.Loop() {
+			pipe := client.Pipeline()
+			for j := 0; j < pipelineDepth; j++ {
+				pipe.Get(ctx, fmt.Sprintf("pg-%s-%d", tag, (i+j)%1000))
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				b.Fatal(err)
+			}
+			i += pipelineDepth
+		}
+	})
+}
+
+func BenchmarkPipelineSet(b *testing.B) {
+	benchPipelineSet(b, realClient, "redis")
+	benchPipelineSet(b, velocityClient, "velocity-resp")
+}
+
+func BenchmarkPipelineGet(b *testing.B) {
+	benchPipelineGet(b, realClient, "redis")
+	benchPipelineGet(b, velocityClient, "velocity-resp")
+}

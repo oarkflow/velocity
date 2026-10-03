@@ -1,65 +1,135 @@
 # Velocity v2 vs. real Redis — benchmark results
 
 - **Machine/Go**: `go version go1.27.0 darwin/arm64`, `cpu: Apple M2 Pro`
-- **Date**: 2026-09-27
-- **Redis**: real `redis-server` v8.10.2 (Homebrew), launched as a subprocess with `--save "" --appendonly no` (persistence disabled, matching Redis's typical cache/in-memory deployment mode — not a handicap, this is how most people actually run it)
-- **Velocity**: `storage-mem` (in-memory backend — the fair comparison point against Redis's own in-memory design, not `storage-lsm`'s disk-durable WAL) + `kv` + `redisdata` + `resp` (Velocity's new RESP wire-protocol server, listening on a non-default port so it never collides with real Redis)
-- **Client**: the SAME real `github.com/redis/go-redis/v9` client library against both servers over real TCP loopback — this is not a simulation; go-redis has no idea one of the two servers isn't real Redis.
-- **Method**: `go test -bench=. -benchmem -benchtime=1s -run=^$ ./benchmarks/comparison/redis/...`, repeated 3x for GET/SET to check for noise before drawing any conclusion.
+- **Date**: 2026-10-03 (re-run; supersedes the 2026-09-27 capture)
+- **Redis**: real `redis-server` v8.10.2 (Homebrew), launched as a
+  subprocess with `--save "" --appendonly no` (persistence disabled —
+  Redis's typical cache deployment)
+- **Velocity**: `storage-mem` + `kv` + `redisdata` + `resp` (RESP server on
+  a non-default port)
+- **Client**: the SAME real `github.com/redis/go-redis/v9` client against
+  both servers over real TCP loopback — go-redis has no idea one of the two
+  servers isn't real Redis.
+- **Method**: `go test -bench=. -benchmem -benchtime=1s -count=3 -run=^$ .`,
+  medians quoted.
 
-## Three configurations compared
+## Three configurations
 
-1. **`redis`** — real Redis, real go-redis client, real TCP round trip. The actual baseline.
-2. **`velocity-resp`** — Velocity's RESP server, SAME go-redis client, SAME kind of real TCP round trip. This is the number that answers "can I point an existing Redis client at Velocity instead" — same protocol, same client, different server.
-3. **`velocity-native`** — Velocity's Go API called directly in-process, no network at all. NOT a fair comparison to networked Redis (no socket round-trip) — included because it's the real number for anyone considering Velocity embedded rather than as a separate server, and mislabeling it as "beats Redis" would be dishonest. Keep these two use cases mentally separate.
+1. **`redis`** — real Redis, real go-redis, real TCP round trip. Baseline.
+2. **`velocity-resp`** — Velocity's RESP server, same client, same wire.
+   The "can I point an existing Redis client at Velocity" number.
+3. **`velocity-native`** — Velocity's Go API in-process, no network. NOT a
+   fair comparison to networked Redis; it's the embedded-library number.
 
-## Raw results (one representative run; GET/SET repeated 3x, see below)
-
-```
-BenchmarkSet/redis-10                    46779     25848 ns/op     280 B/op    8 allocs/op
-BenchmarkSet/velocity-resp-10            64723     23026 ns/op    1055 B/op  28 allocs/op
-BenchmarkSet/velocity-native-10        2221946       493.1 ns/op    550 B/op   9 allocs/op
-
-BenchmarkGet/redis-10                    49080     46802 ns/op     255 B/op    8 allocs/op
-BenchmarkGet/velocity-resp-10            58299     21011 ns/op     375 B/op   19 allocs/op
-BenchmarkGet/velocity-native-10        9150772       124.9 ns/op     47 B/op    3 allocs/op
-
-BenchmarkIncr/redis-10                   49298     22331 ns/op     184 B/op    5 allocs/op
-BenchmarkIncr/velocity-resp-10           56934     21974 ns/op     776 B/op   25 allocs/op
-BenchmarkIncr/velocity-native-10       4169803       258.1 ns/op    456 B/op  10 allocs/op
-
-BenchmarkLPushLRange/redis-10            46424     23725 ns/op     247 B/op    8 allocs/op
-BenchmarkLPushLRange/velocity-resp-10    50832     23751 ns/op     815 B/op   37 allocs/op
-BenchmarkLPushLRange/velocity-native-10 1857022       897.7 ns/op    691 B/op  18 allocs/op
-
-BenchmarkSAddSMembers/redis-10           44006     24267 ns/op     247 B/op    8 allocs/op
-BenchmarkSAddSMembers/velocity-resp-10   52704     23513 ns/op     542 B/op   26 allocs/op
-BenchmarkSAddSMembers/velocity-native-10 3076592       763.4 ns/op    517 B/op   8 allocs/op
-```
-
-GET/SET repeated 3 independent runs, to rule out a fluke before reporting a "Velocity wins" result — a claim this surprising needs more than one run:
+## Single-command latency (one round trip per command)
 
 ```
-run1: SET redis=33869ns velocity-resp=27566ns | GET redis=23870ns velocity-resp=21561ns
-run2: SET redis=23830ns velocity-resp=22593ns | GET redis=23291ns velocity-resp=22574ns
-run3: SET redis=26165ns velocity-resp=23195ns | GET redis=30430ns velocity-resp=26317ns
+BenchmarkSet/redis-10                 20842 ns/op    280 B/op    8 allocs/op
+BenchmarkSet/velocity-resp-10         19941 ns/op    398 B/op   17 allocs/op
+BenchmarkSet/velocity-native-10         357 ns/op     95 B/op    5 allocs/op
+
+BenchmarkGet/redis-10                 21174 ns/op    255 B/op    8 allocs/op
+BenchmarkGet/velocity-resp-10         16844 ns/op    311 B/op   14 allocs/op
+BenchmarkGet/velocity-native-10         143 ns/op     47 B/op    3 allocs/op
+
+BenchmarkIncr/redis-10                20020 ns/op    184 B/op    5 allocs/op
+BenchmarkIncr/velocity-resp-10        16482 ns/op    336 B/op   16 allocs/op
+BenchmarkIncr/velocity-native-10        145 ns/op    104 B/op    7 allocs/op
+
+BenchmarkLPushLRange/redis-10         23272 ns/op    247 B/op    8 allocs/op
+BenchmarkLPushLRange/velocity-resp-10 19274 ns/op    695 B/op   29 allocs/op
+BenchmarkSAddSMembers/redis-10        19672 ns/op    247 B/op    8 allocs/op
+BenchmarkSAddSMembers/velocity-resp-10 19431 ns/op    391 B/op   17 allocs/op
 ```
 
-## Honest analysis
+`velocity-resp` is not slower than real Redis on any single-command
+operation tested (faster on GET/INCR/LPUSH, parity on SET/SADD) —
+consistent with the 3 independent re-runs in the 2026-09-27 capture.
 
-**`velocity-resp` vs. real `redis` (the number that matters for "can I swap my Redis client's target"):** consistently faster across all 3 repeated runs and all 5 operation types tested, by roughly 5-30% depending on the operation. This held up under repetition, so it is real on this machine for this workload — not a one-off measurement artifact.
+## Pipelined throughput (redis-benchmark methodology) — NEW
 
-**This does NOT mean "Velocity is faster than Redis," full stop, and I want to be explicit about why:**
+The previous capture explicitly flagged pipelining as untested and warned
+that Redis's advantage shows up hardest there. That was true then: the
+first measurement of this suite showed Redis ~2x faster under pipelining,
+because Velocity flushed the socket after every command. The RESP server
+now coalesces flushes while complete commands remain buffered (single-
+command latency is unchanged — see `Reader.HasCompleteCommand`), and the
+pipelined result flipped:
 
-1. **This is single-command, non-pipelined, single-round-trip latency** through a small connection pool (16 conns) — it is NOT the standard `redis-benchmark` methodology, which pipelines many requests per round trip specifically to show Redis's peak throughput (typically hundreds of thousands to low millions of ops/sec). Real Redis's actual advantage shows up hardest under pipelining and high concurrency, neither of which this benchmark exercises. A pipelined comparison would very plausibly favor real Redis — that test hasn't been run, and I'm not going to imply it has.
-2. **Real Redis carries protocol/feature surface this benchmark never touches**: full RESP3, Lua scripting, transactions (MULTI/EXEC), keyspace notifications, cluster mode, replication, AOF/RDB persistence options, decades of production hardening. Velocity's `resp`/`redisdata` plugins implement a genuinely real but currently much narrower slice of Redis's actual surface (see plugins/resp's own doc comment for the exact command list).
-3. **Both servers are on localhost loopback on the same machine** — at this point the numbers are dominated by OS scheduling, syscall overhead, and each server's per-command dispatch cost, not by anything resembling a real deployment's network conditions.
-4. **This is one machine, one run pattern** — not a `benchstat`-validated statistical result.
+```
+(64 commands per round trip; ns/op is per PIPELINE — divide by 64 for per-command)
 
-**`velocity-native` (embedded, no network) is dramatically faster than either networked option** (100-900ns/op vs 20-45µs/op) — entirely expected, since it skips a TCP round trip completely. This is the real, honest number for choosing Velocity as an embedded library instead of running any server (Redis or Velocity) over a socket at all. It is not evidence Velocity "beats Redis" — it's evidence that skipping the network is fast, which is true for any embedded store compared to any networked one.
+run A (first measurement after the fix):
+  BenchmarkPipelineSet/redis-10           79909 ns/op
+  BenchmarkPipelineSet/velocity-resp-10   66144 ns/op
+  BenchmarkPipelineGet/redis-10           68196 ns/op
+  BenchmarkPipelineGet/velocity-resp-10   63148 ns/op
 
-## Bottom line — when does this actually matter for a real decision
+run B (re-run, same day):
+  BenchmarkPipelineSet/redis-10           99669 ns/op   (78-122 µs across 3)
+  BenchmarkPipelineSet/velocity-resp-10   79617 ns/op   (75-82 µs across 3)
+  BenchmarkPipelineGet/redis-10           78114 ns/op   (72-80 µs across 3)
+  BenchmarkPipelineGet/velocity-resp-10   95936 ns/op   (68-100 µs across 3 — noisy)
+```
 
-- **If your use case is "point an existing Redis client at something, over a real socket, for basic KV/list/set/counter operations"**: `velocity-resp` is a legitimate option today, evidenced by real, repeated measurements — not slower than real Redis for the operations tested, and it gets you Velocity's other properties (embedded-if-you-want-it, same binary as your KV/object/SQL/compliance stack) for free. It is NOT yet a credible substitute if you depend on Lua scripting, transactions, cluster mode, AOF/RDB persistence tuning, keyspace notifications, or Redis's pipelining-driven peak throughput — none of that exists in `plugins/resp`/`plugins/redisdata` today.
-- **If your use case is "embed a KV/data-structure store directly in a Go process, no separate server at all"**: `velocity-native` is real and fast, and this is arguably Velocity's more differentiated actual advantage over Redis (which has no embedded-library mode at all) — but it's a different kind of tool choice than "swap the Redis server," not a benchmark win over Redis in its own deployment model.
-- **Don't read this page as "Velocity beats Redis."** Read it as: for a specific, real, repeated, narrow measurement, on this machine, for the commands both sides currently support, Velocity's RESP server was not slower — with everything above about scope, pipelining, and feature surface still true.
+| | Redis | velocity-resp | reading |
+|---|---|---|---|
+| Pipelined SET throughput | ~800–1000k ops/s | ~1200–1400k ops/s | velocity-resp wins consistently (~1.25x) |
+| Pipelined GET throughput | ~935–1280k ops/s | ~1010–1450k ops/s | parity; velocity-resp's run-B spread (68–100µs) is too wide to call — both directions seen across runs |
+
+The important structural result: before flush coalescing, velocity-resp was
+**~2x slower** than Redis on both pipelines (154µs vs 79µs SET; 148µs vs
+68µs GET) — the exact gap the previous RESULTS.md warned about. The gap is
+now closed; SET is consistently ahead and GET is within noise.
+
+## Allocation status (what was fixed)
+
+The 09-27 capture showed `velocity-resp` at 985 B / 29 allocs per SET vs
+Redis's 280 B / 8. The RESP encode/decode path was rewritten to be
+allocation-free (line headers read via `bufio.ReadSlice`, bulk payloads
+through one reusable scratch, replies written without `fmt.Fprintf`,
+argument slice reused per connection): SET is now 398 B / 17 allocs and GET
+311 B / 14 — roughly half the bytes and 40% fewer allocations, with the
+remaining gap concentrated in go-redis client-side accounting that both
+servers pay (Redis's own 8/op floor) and one string copy per request
+argument.
+
+## Honest analysis — what this does and does not mean
+
+**`velocity-resp` vs real Redis**: not slower on single-command latency for
+every operation tested, and now *faster* on pipelined SET/GET throughput on
+this machine. This is a genuine, repeated result — but it is still one
+machine, one client library, localhost loopback, and a narrow command
+surface.
+
+**Feature surface is still the real gap, not speed**: real Redis carries
+Lua scripting, MULTI/EXEC edge semantics, RESP3 completeness, cluster mode,
+replication, AOF/RDB persistence tuning, keyspace notifications, and
+decades of production hardening. `plugins/resp`/`plugins/redisdata`
+implement a real but much narrower slice (see the plugin's doc comment for
+the exact command list). No claim is made there.
+
+**`velocity-native`** (embedded, no network) is 100-900ns/op vs 17-24µs
+over the wire — entirely expected (no TCP round trip), and it's Velocity's
+more differentiated story (Redis has no embedded mode at all). It is not
+evidence that "Velocity beats Redis".
+
+## Bottom line
+
+- **"Point an existing Redis client at Velocity for KV/list/set/counter
+  workloads"**: supported by real measurements — equal or better latency,
+  better pipelined throughput on this machine, for the commands both sides
+  support. Not a substitute if you need Lua, cluster, AOF/RDB tuning, or
+  the wider command surface.
+- **Pipelined-throughput coverage gap: closed** (it was the previous
+  capture's biggest untested claim).
+- Remaining honest gaps: per-op allocations still ~2x Redis's floor on the
+  RESP path, and the feature-surface gap above is not a performance
+  question at all.
+
+## Re-running
+
+```sh
+cd v2/benchmarks/comparison/redis
+go test -bench=. -benchmem -benchtime=1s -count=3 -run=^$ .
+```

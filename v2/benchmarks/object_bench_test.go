@@ -13,6 +13,20 @@ import (
 func benchObjectPut(b *testing.B, size int) {
 	svc, cleanup := bootObject(b)
 	defer cleanup()
+	benchObjectPutWith(b, svc, size)
+}
+
+// benchObjectPutFsync is benchObjectPut with an explicit fsync mode,
+// isolating the per-PutObject durable-commit cost (Object Put batches
+// metadata + every block into ONE storage Batch, and a Batch is always
+// durable — so fsync_mode is the entire durability/performance knob).
+func benchObjectPutFsync(b *testing.B, size int, fsyncMode string) {
+	svc, cleanup := bootObjectFsync(b, fsyncMode)
+	defer cleanup()
+	benchObjectPutWith(b, svc, size)
+}
+
+func benchObjectPutWith(b *testing.B, svc api.ObjectService, size int) {
 	ctx := context.Background()
 	if err := svc.CreateBucket(ctx, "bench"); err != nil {
 		b.Fatal(err)
@@ -32,6 +46,14 @@ func benchObjectPut(b *testing.B, size int) {
 func BenchmarkObjectPut_1KB(b *testing.B)  { benchObjectPut(b, 1<<10) }
 func BenchmarkObjectPut_64KB(b *testing.B) { benchObjectPut(b, 64<<10) }
 func BenchmarkObjectPut_1MB(b *testing.B)  { benchObjectPut(b, 1<<20) }
+
+// _fast variants use fsync_mode: "posix" (SQLite-equivalent durability:
+// survives process/OS crash, not power loss) instead of the default
+// "full" (F_FULLFSYNC on Darwin) — the same split the KV comparison
+// benchmarks use, so the fsync-mode cost is visible rather than hidden
+// inside "object overhead".
+func BenchmarkObjectPut_1KB_fast(b *testing.B) { benchObjectPutFsync(b, 1<<10, "posix") }
+func BenchmarkObjectPut_1MB_fast(b *testing.B) { benchObjectPutFsync(b, 1<<20, "posix") }
 
 func benchObjectGet(b *testing.B, size int) {
 	svc, cleanup := bootObject(b)
