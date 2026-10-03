@@ -253,3 +253,41 @@ func readRESPFrame(t *testing.T, br *bufio.Reader) string {
 	}
 	return out.String()
 }
+
+// TestFrameLen verifies the flush-suppression framing check: only a fully
+// buffered request frame counts as complete (a partial frame must report
+// 0 so the connection loop flushes rather than deadlocking a slow
+// client).
+func TestFrameLen(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"empty", "", 0},
+		{"inline complete", "PING\r\n", 6},
+		{"inline partial", "PIN", 0},
+		{"array complete", "*1\r\n$4\r\nPING\r\n", 14},
+		{"array two args", "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n", 22},
+		{"array partial bulk", "*2\r\n$3\r\nGET\r\n$3\r\nke", 0},
+		{"array partial header", "*2\r\n$3\r\nGET\r\n", 0},
+		{"array header partial", "*1\r\n$4\r\n", 0},
+		{"empty array", "*0\r\n", 4},
+		{"null array", "*-1\r\n", 5},
+		{"zero-length bulk arg", "*1\r\n$0\r\n\r\n", 10},
+		{"null bulk arg", "*1\r\n$-1\r\n", 9},
+		{"leading junk complete", "*1\r\n$4\r\nPING\r\nEXTRA", 14},
+		// Empty/whitespace lines are read-loop no-ops, not commands: they
+		// must NOT count as complete frames (they would suppress a reply
+		// flush and deadlock the client — see frameLen's comment).
+		{"empty line", "\n", 0},
+		{"crlf line", "\r\n", 0},
+		{"whitespace line", "  \r\n", 0},
+		{"empty line then command", "\nPING\r\n", 0},
+	}
+	for _, tc := range cases {
+		if got := frameLen([]byte(tc.in)); got != tc.want {
+			t.Errorf("frameLen(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}

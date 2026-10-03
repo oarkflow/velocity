@@ -77,7 +77,11 @@ func (p *Plugin) handleTop(ctx context.Context, w *Writer, args []string, cs *co
 			cs.dirty = true
 			return
 		}
-		cs.queue = append(cs.queue, args)
+		// Clone the argument slice: ReadCommand reuses its args backing
+		// array across calls (see its doc), so a queued command must own
+		// its slice or later commands on this connection would silently
+		// overwrite it before EXEC runs.
+		cs.queue = append(cs.queue, append([]string(nil), args...))
 		w.WriteSimpleString("QUEUED")
 		return
 	}

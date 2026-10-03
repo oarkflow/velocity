@@ -253,8 +253,19 @@ func (p *Plugin) handleConn(conn net.Conn) {
 		// (transaction queuing) directly, falling through to the normal
 		// per-command dispatch otherwise — see transaction.go.
 		p.handleTop(ctx, w, args, cs)
-		if err := w.Flush(); err != nil {
-			return
+		// Flush unless the client's next command is already fully in the
+		// read buffer. A pipelined burst (the redis-benchmark throughput
+		// case) lands in the reader's buffer as one or two socket reads;
+		// flushing per command there means one write syscall per command,
+		// which measured as ~2x lower pipelined throughput than real
+		// Redis. A lone request/response command finds the buffer empty
+		// (or holding only a partial frame) and flushes immediately, so
+		// single-command latency is unchanged — see HasCompleteCommand
+		// for why "fully" matters here.
+		if !r.HasCompleteCommand() {
+			if err := w.Flush(); err != nil {
+				return
+			}
 		}
 	}
 }
