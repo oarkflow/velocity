@@ -106,26 +106,28 @@ type record struct {
 // crc32 covers everything before it, so a torn write at the tail (a crash
 // mid-append) is detected and safely truncated on replay instead of
 // corrupting the in-memory index.
-func writeRecord(w io.Writer, r record) error {
-	buf := make([]byte, 1+4+4+8)
+func writeRecord(w *bufio.Writer, r record) error {
+	var buf [1 + 4 + 4 + 8]byte
 	buf[0] = byte(r.Kind)
 	binary.BigEndian.PutUint32(buf[1:5], uint32(len(r.Key)))
 	binary.BigEndian.PutUint32(buf[5:9], uint32(len(r.Value)))
 	binary.BigEndian.PutUint64(buf[9:17], uint64(r.ExpiresAt))
 
-	h := crc32.NewIEEE()
-	mw := io.MultiWriter(w, h)
-	if _, err := mw.Write(buf); err != nil {
+	crc := crc32.Update(0, crc32.IEEETable, buf[:])
+	crc = crc32.Update(crc, crc32.IEEETable, r.Key)
+	crc = crc32.Update(crc, crc32.IEEETable, r.Value)
+
+	if _, err := w.Write(buf[:]); err != nil {
 		return err
 	}
-	if _, err := mw.Write(r.Key); err != nil {
+	if _, err := w.Write(r.Key); err != nil {
 		return err
 	}
-	if _, err := mw.Write(r.Value); err != nil {
+	if _, err := w.Write(r.Value); err != nil {
 		return err
 	}
 	var crcBuf [4]byte
-	binary.BigEndian.PutUint32(crcBuf[:], h.Sum32())
+	binary.BigEndian.PutUint32(crcBuf[:], crc)
 	_, err := w.Write(crcBuf[:])
 	return err
 }

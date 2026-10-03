@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
-	"hash/fnv"
 	"math"
+	"unsafe"
 )
 
 // bloomFilter is a standard fixed-size bit-array Bloom filter using double
@@ -53,10 +53,14 @@ func optimalNumHashes(m uint32, n int) uint8 {
 	return uint8(math.Round(k))
 }
 
+// hashPair derives the two base hashes (FNV-1a 32 and CRC32-IEEE, the
+// same values earlier versions wrote to disk) without allocating.
 func hashPair(key []byte) (uint32, uint32) {
-	h := fnv.New32a()
-	h.Write(key)
-	h1 := h.Sum32()
+	h1 := uint32(2166136261)
+	for _, c := range key {
+		h1 ^= uint32(c)
+		h1 *= 16777619
+	}
 	h2 := crc32.ChecksumIEEE(key)
 	if h2 == 0 {
 		h2 = 0x9e3779b9 // avoid a degenerate all-zero second hash
@@ -84,6 +88,15 @@ func (b *bloomFilter) mayContain(key []byte) bool {
 		}
 	}
 	return true
+}
+
+// mayContainString is mayContain for a string key, avoiding the
+// string->[]byte copy (the bytes are only read, never retained).
+func (b *bloomFilter) mayContainString(key string) bool {
+	if len(key) == 0 {
+		return b.mayContain(nil)
+	}
+	return b.mayContain(unsafe.Slice(unsafe.StringData(key), len(key)))
 }
 
 func (b *bloomFilter) encode() []byte {

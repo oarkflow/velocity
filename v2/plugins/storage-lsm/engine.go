@@ -376,43 +376,50 @@ func (e *Engine) maybeFlushLocked() error {
 	return e.flushLocked()
 }
 
+// scanCand is one key's winning version during a Scan: either a pointer
+// into an sstable (value fetched lazily, only if the caller asks for it)
+// or an inline memtable value.
+type scanCand struct {
+	st        *sstable
+	off       int64
+	mem       []byte
+	expiresAt int64
+	deleted   bool
+}
+
+// Scan resolves the keys under prefix across the memtable and every
+// sstable (newest write wins) WITHOUT reading any values: the returned
+// iterator fetches each value from disk only when Value() is called, so a
+// paginated caller that skips or stops early pays only for what it
+// consumes. The iterator pins the sstables it may read; callers must
+// Close it.
 func (e *Engine) Scan(ctx context.Context, prefix []byte) (api.Iterator, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	p := string(prefix)
 
-	type resolved struct {
-		value     []byte
-		expiresAt int64
-		deleted   bool
-	}
-	result := make(map[string]resolved)
+	result := make(map[string]scanCand)
 
 	// Oldest sstable first, newest last, memtable last of all — each
 	// later pass overwrites an earlier one's entry for the same key,
 	// giving the correct "most recent write wins" precedence.
 	for i := len(e.sstables) - 1; i >= 0; i-- {
 		st := e.sstables[i]
-		for k, ie := range st.index {
-			if !strings.HasPrefix(k, p) {
-				continue
-			}
+		lo, hi := st.keyRange(p)
+		for _, k := range st.keys[lo:hi] {
+			ie := st.index[k]
 			if ie.kind == recDelete {
-				result[k] = resolved{deleted: true, expiresAt: ie.expiresAt}
+				result[k] = scanCand{deleted: true, expiresAt: ie.expiresAt}
 				continue
 			}
-			v, err := st.readValueAt(ie.offset)
-			if err != nil {
-				return nil, err
-			}
-			result[k] = resolved{value: v, expiresAt: ie.expiresAt}
+			result[k] = scanCand{st: st, off: ie.offset, expiresAt: ie.expiresAt}
 		}
 	}
 	for k, v := range e.memtable {
 		if !strings.HasPrefix(k, p) {
 			continue
 		}
-		result[k] = resolved{value: v.value, expiresAt: v.expiresAt, deleted: v.deleted}
+		result[k] = scanCand{mem: v.value, expiresAt: v.expiresAt, deleted: v.deleted}
 	}
 
 	keys := make([]string, 0, len(result))
@@ -423,27 +430,60 @@ func (e *Engine) Scan(ctx context.Context, prefix []byte) (api.Iterator, error) 
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	values := make([][]byte, len(keys))
+	cands := make([]scanCand, len(keys))
 	for i, k := range keys {
-		values[i] = result[k].value
+		cands[i] = result[k]
 	}
-	return &sliceIterator{keys: keys, values: values, pos: -1}, nil
+	pinned := make([]*sstable, len(e.sstables))
+	copy(pinned, e.sstables)
+	for _, st := range pinned {
+		st.ref()
+	}
+	return &lazyIterator{keys: keys, cands: cands, pinned: pinned, pos: -1}, nil
 }
 
-type sliceIterator struct {
+type lazyIterator struct {
 	keys   []string
-	values [][]byte
+	cands  []scanCand
+	pinned []*sstable
 	pos    int
+	val    []byte
+	loaded bool
+	err    error
 }
 
-func (it *sliceIterator) Next() bool {
+func (it *lazyIterator) Next() bool {
 	it.pos++
+	it.loaded = false
 	return it.pos < len(it.keys)
 }
-func (it *sliceIterator) Key() []byte   { return []byte(it.keys[it.pos]) }
-func (it *sliceIterator) Value() []byte { return it.values[it.pos] }
-func (it *sliceIterator) Err() error    { return nil }
-func (it *sliceIterator) Close() error  { return nil }
+func (it *lazyIterator) Key() []byte { return []byte(it.keys[it.pos]) }
+func (it *lazyIterator) Value() []byte {
+	if it.loaded {
+		return it.val
+	}
+	c := it.cands[it.pos]
+	if c.st != nil {
+		v, err := c.st.readValueAt(c.off)
+		if err != nil {
+			it.err = err
+			return nil
+		}
+		it.val = v
+	} else {
+		it.val = c.mem
+	}
+	it.loaded = true
+	return it.val
+}
+func (it *lazyIterator) Err() error { return it.err }
+func (it *lazyIterator) Close() error {
+	for _, st := range it.pinned {
+		st.unref()
+	}
+	it.pinned = nil
+	return nil
+}
 
 // snapshot is a deep, point-in-time copy of the fully-merged keyspace at
 // the moment Snapshot() was called (copy-on-read isolation — concurrent
@@ -470,7 +510,8 @@ func (e *Engine) Snapshot(ctx context.Context) (api.Snapshot, error) {
 	merged := make(map[string]entryValue)
 	for i := len(e.sstables) - 1; i >= 0; i-- {
 		st := e.sstables[i]
-		for k, ie := range st.index {
+		for _, k := range st.keys {
+			ie := st.index[k]
 			if ie.kind == recDelete {
 				merged[k] = entryValue{deleted: true, expiresAt: ie.expiresAt}
 				continue
@@ -498,6 +539,10 @@ func (e *Engine) Close() error {
 		return err
 	}
 	e.closed = true
+	for _, st := range e.sstables {
+		st.unref()
+	}
+	e.sstables = nil
 	return e.w.close()
 }
 
@@ -540,14 +585,14 @@ func (e *Engine) flushLocked() error {
 	e.nextSeq++
 	finalPath := sstableFileName(e.dir, seq)
 	tmpPath := finalPath + ".tmp"
-	if err := buildSSTable(tmpPath, entries); err != nil {
+	st, err := buildSSTable(tmpPath, entries)
+	if err != nil {
 		return err
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return err
 	}
-	st, err := openSSTable(finalPath, seq, 0)
-	if err != nil {
+	if err := st.attach(finalPath, seq, 0); err != nil {
 		return err
 	}
 
@@ -583,52 +628,73 @@ func (e *Engine) truncateWALLocked() error {
 	return nil
 }
 
-// compactLocked merges every currently-known SSTable into one new table
-// (see the package doc for why "every" rather than a per-level subset),
-// then removes the input files only after the merged file is durably in
-// place. A crash between the rename and the input removals just leaves
-// harmless, superseded extra files on disk — Get/Scan always prefer the
-// highest-seq table for a given key, and the merged table always has the
-// highest seq of everything it merged, so their presence never changes
-// query results, only wastes a little disk space until the next
-// compaction cleans them up.
+// pickCompactionRun chooses which tables to merge: the newest contiguous
+// run (size-tiered / "universal" style) whose members are each no larger
+// than everything newer than them combined. Merging like-sized tables
+// keeps write amplification logarithmic in data size, instead of
+// rewriting the whole dataset every few flushes.
+func (e *Engine) pickCompactionRun() int {
+	n := len(e.sstables)
+	sum := e.sstables[0].size
+	j := 1
+	for j < n && e.sstables[j].size <= sum {
+		sum += e.sstables[j].size
+		j++
+	}
+	if j < 2 {
+		j = 2
+	}
+	return j
+}
+
+// compactLocked merges a run of the newest SSTables (see
+// pickCompactionRun) into one new table, streaming records with
+// sequential reads, then retires the inputs only after the merged file is
+// durably in place. Tombstones and expired entries are dropped only when
+// the run reaches the oldest table on disk — otherwise they must survive
+// to keep shadowing older tables. A crash between the rename and the input
+// removals just leaves harmless, superseded extra files: the merged table
+// has a higher seq than everything it merged, so query results never
+// change.
 func (e *Engine) compactLocked() error {
 	if len(e.sstables) < 2 {
 		return nil
 	}
-	inputs := e.sstables
+	j := e.pickCompactionRun()
+	inputs := e.sstables[:j]
+	dropTombstones := j == len(e.sstables)
 
 	seq := e.nextSeq
 	e.nextSeq++
 	finalPath := sstableFileName(e.dir, seq)
 	tmpPath := finalPath + ".tmp"
 
-	n, err := mergeSSTables(inputs, tmpPath)
+	merged, n, err := mergeSSTables(inputs, tmpPath, dropTombstones)
 	if err != nil {
+		os.Remove(tmpPath)
 		return err
 	}
 	e.compactionCount.Add(1)
 
+	rest := e.sstables[j:]
 	if n == 0 {
-		os.Remove(tmpPath)
 		for _, st := range inputs {
-			os.Remove(st.path)
+			st.retire()
 		}
-		e.sstables = nil
+		e.sstables = append([]*sstable(nil), rest...)
 		return nil
 	}
 
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return err
 	}
-	merged, err := openSSTable(finalPath, seq, 1)
-	if err != nil {
+	if err := merged.attach(finalPath, seq, 1); err != nil {
 		return err
 	}
 	for _, st := range inputs {
-		os.Remove(st.path)
+		st.retire()
 	}
-	e.sstables = []*sstable{merged}
+	e.sstables = append([]*sstable{merged}, rest...)
 	return nil
 }
 
