@@ -23,6 +23,7 @@ type Plugin struct {
 	dir                 string
 	alwaysSync          bool
 	fsyncMode           FsyncMode
+	commitInterval      time.Duration
 	checkpointEvery     time.Duration
 	reapEvery           time.Duration
 	flushThresholdBytes int64
@@ -78,6 +79,14 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	// why this distinction exists at all (a real benchmark investigation,
 	// not a guess).
 	p.fsyncMode = ParseFsyncMode(cfg.String("fsync_mode", "full"))
+	// commit_interval: bounded-staleness background commit. When set
+	// (e.g. "1ms"), staged writes are fsynced at least this often even
+	// with always_sync: false — one fsync covers every write staged in
+	// the window instead of one fsync per write, with at most one
+	// interval of writes lost on a power failure (the same class of
+	// guarantee as Redis AOF everysec / PostgreSQL synchronous_commit=off).
+	// 0 (default) = original behavior: sync only on write wait or flush.
+	p.commitInterval = cfg.Duration("commit_interval", 0)
 	p.checkpointEvery = cfg.Duration("checkpoint_interval", 30*time.Second)
 	p.reapEvery = cfg.Duration("reap_interval", 30*time.Second)
 	p.flushThresholdBytes = int64(cfg.Int("flush_threshold_bytes", 4<<20))
@@ -87,6 +96,7 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 		WithFlushThreshold(p.flushThresholdBytes),
 		WithCompactionThreshold(p.compactionThreshold),
 		WithFsyncMode(p.fsyncMode),
+		WithCommitInterval(p.commitInterval),
 	)
 	if err != nil {
 		p.setHealth("down", err.Error())

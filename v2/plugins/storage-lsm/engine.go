@@ -48,6 +48,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/oarkflow/velocity/v2/api"
 )
@@ -101,6 +102,20 @@ func WithFsyncMode(mode FsyncMode) Option {
 	}
 }
 
+// WithCommitInterval arms the bounded-staleness background commit pump:
+// staged records are fsynced at least every d even when no caller is
+// waiting for durability, so alwaysSync=false writes are durable within
+// one d of being staged instead of "whenever a flush happens". Zero
+// (default) disables the pump and preserves the original behavior
+// exactly. See wal.commitPump for the full guarantee and trade-off.
+func WithCommitInterval(d time.Duration) Option {
+	return func(e *Engine) {
+		if d > 0 {
+			e.commitInterval = d
+		}
+	}
+}
+
 // Engine is the concrete api.StorageBackend.
 type Engine struct {
 	mu       sync.RWMutex
@@ -118,6 +133,7 @@ type Engine struct {
 	flushThreshold      int64
 	compactionThreshold int
 	fsyncMode           FsyncMode
+	commitInterval      time.Duration
 
 	flushCount      atomic.Int64
 	compactionCount atomic.Int64
@@ -155,7 +171,7 @@ func Open(dir string, alwaysSync bool, opts ...Option) (*Engine, error) {
 		e.applyRecordToMemtable(r)
 	}
 
-	w, err := openWAL(e.walPath, alwaysSync, e.fsyncMode)
+	w, err := openWAL(e.walPath, alwaysSync, e.fsyncMode, e.commitInterval)
 	if err != nil {
 		return nil, err
 	}
@@ -447,6 +463,7 @@ type lazyIterator struct {
 	cands  []scanCand
 	pinned []*sstable
 	pos    int
+	keyBuf []byte // reused by Key(); valid only until the next Next() (see api.Iterator)
 	val    []byte
 	loaded bool
 	err    error
@@ -457,7 +474,10 @@ func (it *lazyIterator) Next() bool {
 	it.loaded = false
 	return it.pos < len(it.keys)
 }
-func (it *lazyIterator) Key() []byte { return []byte(it.keys[it.pos]) }
+func (it *lazyIterator) Key() []byte {
+	it.keyBuf = append(it.keyBuf[:0], it.keys[it.pos]...)
+	return it.keyBuf
+}
 func (it *lazyIterator) Value() []byte {
 	if it.loaded {
 		return it.val
@@ -558,6 +578,29 @@ func (e *Engine) Checkpoint(ctx context.Context) error {
 	return e.flushLocked()
 }
 
+// Sync blocks until every write staged so far is durably on disk, and
+// returns the error (if any) of the fsync that covered it. This is the
+// durability barrier callers of the commit-coalescing mode use when they
+// need a real sync point (before acknowledging a batch to a client, at a
+// transaction boundary, before shutdown): Put/Delete with
+// alwaysSync=false return after staging, and Sync is how a caller later
+// says "everything up to here must now survive a crash".
+//
+// It routes through the same group-commit waitForSync protocol as every
+// other sync in this engine, so calling it is never worse than one fsync
+// even if the commit pump just performed one (that round is waited for,
+// not repeated).
+func (e *Engine) Sync(ctx context.Context) error {
+	e.mu.RLock()
+	if e.closed {
+		e.mu.RUnlock()
+		return os.ErrClosed
+	}
+	w := e.w
+	e.mu.RUnlock()
+	return w.sync()
+}
+
 // flushLocked writes the current memtable (including tombstones — they
 // must persist into the SSTable to keep shadowing whatever older tables
 // might hold the same key) to a new, immutable SSTable, and only after
@@ -620,7 +663,7 @@ func (e *Engine) truncateWALLocked() error {
 	if err := os.Truncate(e.walPath, 0); err != nil {
 		return err
 	}
-	w, err := openWAL(e.walPath, alwaysSync, fsyncMode)
+	w, err := openWAL(e.walPath, alwaysSync, fsyncMode, e.commitInterval)
 	if err != nil {
 		return err
 	}

@@ -117,6 +117,7 @@ type sstWriter struct {
 	bloom  *bloomFilter
 	idx    []sstIndexEntry
 	keys   []string
+	hdr    [21]byte // writeRecord (17) + index-entry encode (21) scratch; see writeRecord's doc
 	err    error
 }
 
@@ -138,8 +139,10 @@ func (sw *sstWriter) add(key string, value []byte, kind recKind, expiresAt int64
 	if sw.err != nil {
 		return sw.err
 	}
-	r := record{Kind: kind, Key: []byte(key), Value: value, ExpiresAt: expiresAt}
-	if err := writeRecord(sw.w, r); err != nil {
+	// stringAsBytes: no per-record string->[]byte copy — writeRecord and
+	// bloom.add only read the bytes (see its doc comment).
+	r := record{Kind: kind, Key: stringAsBytes(key), Value: value, ExpiresAt: expiresAt}
+	if err := writeRecord(sw.w, sw.hdr[:], r); err != nil {
 		sw.err = err
 		return err
 	}
@@ -164,14 +167,14 @@ func (sw *sstWriter) finish() (*sstable, error) {
 	}
 	indexStart := sw.offset
 	offset := sw.offset
-	var hdr [21]byte
+	hdr := sw.hdr[:21] // reused scratch; a loop-local array would heap-escape per Write
 	for i, k := range sw.keys {
 		ie := sw.idx[i]
 		binary.BigEndian.PutUint32(hdr[0:4], uint32(len(k)))
 		binary.BigEndian.PutUint64(hdr[4:12], uint64(ie.offset))
 		hdr[12] = byte(ie.kind)
 		binary.BigEndian.PutUint64(hdr[13:21], uint64(ie.expiresAt))
-		if _, err := sw.w.Write(hdr[:]); err != nil {
+		if _, err := sw.w.Write(hdr); err != nil {
 			sw.f.Close()
 			return nil, err
 		}

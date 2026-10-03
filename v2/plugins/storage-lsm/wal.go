@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // FsyncMode selects which durability guarantee a "durable write" actually
@@ -106,18 +107,26 @@ type record struct {
 // crc32 covers everything before it, so a torn write at the tail (a crash
 // mid-append) is detected and safely truncated on replay instead of
 // corrupting the in-memory index.
-func writeRecord(w *bufio.Writer, r record) error {
-	var buf [1 + 4 + 4 + 8]byte
-	buf[0] = byte(r.Kind)
-	binary.BigEndian.PutUint32(buf[1:5], uint32(len(r.Key)))
-	binary.BigEndian.PutUint32(buf[5:9], uint32(len(r.Value)))
-	binary.BigEndian.PutUint64(buf[9:17], uint64(r.ExpiresAt))
+//
+// hdr is caller-owned scratch of at least 17 bytes, reused across calls
+// (see wal.hdr / sstWriter.hdr). This is not a micro-optimization for its
+// own sake: a stack-local array's slice passed to bufio.Writer.Write
+// escapes to the heap, because bufio's writer routes through an io.Writer
+// interface — so an inline "var buf [17]byte" here measured as one heap
+// allocation per record on the hot write path. Reusing a caller-owned
+// buffer makes the whole function allocation-free.
+func writeRecord(w *bufio.Writer, hdr []byte, r record) error {
+	hdr = hdr[:17]
+	hdr[0] = byte(r.Kind)
+	binary.BigEndian.PutUint32(hdr[1:5], uint32(len(r.Key)))
+	binary.BigEndian.PutUint32(hdr[5:9], uint32(len(r.Value)))
+	binary.BigEndian.PutUint64(hdr[9:17], uint64(r.ExpiresAt))
 
-	crc := crc32.Update(0, crc32.IEEETable, buf[:])
+	crc := crc32.Update(0, crc32.IEEETable, hdr)
 	crc = crc32.Update(crc, crc32.IEEETable, r.Key)
 	crc = crc32.Update(crc, crc32.IEEETable, r.Value)
 
-	if _, err := w.Write(buf[:]); err != nil {
+	if _, err := w.Write(hdr); err != nil {
 		return err
 	}
 	if _, err := w.Write(r.Key); err != nil {
@@ -126,9 +135,8 @@ func writeRecord(w *bufio.Writer, r record) error {
 	if _, err := w.Write(r.Value); err != nil {
 		return err
 	}
-	var crcBuf [4]byte
-	binary.BigEndian.PutUint32(crcBuf[:], crc)
-	_, err := w.Write(crcBuf[:])
+	binary.BigEndian.PutUint32(hdr[:4], crc)
+	_, err := w.Write(hdr[:4])
 	return err
 }
 
@@ -137,40 +145,70 @@ func writeRecord(w *bufio.Writer, r record) error {
 // trailing record is reported as io.ErrUnexpectedEOF or a crc mismatch,
 // both of which the replay loop treats as "stop here, this is a torn
 // write from a crash mid-append" rather than a fatal error.
-func readRecord(r io.Reader) (record, error) {
-	header := make([]byte, 1+4+4+8)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return record{}, err
+//
+// The decode is allocation-conscious on purpose (this runs once per
+// record on every replay and every compaction merge): the header and
+// trailing CRC are read through bufio.ReadByte into stack state — a
+// stack slice passed to io.ReadFull escapes to the heap through the
+// io.Reader interface, which measured as one heap allocation per read —
+// the checksum is the crc32.Update chain rather than a hash.Hash32
+// object, and key+value share ONE backing allocation whose two halves
+// are both returned (callers may retain either half).
+func readRecord(r *bufio.Reader) (record, error) {
+	var hdr [17]byte
+	for i := range hdr {
+		b, err := r.ReadByte()
+		if err != nil {
+			if i == 0 && err == io.EOF {
+				return record{}, io.EOF
+			}
+			if err == io.EOF {
+				return record{}, io.ErrUnexpectedEOF
+			}
+			return record{}, err
+		}
+		hdr[i] = b
 	}
-	kind := recKind(header[0])
-	keyLen := binary.BigEndian.Uint32(header[1:5])
-	valLen := binary.BigEndian.Uint32(header[5:9])
-	expiresAt := int64(binary.BigEndian.Uint64(header[9:17]))
+	kind := recKind(hdr[0])
+	keyLen := int(binary.BigEndian.Uint32(hdr[1:5]))
+	valLen := int(binary.BigEndian.Uint32(hdr[5:9]))
+	expiresAt := int64(binary.BigEndian.Uint64(hdr[9:17]))
 
-	h := crc32.NewIEEE()
-	h.Write(header)
-
-	key := make([]byte, keyLen)
-	if _, err := io.ReadFull(r, key); err != nil {
+	kv := make([]byte, keyLen+valLen)
+	if _, err := io.ReadFull(r, kv); err != nil {
 		return record{}, io.ErrUnexpectedEOF
 	}
-	h.Write(key)
+	key, val := kv[:keyLen], kv[keyLen:]
 
-	val := make([]byte, valLen)
-	if _, err := io.ReadFull(r, val); err != nil {
-		return record{}, io.ErrUnexpectedEOF
-	}
-	h.Write(val)
+	crc := crc32.Update(0, crc32.IEEETable, hdr[:])
+	crc = crc32.Update(crc, crc32.IEEETable, key)
+	crc = crc32.Update(crc, crc32.IEEETable, val)
 
 	var crcBuf [4]byte
-	if _, err := io.ReadFull(r, crcBuf[:]); err != nil {
-		return record{}, io.ErrUnexpectedEOF
+	for i := range crcBuf {
+		b, err := r.ReadByte()
+		if err != nil {
+			return record{}, io.ErrUnexpectedEOF
+		}
+		crcBuf[i] = b
 	}
-	if binary.BigEndian.Uint32(crcBuf[:]) != h.Sum32() {
+	if binary.BigEndian.Uint32(crcBuf[:]) != crc {
 		return record{}, errors.New("lsm: wal record checksum mismatch (torn write)")
 	}
 
 	return record{Kind: kind, Key: key, Value: val, ExpiresAt: expiresAt}, nil
+}
+
+// stringAsBytes returns key as a read-only []byte alias so record encoding
+// does not copy every string key it writes. Every caller in this package
+// only READS record.Key (WAL encode, bloom probe) and never mutates or
+// retains it beyond the call — the same pattern and reasoning as
+// bloomFilter.mayContainString.
+func stringAsBytes(key string) []byte {
+	if len(key) == 0 {
+		return nil
+	}
+	return unsafe.Slice(unsafe.StringData(key), len(key))
 }
 
 // wal is an append-only log file plus the fsync policy controlling how
@@ -204,9 +242,23 @@ type wal struct {
 	alwaysSync bool
 	fsyncMode  FsyncMode
 
+	// commitInterval > 0 arms the bounded-staleness background commit
+	// pump (see commitPump): staged records are fsynced at least this
+	// often even when no caller is waiting for durability, so a write
+	// made with alwaysSync=false is nevertheless durable within one
+	// interval of being staged. 0 (the default) preserves the original
+	// behavior exactly: sync happens only when a caller asks for it or a
+	// flush/checkpoint closes the WAL.
+	commitInterval time.Duration
+
+	pumpStopOnce sync.Once
+	pumpStop     chan struct{}
+	pumpDone     chan struct{}
+
 	mu  sync.Mutex
 	w   *bufio.Writer
-	gen uint64 // number of records staged so far
+	gen uint64   // number of records staged so far
+	hdr [17]byte // writeRecord scratch; guarded by mu (stage is serialized)
 
 	syncMu    sync.Mutex
 	cond      *sync.Cond // Wait/Broadcast, guarded by syncMu
@@ -217,14 +269,50 @@ type wal struct {
 	syncCount atomic.Int64 // real fsync syscalls performed; testing/observability only
 }
 
-func openWAL(path string, alwaysSync bool, mode FsyncMode) (*wal, error) {
+func openWAL(path string, alwaysSync bool, mode FsyncMode, commitInterval time.Duration) (*wal, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	l := &wal{f: f, w: bufio.NewWriter(f), path: path, alwaysSync: alwaysSync, fsyncMode: mode}
+	l := &wal{f: f, w: bufio.NewWriter(f), path: path, alwaysSync: alwaysSync, fsyncMode: mode, commitInterval: commitInterval}
 	l.cond = sync.NewCond(&l.syncMu)
+	if commitInterval > 0 {
+		l.pumpStop = make(chan struct{})
+		l.pumpDone = make(chan struct{})
+		go l.commitPump()
+	}
 	return l, nil
+}
+
+// commitPump is the bounded-staleness background commit: at most once per
+// commitInterval it routes through sync(), i.e. the SAME waitForSync
+// leader/follower protocol every foreground writer uses — never a raw
+// flushAndSync of its own, so it can neither race an in-flight
+// group-commit round nor duplicate an fsync that round already performs.
+// sync() is a no-op at the syscall level when nothing has been staged
+// since the last durable generation, so an idle engine does not fsync on
+// every tick.
+//
+// This is the commit-coalescing mode for back-to-back single-writer
+// streams: a sequential Put loop with alwaysSync=false stages records at
+// in-memory speed while ONE fsync per interval durably covers all of
+// them, instead of one fsync per write. The trade is explicit and
+// bounded: at most one commitInterval of writes can be lost by a
+// power failure — the same class of guarantee as Redis's AOF "everysec"
+// or PostgreSQL's synchronous_commit=off, not the per-write durability
+// alwaysSync=true provides.
+func (l *wal) commitPump() {
+	defer close(l.pumpDone)
+	t := time.NewTicker(l.commitInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.pumpStop:
+			return
+		case <-t.C:
+			_ = l.sync()
+		}
+	}
 }
 
 // doSync performs the actual durable-flush syscall according to
@@ -250,7 +338,7 @@ func (l *wal) doSync() error {
 func (l *wal) stage(r record) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := writeRecord(l.w, r); err != nil {
+	if err := writeRecord(l.w, l.hdr[:], r); err != nil {
 		return 0, err
 	}
 	l.gen++
@@ -368,6 +456,18 @@ func (l *wal) sync() error {
 }
 
 func (l *wal) close() error {
+	// Stop the commit pump before the final sync+close: a pump tick
+	// racing l.f.Close() would otherwise be an unsynchronized
+	// Sync()-vs-Close() on the same *os.File (see sync()'s doc comment
+	// for why that is exactly what routing through waitForSync avoids).
+	l.pumpStopOnce.Do(func() {
+		if l.pumpStop != nil {
+			close(l.pumpStop)
+		}
+	})
+	if l.pumpDone != nil {
+		<-l.pumpDone
+	}
 	if err := l.sync(); err != nil {
 		l.f.Close()
 		return err
