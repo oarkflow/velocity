@@ -120,6 +120,13 @@ func unindexRow(ctx context.Context, kv api.KVService, table string, schema *Sch
 func indexLookupPKs(ctx context.Context, kv api.KVService, table, col string, v any) ([]string, error) {
 	prefix := idxBucketPrefix(table, col, v)
 	var pks []string
+	if ss, ok := kv.(api.KVStreamScanner); ok {
+		err := ss.ScanKeysStream(ctx, prefix, func(k string) (bool, error) {
+			pks = append(pks, strings.TrimPrefix(k, prefix))
+			return true, nil
+		})
+		return pks, err
+	}
 	cursor := ""
 	for {
 		items, next, err := kv.Scan(ctx, prefix, 1000, cursor)

@@ -167,7 +167,9 @@ func (p *Plugin) PutWithTTL(ctx context.Context, key string, value []byte, ttl t
 	// since that's the semantically meaningful quantity for observers —
 	// ciphertext overhead (nonce/tag bytes) is an encryption implementation
 	// detail, not content the caller cares about.
-	p.publish(ctx, api.TopicKVPut, map[string]any{"key": key, "size": len(value)})
+	if p.hasSubscribers(api.TopicKVPut) {
+		p.publish(ctx, api.TopicKVPut, map[string]any{"key": key, "size": len(value)})
+	}
 	return nil
 }
 
@@ -299,7 +301,9 @@ func (p *Plugin) Delete(ctx context.Context, key string) (err error) {
 	if err := p.storageFor(ctx).Delete(ctx, []byte(key)); err != nil {
 		return err
 	}
-	p.publish(ctx, api.TopicKVDelete, map[string]any{"key": key})
+	if p.hasSubscribers(api.TopicKVDelete) {
+		p.publish(ctx, api.TopicKVDelete, map[string]any{"key": key})
+	}
 	return nil
 }
 
@@ -353,7 +357,9 @@ func (p *Plugin) Incr(ctx context.Context, key string, delta int64) (result int6
 	if err := p.storageFor(ctx).Put(ctx, api.Entry{Key: []byte(key), Value: sealed}); err != nil {
 		return 0, err
 	}
-	p.publish(ctx, api.TopicKVPut, map[string]any{"key": key, "size": len(encoded)})
+	if p.hasSubscribers(api.TopicKVPut) {
+		p.publish(ctx, api.TopicKVPut, map[string]any{"key": key, "size": len(encoded)})
+	}
 	return next, nil
 }
 
@@ -443,11 +449,79 @@ func (p *Plugin) Scan(ctx context.Context, prefix string, limit int, cursor stri
 	return items, nextCursor, nil
 }
 
+// ScanStream implements api.KVStreamScanner: the streaming counterpart to
+// Scan — every entry under prefix is delivered to fn in key order with no
+// map materialization. Values are unsealed exactly as Get/Scan return
+// them and must be copied if retained past fn. Returning false from fn
+// stops the walk cleanly.
+func (p *Plugin) ScanStream(ctx context.Context, prefix string, fn func(key string, value []byte) (bool, error)) error {
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(prefix))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+
+	for it.Next() {
+		k := string(it.Key())
+		plain, err := p.unseal(ctx, k, it.Value())
+		if err != nil {
+			return err
+		}
+		keepGoing, err := fn(k, plain)
+		if err != nil {
+			return err
+		}
+		if !keepGoing {
+			return nil
+		}
+	}
+	return it.Err()
+}
+
+// ScanKeysStream implements the keys-only half of api.KVStreamScanner:
+// values are never fetched, copied, or unsealed — the storage iterator's
+// lazy value path is never touched. This is the right walk for index
+// lookups, whose entries encode everything they carry in the key itself.
+func (p *Plugin) ScanKeysStream(ctx context.Context, prefix string, fn func(key string) (bool, error)) error {
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(prefix))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+
+	for it.Next() {
+		keepGoing, err := fn(string(it.Key()))
+		if err != nil {
+			return err
+		}
+		if !keepGoing {
+			return nil
+		}
+	}
+	return it.Err()
+}
+
 func (p *Plugin) publish(ctx context.Context, topic string, payload any) {
 	if p.events == nil {
 		return
 	}
 	p.events.Publish(ctx, api.Event{Topic: topic, Source: p.Name(), Payload: payload})
+}
+
+// hasSubscribers reports whether anyone is listening for topic on the
+// event bus. Producers call it BEFORE building a payload so a mutation
+// path with no compliance/notifications/replication observers pays
+// nothing for the event machinery (the bus itself may not expose the
+// capability — then this optimistically returns true and behaves exactly
+// as before).
+func (p *Plugin) hasSubscribers(topic string) bool {
+	if p.events == nil {
+		return false
+	}
+	if hs, ok := p.events.(interface{ HasSubscribers(string) bool }); ok {
+		return hs.HasSubscribers(topic)
+	}
+	return true
 }
 
 // watchHandle implements api.WatchHandle for a single Watch subscription.

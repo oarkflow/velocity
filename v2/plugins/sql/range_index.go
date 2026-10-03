@@ -457,6 +457,23 @@ func boundFromOp(col string, op lexer.TokenType, value any, swapped bool) *range
 func rangeLookupPKs(ctx context.Context, kv api.KVService, table string, rb *rangeBound) ([]string, error) {
 	prefix := rangeIdxPrefix(table, rb.col)
 	var pks []string
+	collect := func(k string) {
+		suffix := strings.TrimPrefix(k, prefix)
+		v, pk, ok := decodeRangeEntry(suffix)
+		if !ok {
+			return
+		}
+		if rb.matches(v) {
+			pks = append(pks, pk)
+		}
+	}
+	if ss, ok := kv.(api.KVStreamScanner); ok {
+		err := ss.ScanKeysStream(ctx, prefix, func(k string) (bool, error) {
+			collect(k)
+			return true, nil
+		})
+		return pks, err
+	}
 	cursor := ""
 	for {
 		items, next, err := kv.Scan(ctx, prefix, 1000, cursor)
@@ -464,14 +481,7 @@ func rangeLookupPKs(ctx context.Context, kv api.KVService, table string, rb *ran
 			return nil, err
 		}
 		for k := range items {
-			suffix := strings.TrimPrefix(k, prefix)
-			v, pk, ok := decodeRangeEntry(suffix)
-			if !ok {
-				continue
-			}
-			if rb.matches(v) {
-				pks = append(pks, pk)
-			}
+			collect(k)
 		}
 		if next == "" {
 			return pks, nil

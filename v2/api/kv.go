@@ -24,3 +24,24 @@ type KVService interface {
 	// when there are no more items.
 	Scan(ctx context.Context, prefix string, limit int, cursor string) (items map[string][]byte, nextCursor string, err error)
 }
+
+// KVStreamScanner is an optional capability of a KVService (query via
+// type assertion, like Watchable): it walks a prefix as a STREAM,
+// invoking fn once per entry in key order, instead of materializing pages
+// into a map like Scan. Scan-heavy consumers (the SQL engine's full-table
+// and index scans) use it so a 10,000-row walk costs one callback per row
+// rather than map buckets, key strings, and value copies per page.
+//
+// fn receives a key string and the plaintext value (unsealed exactly as
+// Get/Scan would return it) and returns (keepGoing, error); returning
+// false stops the walk with no error. The value slice must be copied if
+// retained past the callback.
+//
+// ScanKeysStream is the keys-only variant: values are never fetched or
+// unsealed at all (the storage iterator never touches them), which is
+// what index lookups — whose entries carry their payload in the key —
+// should use.
+type KVStreamScanner interface {
+	ScanStream(ctx context.Context, prefix string, fn func(key string, value []byte) (bool, error)) error
+	ScanKeysStream(ctx context.Context, prefix string, fn func(key string) (bool, error)) error
+}

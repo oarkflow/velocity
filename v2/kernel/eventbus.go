@@ -49,6 +49,10 @@ func (b *eventBus) Subscribe(topic string, h api.Handler) api.Subscription {
 func (b *eventBus) Publish(ctx context.Context, ev api.Event) {
 	b.mu.RLock()
 	topicHandlers := b.handlers[ev.Topic]
+	if len(topicHandlers) == 0 {
+		b.mu.RUnlock()
+		return
+	}
 	handlers := make([]api.Handler, 0, len(topicHandlers))
 	for _, h := range topicHandlers {
 		handlers = append(handlers, h)
@@ -58,6 +62,18 @@ func (b *eventBus) Publish(ctx context.Context, ev api.Event) {
 	for _, h := range handlers {
 		b.invoke(ctx, ev, h)
 	}
+}
+
+// HasSubscribers reports whether any handler is currently subscribed to
+// topic. It is an optional capability (queried via type assertion by
+// producers like plugins/kv) that lets a hot mutation path skip building
+// its event payload entirely when nobody is listening — payload maps and
+// boxed values were pure per-write garbage on deployments that never
+// enable compliance/notifications/replication.
+func (b *eventBus) HasSubscribers(topic string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.handlers[topic]) > 0
 }
 
 func (b *eventBus) invoke(ctx context.Context, ev api.Event, h api.Handler) {

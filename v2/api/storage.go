@@ -22,6 +22,13 @@ type BatchOp struct {
 }
 
 // Iterator walks a key range in ascending key order.
+// Iterator walks a key range in ascending key order.
+//
+// Key and Value return slices that are only guaranteed valid until the
+// next call to Next (implementations may reuse their buffers across
+// entries); copy what you need to retain. This contract lets scan-heavy
+// callers walk large ranges without the backend allocating a fresh
+// key/value slice per entry.
 type Iterator interface {
 	Next() bool
 	Key() []byte

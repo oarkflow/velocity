@@ -227,7 +227,21 @@ func execInsert(ctx context.Context, kv api.KVService, stmt *ast.InsertStmt, arg
 
 // scanTable walks every row in table, invoking fn(key, row) for each. fn
 // returns (keepGoing, error).
+//
+// When the KV service exposes the streaming capability (api.KVStreamScanner),
+// rows are walked as a stream with no per-page map materialization —
+// measurably cheaper on large tables (the SQL scan benchmarks); otherwise
+// it falls back to the paged map Scan every KVService has.
 func scanTable(ctx context.Context, kv api.KVService, table string, fn func(key string, row api.Row) (bool, error)) error {
+	if ss, ok := kv.(api.KVStreamScanner); ok {
+		return ss.ScanStream(ctx, rowPrefix(table), func(k string, v []byte) (bool, error) {
+			var row api.Row
+			if err := json.Unmarshal(v, &row); err != nil {
+				return false, fmt.Errorf("sql: corrupt row at %q: %w", k, err)
+			}
+			return fn(k, row)
+		})
+	}
 	cursor := ""
 	for {
 		items, next, err := kv.Scan(ctx, rowPrefix(table), 500, cursor)
