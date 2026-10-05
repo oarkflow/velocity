@@ -189,15 +189,75 @@ func (p *Plugin) Get(ctx context.Context, key string) (val []byte, found bool, e
 	if key == "" {
 		return nil, false, ErrEmptyKey
 	}
-	v, ok, err := p.storageFor(ctx).Get(ctx, []byte(key))
-	if err != nil || !ok {
-		return v, ok, err
+	// Prefer the string-keyed backend path: the generic one is forced to
+	// convert key to []byte here and back to string inside the backend, two
+	// allocations per read for pure type conversions.
+	st := p.storageFor(ctx)
+	var v []byte
+	var hit bool
+	if sk, isSK := st.(api.StringKeyedGetter); isSK {
+		v, hit, err = sk.GetString(ctx, key)
+	} else {
+		v, hit, err = st.Get(ctx, []byte(key))
+	}
+	if err != nil || !hit {
+		return v, hit, err
 	}
 	plain, err := p.unseal(ctx, key, v)
 	if err != nil {
 		return nil, false, err
 	}
 	return plain, true, nil
+}
+
+// GetInto implements api.BufferKVService: Get reading into a caller-owned
+// buffer, so a hot read loop reuses one allocation instead of making one
+// value-sized slice per lookup. Falls back to Get + copy when the backend
+// cannot decode into a buffer.
+//
+// On a miss (hit == false) buf is returned UNCHANGED, not cleared. That is
+// deliberate: the caller must check hit, and clearing would cost a write on
+// every absent-key probe. Do not read the returned slice when hit is false.
+func (p *Plugin) GetInto(ctx context.Context, key string, buf []byte) ([]byte, bool, error) {
+	if p.tracer != nil {
+		var end func()
+		ctx, end = p.tracer.StartSpan(ctx, "kv.Get")
+		p.tracer.SetAttribute(ctx, "kv.key", key)
+		defer end()
+	}
+
+	if key == "" {
+		return buf, false, ErrEmptyKey
+	}
+	st := p.storageFor(ctx)
+	var v []byte
+	var hit bool
+	var err error
+	if bg, isBG := st.(api.BufferGetter); isBG {
+		v, hit, err = bg.GetInto(ctx, key, buf)
+	} else if sk, isSK := st.(api.StringKeyedGetter); isSK {
+		v, hit, err = sk.GetString(ctx, key)
+	} else {
+		v, hit, err = st.Get(ctx, []byte(key))
+	}
+	if err != nil || !hit {
+		return buf, hit, err
+	}
+	if p.crypto == nil {
+		// Unsealing is a no-op, so v may BE buf (BufferGetter wrote into
+		// it) or an owned slice (the fallback paths). Normalize both to buf.
+		if len(v) == 0 {
+			return buf, true, nil
+		}
+		return append(buf[:0], v...), true, nil
+	}
+	plain, err := p.crypto.Decrypt(ctx, v, kvAAD(key))
+	if err != nil {
+		return buf, false, fmt.Errorf("kv: unsealing %q: %w", key, err)
+	}
+	// plain is freshly allocated by Decrypt, so copy it into the caller's
+	// buffer rather than returning memory the caller cannot own.
+	return append(buf[:0], plain...), true, nil
 }
 
 // seal encrypts value for storage under key (using the key itself as AAD,

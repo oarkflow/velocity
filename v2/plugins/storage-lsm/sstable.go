@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 )
@@ -335,11 +336,47 @@ func openSSTable(path string, seq int64, level int) (*sstable, error) {
 	return st, nil
 }
 
+// readScratchPool recycles the speculative-read buffer used by readValueAt /
+// readValueInto.
+//
+// A `var first [512]byte` local cannot stay on the stack: its slice is passed
+// to os.File.ReadAt, which routes through the io.ReaderAt interface, so the
+// compiler must assume it escapes and heap-allocates 512 bytes on EVERY point
+// lookup. Hoisting the buffer onto the sstable instead would fix the
+// allocation but introduce a data race — readValueAt is also reached from
+// Scan's lazy iterator, which runs after the engine lock is released, so two
+// concurrent scans would share one buffer. A pool is per-goroutine-safe and
+// keeps the read path allocation-free after warmup.
+var readScratchPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 512)
+		return &b
+	},
+}
+
+func getScratch() *[]byte {
+	// Stored as *[]byte (not *[512]byte) so the pool hands out a slice header
+	// the caller can pass to ReadAt without further conversion.
+	if p, ok := readScratchPool.Get().(*[]byte); ok {
+		return p
+	}
+	b := make([]byte, 512)
+	return &b
+}
+
+func putScratch(p *[]byte) {
+	if p != nil {
+		readScratchPool.Put(p)
+	}
+}
+
 // readValueAt fetches the record at offset with pread — typically a single
 // syscall (the first read speculatively grabs 512 bytes, enough for small
 // records) — and verifies its checksum.
 func (s *sstable) readValueAt(offset int64) ([]byte, error) {
-	var first [512]byte
+	firstp := getScratch()
+	defer putScratch(firstp)
+	first := *firstp
 	n, err := s.f.ReadAt(first[:], offset)
 	if n < 17 {
 		if err == nil || err == io.EOF {
@@ -366,6 +403,40 @@ func (s *sstable) readValueAt(offset int64) ([]byte, error) {
 	out := make([]byte, vlen)
 	copy(out, rec[17+klen:17+klen+vlen])
 	return out, nil
+}
+
+// readValueInto is readValueAt writing into the caller's buffer, so the
+// buffer-reusing read path (api.BufferGetter) does not allocate a value-sized
+// slice per lookup. The checksum is still verified over the record as read
+// from disk, before the value is exposed.
+func (s *sstable) readValueInto(offset int64, dst []byte) ([]byte, error) {
+	firstp := getScratch()
+	defer putScratch(firstp)
+	first := *firstp
+	n, err := s.f.ReadAt(first[:], offset)
+	if n < 17 {
+		if err == nil || err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		return dst, err
+	}
+	klen := int(binary.BigEndian.Uint32(first[1:5]))
+	vlen := int(binary.BigEndian.Uint32(first[5:9]))
+	total := 17 + klen + vlen + 4
+	var rec []byte
+	if total <= n {
+		rec = first[:total]
+	} else {
+		rec = make([]byte, total)
+		copy(rec, first[:n])
+		if _, err := s.f.ReadAt(rec[n:], offset+int64(n)); err != nil {
+			return dst, io.ErrUnexpectedEOF
+		}
+	}
+	if binary.BigEndian.Uint32(rec[total-4:]) != crc32.ChecksumIEEE(rec[:total-4]) {
+		return dst, errors.New("lsm: sstable record checksum mismatch")
+	}
+	return append(dst[:0], rec[17+klen:17+klen+vlen]...), nil
 }
 
 // get looks up key, consulting the Bloom filter first. bloomSkipped is

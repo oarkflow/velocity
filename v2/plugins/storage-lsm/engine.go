@@ -239,11 +239,71 @@ func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	return e.getLocked(string(key))
 }
 
+// GetString implements api.StringKeyedGetter. It is Get without the
+// string->[]byte->string round trip the generic path is forced to make.
+func (e *Engine) GetString(ctx context.Context, key string) ([]byte, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.getLocked(key)
+}
+
+// GetInto implements api.BufferGetter: decodes into the caller's buffer so a
+// repeated-read loop reuses one allocation instead of making one per lookup.
+// The returned slice aliases dst, exactly as Get's result aliases nothing the
+// engine retains.
+func (e *Engine) GetInto(ctx context.Context, key string, dst []byte) ([]byte, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.getIntoLocked(key, dst)
+}
+
+// getIntoLocked is the allocation-free core of a read: it appends the live
+// value into dst instead of returning a fresh slice. Keeping this separate from
+// getLocked matters — routing GetInto through getLocked and copying the result
+// would still allocate once per call, which is exactly what the caller is
+// trying to avoid.
+func (e *Engine) getIntoLocked(key string, dst []byte) ([]byte, bool, error) {
+	if v, ok := e.memtable[key]; ok {
+		if v.deleted || isExpired(v.expiresAt) {
+			return dst, false, nil
+		}
+		return append(dst[:0], v.value...), true, nil
+	}
+	for _, st := range e.sstables {
+		// Consult the Bloom filter before the index: it can prove absence
+		// without a lookup, and BloomSkipCount is a tested, observable
+		// behavior, not merely an optimization.
+		if st.bloom != nil && !st.bloom.mayContainString(key) {
+			e.bloomSkipCount.Add(1)
+			continue
+		}
+		ie, ok := st.index[key]
+		if !ok {
+			continue
+		}
+		if ie.kind == recDelete || isExpired(ie.expiresAt) {
+			return dst, false, nil
+		}
+		// Read straight into dst. Going through st.get would allocate a
+		// value-sized slice that is then copied and thrown away.
+		out, err := st.readValueInto(ie.offset, dst)
+		if err != nil {
+			return dst, false, err
+		}
+		return out, true, nil
+	}
+	return dst, false, nil
+}
+
 func (e *Engine) getLocked(key string) ([]byte, bool, error) {
 	if v, ok := e.memtable[key]; ok {
 		if v.deleted || isExpired(v.expiresAt) {
 			return nil, false, nil
 		}
+		// A memtable value is owned by the engine (entryValue.value is
+		// replaced on every write to the key), so the copy is required for
+		// isolation — but it is the ONLY copy on this path, and callers that
+		// re-read into a buffer should prefer GetInto to skip it.
 		out := make([]byte, len(v.value))
 		copy(out, v.value)
 		return out, true, nil

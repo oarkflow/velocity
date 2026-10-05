@@ -43,7 +43,31 @@ func isExpired(expiresAt int64) bool {
 func (e *Engine) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	v, ok := e.index[string(key)]
+	return e.getLocked(string(key))
+}
+
+// GetString implements api.StringKeyedGetter: Get without the
+// string->[]byte->string round trip the generic path is forced to make.
+func (e *Engine) GetString(ctx context.Context, key string) ([]byte, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.getLocked(key)
+}
+
+// GetInto implements api.BufferGetter, decoding into the caller's buffer so a
+// repeated-read loop reuses one allocation instead of one per lookup.
+func (e *Engine) GetInto(ctx context.Context, key string, dst []byte) ([]byte, bool, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	v, ok := e.index[key]
+	if !ok || isExpired(v.expiresAt) {
+		return dst, false, nil
+	}
+	return append(dst[:0], v.value...), true, nil
+}
+
+func (e *Engine) getLocked(key string) ([]byte, bool, error) {
+	v, ok := e.index[key]
 	if !ok || isExpired(v.expiresAt) {
 		return nil, false, nil
 	}

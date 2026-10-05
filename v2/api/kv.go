@@ -25,6 +25,24 @@ type KVService interface {
 	Scan(ctx context.Context, prefix string, limit int, cursor string) (items map[string][]byte, nextCursor string, err error)
 }
 
+// BufferKVService is an optional capability of a KVService (query via type
+// assertion, like KVStreamScanner): a Get that decodes into a caller-owned
+// buffer.
+//
+// It is optional, and deliberately a separate interface, so that adding it does
+// not break every existing api.KVService implementation. Get necessarily
+// allocates one value-sized slice per call — the engine must not hand out
+// memory it will later overwrite — and on a hot point-lookup path that
+// allocation is the dominant remaining cost after the key conversions are gone.
+// A caller that reads in a loop should use GetInto and reuse one buffer.
+//
+// Only the returned slice's bytes up to its length are valid; bytes past that
+// may hold remnants of a previous, longer value. plugins/kv's *Plugin
+// implements it.
+type BufferKVService interface {
+	GetInto(ctx context.Context, key string, buf []byte) ([]byte, bool, error)
+}
+
 // KVStreamScanner is an optional capability of a KVService (query via
 // type assertion, like Watchable): it walks a prefix as a STREAM,
 // invoking fn once per entry in key order, instead of materializing pages

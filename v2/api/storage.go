@@ -38,6 +38,43 @@ type Iterator interface {
 	Close() error
 }
 
+// StringKeyedGetter is an OPTIONAL StorageBackend capability: a Get that takes
+// the key as a string.
+//
+// Every KV key is naturally a string (api.KVService.Get takes one), so the
+// conventional path is []byte(key) at the service layer and string(key) back
+// inside the backend — two heap allocations per read, both of them pure
+// type conversions that are discarded immediately. A backend implementing this
+// accepts the caller's string directly and skips both.
+//
+// It is optional precisely because it is only a performance shortcut: a
+// backend that does not implement it still works through Get, and callers must
+// fall back rather than assume it.
+type StringKeyedGetter interface {
+	// GetString returns the value for key. It must behave identically to
+	// Get(ctx, []byte(key)).
+	GetString(ctx context.Context, key string) ([]byte, bool, error)
+}
+
+// BufferGetter is an OPTIONAL StorageBackend capability: a Get that decodes
+// into a caller-supplied buffer instead of allocating a fresh one.
+//
+// This exists for hot read loops that would otherwise allocate one value-sized
+// buffer per lookup (measured: 4 allocations per KV Get before the string-keyed
+// path removed two of them; this removes the rest). Implementations must
+// return a slice backed by dst whenever it is large enough, and must not
+// retain dst after returning. Callers must fall back to Get when the backend
+// does not implement this.
+type BufferGetter interface {
+	// GetInto writes the value for key into dst, growing dst if it is too
+	// small, and returns the populated slice. found reports whether the key
+	// resolved to a live value.
+	//
+	// On !found, dst is returned UNCHANGED rather than cleared: the caller must
+	// check found, and zeroing would cost a write on every absent-key probe.
+	GetInto(ctx context.Context, key string, dst []byte) (val []byte, found bool, err error)
+}
+
 // RangedScanner is an OPTIONAL StorageBackend capability: a bounded scan that
 // both starts at a known key and stops after a known number of keys.
 //
