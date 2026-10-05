@@ -407,14 +407,47 @@ func (p *Plugin) Scan(ctx context.Context, prefix string, limit int, cursor stri
 		}()
 	}
 
-	it, err := p.storageFor(ctx).Scan(ctx, []byte(prefix))
-	if err != nil {
-		return nil, "", err
+	// When resuming from a cursor, ask the backend to start there directly
+	// (api.RangedScanner) rather than re-resolving every key already
+	// consumed. Without this, a paginated walk re-scans the whole prefix
+	// once per page — O(n·pages) instead of O(n). Backends that don't
+	// implement it fall back to skipping forward, which is why the resume
+	// loop below is still required.
+	var it api.Iterator
+	resumed := cursor == ""
+	// Ask the backend for one more key than the page holds: the loop below
+	// consumes `limit` keys and then needs to SEE the next one to name it as
+	// nextCursor. Without the extra key a full final page would look like the
+	// end of the scan and silently drop the rest of the keyspace.
+	want := 0
+	if limit > 0 {
+		want = limit + 1
+	}
+	if rs, ok := p.storageFor(ctx).(api.RangedScanner); ok && want > 0 {
+		// Used even for the FIRST page (startKey empty): the limit applies to
+		// every page, and bounding page one is what keeps a walk of n keys in
+		// pages of p from ever materializing more than p+1 keys at a time.
+		it, err = rs.ScanFrom(ctx, []byte(prefix), []byte(cursor), want)
+		switch {
+		case err == nil:
+			resumed = true // ScanFrom already positions us at the cursor
+		case errors.Is(err, api.ErrRangeUnsupported):
+			// A wrapper (e.g. tenantScope) whose own backend isn't
+			// seekable: fall back to scanning and skipping forward.
+			it = nil
+		default:
+			return nil, "", err
+		}
+	}
+	if it == nil {
+		it, err = p.storageFor(ctx).Scan(ctx, []byte(prefix))
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	defer it.Close()
 
 	items = make(map[string][]byte)
-	resumed := cursor == ""
 	count := 0
 
 	for it.Next() {

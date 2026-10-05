@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -36,6 +37,42 @@ type Iterator interface {
 	Err() error
 	Close() error
 }
+
+// RangedScanner is an OPTIONAL StorageBackend capability: a bounded scan that
+// both starts at a known key and stops after a known number of keys.
+//
+// It exists for paginated callers, which need both halves. Resuming at a
+// cursor: without startKey, each page re-resolves every key already consumed,
+// so walking n keys in pages of size p costs O(n·n/p). Stopping at maxKeys:
+// without it, a page that returns p keys still materializes all n, so the
+// saving from seeking is immediately given back. Together they make a
+// paginated walk O(n) in total rather than O(n·n/p).
+//
+// Both halves are cheap for a backend to honor: it already resolves the
+// prefix range and can binary-search its sorted keys to startKey, and
+// returning early from a merge is just stopping the loop.
+//
+// Implementations MUST return keys in ascending order, MUST include startKey
+// itself when it is under the prefix (the cursor names the next key to
+// return, not the last one already returned), and MUST return at most maxKeys
+// entries. Callers must treat a backend that does not implement this as "not
+// seekable" and fall back to scanning from the start themselves, so
+// implementing it is never required.
+type RangedScanner interface {
+	// ScanFrom returns an Iterator over keys with the given prefix, starting
+	// at the first such key >= startKey and yielding at most maxKeys entries.
+	// An empty startKey means "from the first key under the prefix"; maxKeys
+	// <= 0 means unlimited.
+	ScanFrom(ctx context.Context, prefix, startKey []byte, maxKeys int) (Iterator, error)
+}
+
+// ErrRangeUnsupported is returned by a wrapper's ScanFrom when the backend it
+// delegates to does not itself implement RangedScanner. Go interfaces cannot
+// declare methods conditionally, so a wrapper that must stay a
+// StorageBackend always *has* a ScanFrom method; returning this sentinel is
+// how it says "not actually seekable". Callers should treat it as "fall back
+// to scanning from the start" rather than as a failure.
+var ErrRangeUnsupported = errors.New("storage: ranged scan not supported by backend")
 
 // Snapshot is a point-in-time read view. Implementations that don't
 // support true MVCC snapshots (e.g. storage-mem) may implement this as a

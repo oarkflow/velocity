@@ -84,16 +84,36 @@ func (e *Engine) Batch(ctx context.Context, ops []api.BatchOp) error {
 }
 
 func (e *Engine) Scan(ctx context.Context, prefix []byte) (api.Iterator, error) {
+	return e.scanFrom(ctx, prefix, nil, 0)
+}
+
+// ScanFrom implements api.RangedScanner, so a paginated caller resumes at
+// startKey instead of re-collecting every key under the prefix on each page.
+func (e *Engine) ScanFrom(ctx context.Context, prefix, startKey []byte, maxKeys int) (api.Iterator, error) {
+	return e.scanFrom(ctx, prefix, startKey, maxKeys)
+}
+
+func (e *Engine) scanFrom(ctx context.Context, prefix, startKey []byte, maxKeys int) (api.Iterator, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	p := string(prefix)
+	var lo string
+	if len(startKey) > 0 {
+		lo = string(startKey)
+	}
 	var keys []string
 	for k, v := range e.index {
-		if len(k) >= len(p) && k[:len(p)] == p && !isExpired(v.expiresAt) {
+		if len(k) >= len(p) && k[:len(p)] == p && (lo == "" || k >= lo) && !isExpired(v.expiresAt) {
 			keys = append(keys, k)
 		}
 	}
 	sort.Strings(keys)
+	// Truncate only AFTER sorting: map iteration order is random, so cutting
+	// the collection short would yield an arbitrary subset of the prefix and
+	// silently drop keys that later pages are supposed to return.
+	if maxKeys > 0 && len(keys) > maxKeys {
+		keys = keys[:maxKeys]
+	}
 	values := make([][]byte, len(keys))
 	for i, k := range keys {
 		values[i] = e.index[k].value

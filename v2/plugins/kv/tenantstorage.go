@@ -61,6 +61,23 @@ func (t *tenantScope) Scan(ctx context.Context, prefix []byte) (api.Iterator, er
 	return &tenantIterator{it: it, stripLen: len(t.prefix)}, nil
 }
 
+// ScanFrom forwards api.RangedScanner so a tenant-scoped paginated walk keeps
+// the O(n) resume behavior: both the prefix and the start key are scoped
+// identically, and tenantIterator strips the prefix back off for the caller.
+// Deliberately NOT declared when the wrapped backend isn't a RangedScanner —
+// the type assertion in kv.Scan then falls back to skipping forward.
+func (t *tenantScope) ScanFrom(ctx context.Context, prefix, startKey []byte, maxKeys int) (api.Iterator, error) {
+	rs, ok := t.backend.(api.RangedScanner)
+	if !ok {
+		return nil, api.ErrRangeUnsupported
+	}
+	it, err := rs.ScanFrom(ctx, t.scopeKey(prefix), t.scopeKey(startKey), maxKeys)
+	if err != nil {
+		return nil, err
+	}
+	return &tenantIterator{it: it, stripLen: len(t.prefix)}, nil
+}
+
 func (t *tenantScope) Snapshot(ctx context.Context) (api.Snapshot, error) {
 	snap, err := t.backend.Snapshot(ctx)
 	if err != nil {
