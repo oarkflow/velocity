@@ -264,6 +264,7 @@ func TestScanFrom_EmptyPrefixAndNoMatches(t *testing.T) {
 		t.Fatalf("empty engine returned %v", got)
 	}
 }
+
 // TestScanFrom_MaxKeysBoundsThePage asserts maxKeys is an upper bound on the
 // entries returned, and that truncating does not corrupt ordering.
 func TestScanFrom_MaxKeysBoundsThePage(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/oarkflow/velocity/v2/api"
@@ -194,5 +195,99 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCompaction_PreservesEveryRecordExactly guards mergeSSTables after the
+// allocation work: keys are now compared as raw bytes and the key handed to
+// the writer is an unsafe alias of the winning cursor's buffer, so a mistake
+// there would silently corrupt or drop records. This checks content, not just
+// counts, across a merge that must resolve duplicates and tombstones.
+func TestCompaction_PreservesEveryRecordExactly(t *testing.T) {
+	ctx := context.Background()
+	e, err := Open(t.TempDir(), true, WithFlushThreshold(1<<30), WithCompactionThreshold(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+
+	// Table 1.
+	for i := 0; i < 200; i++ {
+		must(t, e.Put(ctx, api.Entry{
+			Key:   []byte(fmt.Sprintf("k%04d", i)),
+			Value: []byte(fmt.Sprintf("gen1-%04d-payload", i)),
+		}))
+	}
+	must(t, e.Checkpoint(ctx))
+
+	// Table 2: overwrite evens (newer must win), delete a few odds, add new keys.
+	for i := 0; i < 200; i += 2 {
+		must(t, e.Put(ctx, api.Entry{
+			Key:   []byte(fmt.Sprintf("k%04d", i)),
+			Value: []byte(fmt.Sprintf("gen2-%04d-newer", i)),
+		}))
+	}
+	for _, i := range []int{1, 3, 5, 7} {
+		must(t, e.Delete(ctx, []byte(fmt.Sprintf("k%04d", i))))
+	}
+	for i := 200; i < 260; i++ {
+		must(t, e.Put(ctx, api.Entry{
+			Key:   []byte(fmt.Sprintf("k%04d", i)),
+			Value: []byte(fmt.Sprintf("gen2-%04d-newkey", i)),
+		}))
+	}
+	must(t, e.Checkpoint(ctx)) // triggers the merge
+
+	if e.CompactionCount() == 0 {
+		t.Fatal("expected a compaction to have run")
+	}
+
+	deleted := map[int]bool{1: true, 3: true, 5: true, 7: true}
+	for i := 0; i < 260; i++ {
+		k := fmt.Sprintf("k%04d", i)
+		v, ok, err := e.Get(ctx, []byte(k))
+		if deleted[i] {
+			if ok {
+				t.Fatalf("%s was deleted but reads back as %q", k, v)
+			}
+			continue
+		}
+		if err != nil || !ok {
+			t.Fatalf("%s missing after compaction (ok=%v err=%v)", k, ok, err)
+		}
+		var want string
+		switch {
+		case i < 200 && i%2 == 0:
+			want = fmt.Sprintf("gen2-%04d-newer", i)
+		case i < 200:
+			want = fmt.Sprintf("gen1-%04d-payload", i)
+		default:
+			want = fmt.Sprintf("gen2-%04d-newkey", i)
+		}
+		if string(v) != want {
+			t.Fatalf("%s = %q, want %q", k, v, want)
+		}
+	}
+
+	// The merged table must be sorted and contain exactly the live keys.
+	merged := e.sstables[0]
+	if !sort.StringsAreSorted(merged.keys) {
+		t.Fatal("merged sstable keys are not sorted")
+	}
+	if len(merged.keys) != 260-len(deleted) {
+		t.Fatalf("merged index has %d keys, want %d", len(merged.keys), 260-len(deleted))
+	}
+	// Every indexed offset must resolve to the value Get returned — catches an
+	// aliasing bug where the index points at the wrong record.
+	for _, k := range merged.keys {
+		ie := merged.index[k]
+		raw, err := merged.readValueAt(ie.offset)
+		if err != nil {
+			t.Fatalf("%s: readValueAt: %v", k, err)
+		}
+		want, _, _ := e.Get(ctx, []byte(k))
+		if string(raw) != string(want) {
+			t.Fatalf("%s: index offset resolves to %q but Get returns %q", k, raw, want)
+		}
 	}
 }

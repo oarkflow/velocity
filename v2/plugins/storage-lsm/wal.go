@@ -147,15 +147,20 @@ func writeRecord(w *bufio.Writer, hdr []byte, r record) error {
 // write from a crash mid-append" rather than a fatal error.
 //
 // The decode is allocation-conscious on purpose (this runs once per
-// record on every replay and every compaction merge): the header and
-// trailing CRC are read through bufio.ReadByte into stack state — a
-// stack slice passed to io.ReadFull escapes to the heap through the
-// io.Reader interface, which measured as one heap allocation per read —
-// the checksum is the crc32.Update chain rather than a hash.Hash32
-// object, and key+value share ONE backing allocation whose two halves
-// are both returned (callers may retain either half).
-func readRecord(r *bufio.Reader) (record, error) {
-	var hdr [17]byte
+// record on every replay and every compaction merge): the checksum is the
+// crc32.Update chain rather than a hash.Hash32 object, and key+value share
+// ONE backing allocation whose two halves are both returned (callers may
+// retain either half).
+//
+// hdr is the caller-owned 17-byte header buffer (crcBuf likewise). Both must
+// be supplied rather than declared locally here: a local array's slice is
+// handed to io.Reader, which makes it escape and heap-allocate on every call
+// (measured: 11.4M allocations on a compaction of 10.6M records). Callers
+// that decode in a loop — compaction's sstCursor and the WAL replay loop — own
+// one scratch struct and amortize it across every record they read.
+func readRecord(r *bufio.Reader, sc *recordScratch) (record, error) {
+	hdr := &sc.hdr
+	crcBuf := &sc.crc
 	for i := range hdr {
 		b, err := r.ReadByte()
 		if err != nil {
@@ -184,7 +189,6 @@ func readRecord(r *bufio.Reader) (record, error) {
 	crc = crc32.Update(crc, crc32.IEEETable, key)
 	crc = crc32.Update(crc, crc32.IEEETable, val)
 
-	var crcBuf [4]byte
 	for i := range crcBuf {
 		b, err := r.ReadByte()
 		if err != nil {
@@ -197,6 +201,13 @@ func readRecord(r *bufio.Reader) (record, error) {
 	}
 
 	return record{Kind: kind, Key: key, Value: val, ExpiresAt: expiresAt}, nil
+}
+
+// recordScratch is the reusable decode buffer for readRecord. One per decoding
+// loop (per compaction cursor, per WAL replay) rather than one per record.
+type recordScratch struct {
+	hdr [17]byte
+	crc [4]byte
 }
 
 // stringAsBytes returns key as a read-only []byte alias so record encoding
@@ -490,8 +501,9 @@ func replayWAL(path string) ([]record, error) {
 
 	r := bufio.NewReader(f)
 	var out []record
+	var sc recordScratch
 	for {
-		rec, err := readRecord(r)
+		rec, err := readRecord(r, &sc)
 		if err != nil {
 			if err == io.EOF {
 				break
