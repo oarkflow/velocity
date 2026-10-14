@@ -7,6 +7,7 @@ require (
 	github.com/oarkflow/bcl v0.0.36
 	github.com/oarkflow/config v0.0.1
 	github.com/oarkflow/pdf v0.0.4
+	github.com/oarkflow/previewer v0.0.7
 	github.com/oarkflow/shamir v0.0.3
 	github.com/oarkflow/sqlparser v0.0.2
 	github.com/urfave/cli/v3 v3.13.0
@@ -26,6 +27,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/oarkflow/convert v0.0.6 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect

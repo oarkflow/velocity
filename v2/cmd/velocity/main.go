@@ -19,6 +19,7 @@ import (
 	"github.com/oarkflow/velocity/v2/api"
 	"github.com/oarkflow/velocity/v2/internal/bootstrap"
 	"github.com/oarkflow/velocity/v2/kernel"
+	"github.com/oarkflow/velocity/v2/plugins/preview"
 )
 
 func main() {
@@ -340,6 +341,42 @@ func objectCmd() *cli.Command {
 							fmt.Printf("%s\t%d\t%s\n", o.Key, o.Size, o.VersionID)
 						}
 						return nil
+					})
+				},
+			},
+			{
+				Name:      "preview",
+				Usage:     "preview <bucket> <key> — open the latest version in the browser preview",
+				ArgsUsage: "<bucket> <key>",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() != 2 {
+						return errors.New("usage: object preview <bucket> <key>")
+					}
+					bucket, key := cmd.Args().Get(0), cmd.Args().Get(1)
+					return withKernel(ctx, cmd, func(ctx context.Context, k *kernel.Kernel) error {
+						svc, err := lookup[api.ObjectService](k, "object")
+						if err != nil {
+							return err
+						}
+						return preview.ViewObject(ctx, svc, bucket, key)
+					})
+				},
+			},
+			{
+				Name:      "preview-folder",
+				Usage:     "preview-folder <bucket> <prefix> — open every object under the prefix in the browser preview",
+				ArgsUsage: "<bucket> <prefix>",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() != 2 {
+						return errors.New("usage: object preview-folder <bucket> <prefix>")
+					}
+					bucket, prefix := cmd.Args().Get(0), cmd.Args().Get(1)
+					return withKernel(ctx, cmd, func(ctx context.Context, k *kernel.Kernel) error {
+						svc, err := lookup[api.ObjectService](k, "object")
+						if err != nil {
+							return err
+						}
+						return preview.ViewFolder(ctx, svc, bucket, prefix, preview.FolderOptions{})
 					})
 				},
 			},

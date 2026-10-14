@@ -23,6 +23,8 @@ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 h1:/Tnpcb2E0Pz/tN9s3bfEY2Q8ePCEX9iuS+cneUwncnw=
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0/go.mod h1:zOBXOsUaBSjKgmH4OGzV1esUpR3oUSCPYVd2cUBjKYY=
 github.com/oarkflow/bcl v0.0.36 h1:xU5OcCMrcoaD+33LYQfU4xOTXgbu56eSWfIqJsTZxI8=
@@ -33,6 +35,8 @@ github.com/oarkflow/convert v0.0.6 h1:uHTcyGe8D0Uo21E4xmaXPdhdEvVc1fYWC0Lqcj3N+f
 github.com/oarkflow/convert v0.0.6/go.mod h1:2uCH13m+EopoRto8cwDTFbW9MCOBVYvFDr13wG4ckoo=
 github.com/oarkflow/pdf v0.0.4 h1:GS7CZgokuA/vAE57MmVPPgJhwjmAldC8E05yKlXtigQ=
 github.com/oarkflow/pdf v0.0.4/go.mod h1:N+fy2b5AWGeqfBfXPfZfzDu5+ybMiksx7Kfe7z6vi+0=
+github.com/oarkflow/previewer v0.0.7 h1:ncrVhOzFZCumfd4pkR1OCQLD/4b1m4QlWY43ULVrJ7Y=
+github.com/oarkflow/previewer v0.0.7/go.mod h1:qOegjGWmNdSXB7r7txETaRTQZ1BLxah62eZW9WnksSM=
 github.com/oarkflow/shamir v0.0.3 h1:m7p+HaA9oPhEZWQPCSLxj+G5Gh0hl+ZNaPZ5XR+HII8=
 github.com/oarkflow/shamir v0.0.3/go.mod h1:1dx9Djqu7LldmxYD8HClgD6FyVMWZp1axiZUkGaBgKo=
 github.com/oarkflow/sqlparser v0.0.2 h1:Hzo1ZSspq+qa3klcKT9FaKnmL8lycyEJbjtP+TqSWwo=
