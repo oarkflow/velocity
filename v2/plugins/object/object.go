@@ -621,8 +621,13 @@ func (p *Plugin) ListObjects(ctx context.Context, bucket, prefix string) (_ []ap
 
 	var out []api.ObjectMeta
 	for it.Next() {
-		k := string(it.Key())
-		if !strings.HasSuffix(k, "/latest") {
+		// Suffix test on the iterator's key bytes directly: string(it.Key())
+		// costs one heap allocation PER scanned key, and a bucket whose
+		// objects carry versions (or erasure blocks) scans several keys per
+		// object just to keep the ONE "/latest" record per object — so this
+		// loop is the allocation source for large-versioned listings. The
+		// iterator reuses its key buffer, so nothing is retained here.
+		if !bytes.HasSuffix(it.Key(), latestSuffixBytes) {
 			continue
 		}
 		var rec versionRecord
@@ -633,6 +638,10 @@ func (p *Plugin) ListObjects(ctx context.Context, bucket, prefix string) (_ []ap
 	}
 	return out, it.Err()
 }
+
+// objectLatestSuffix is the "/latest" terminator of objectLatestKey, kept
+// as bytes so ListObjects can test it without string conversion.
+var latestSuffixBytes = []byte("/latest")
 
 func (p *Plugin) PutRetention(ctx context.Context, bucket, key string, policy api.RetentionPolicy) error {
 	rec, err := p.getVersionRecord(ctx, bucket, key, "")

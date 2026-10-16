@@ -270,7 +270,7 @@ Full example: [`examples/sql_demo`](examples/sql_demo) (covers both the native `
 
 `plugins/search` provides four services from one plugin:
 
-- **`search.fulltext`** (`api.SearchIndex`) — inverted-index full-text search with phrase and negative-term query support.
+- **`search.fulltext`** (`api.SearchIndex`) — inverted-index full-text search with phrase and negative-term query support. Query evaluation runs against an **in-memory postings index** (`search.in_memory_index`, default `true`): all posting lists are kept in RAM, kept in lock-step with the durable KV layer by `Index`/`Remove`, and rebuilt from it by a one-time warmup scan on the first query after (re)start — term queries then never touch storage at all (committed benchmark: ~110µs over 2,000 docs, down from ~3.1ms). The tradeoffs — postings memory and the warmup scan, and the fact that writes made AROUND the search plugin directly into `search/ft/idx/*` don't appear in RAM until the next restart — are documented in `plugins/search/fulltext.go`'s package-level explanation. `search.in_memory_index=false` restores the pure scan path (zero extra memory, identical results).
 - **`search.vector`** (`api.VectorIndex`) — a genuine multi-layer HNSW vector index (greedy descent + beam search), measured at 100% recall against brute-force ground truth in testing.
 - **`search.graph`** (`api.GraphStore`) — entities/relations/BFS traversal.
 - **`search.entities`** (`api.EntityExtractionService`) — regex/pattern-based NER (25 rules: email, URL, date, money, phone, SSN, etc. — not a machine-learning model, faithfully matching v1's real approach), Jaro-Winkler entity resolution (merges near-duplicate surface forms), sliding-window text chunking.
@@ -512,7 +512,7 @@ Real, reproducible numbers — not estimates — committed in three places:
 - [`benchmarks/comparison/RESULTS.md`](benchmarks/comparison/RESULTS.md) — Velocity vs. real SQLite vs. real BoltDB.
 - [`benchmarks/comparison/redis/RESULTS.md`](benchmarks/comparison/redis/RESULTS.md) — Velocity's RESP server vs. real Redis 8.10.2.
 
-**Headline, honest findings** (Apple M2 Pro, go1.27.0, 2026-10-03 —
+**Headline, honest findings** (Apple M2 Pro, go1.27.0, 2026-10-16 —
 re-verify on your own hardware, `go test -bench=. ./benchmarks/...`):
 
 | Comparison | Result |
@@ -521,7 +521,8 @@ re-verify on your own hardware, `go test -bench=. ./benchmarks/...`):
 | KV Put, single, `fsync_mode: full` (true power-loss durability) vs. SQLite | 2.85ms — different durability guarantees, not a fair fight (nothing else on the table survives real power loss) |
 | KV Put, single, `fsync_mode: posix` (fsync per write) | 25.7µs — beats SQLite wherever SQLite really commits (fresh unique inserts 42µs, rollback-journal 313µs); SQLite's warm-update 6.7µs does **not** pay a per-statement fsync (verified: `synchronous=FULL` costs the same as `OFF` there — see `benchmarks/comparison/RESULTS.md`) |
 | KV Put, commit-coalescing mode (`commit_interval: 1ms`, bounded 1ms staleness) | **467ns/op; 5,000-key durable bulk load 1.5µs/key — 29x faster than SQLite** |
-| SQL indexed/scan query (`WHERE age > 50`, 10k rows) | **14.2ms** (was 49-55ms) after streaming-scan rework |
+| Full-text search query (2,000 docs, worst-case multi-term + phrase) | **~71µs / 21 allocs** — 115x faster and ~490x fewer allocations than the previous per-key-KV scan (8.2ms / 10,315 allocs); backed by a lazily-warmed in-memory postings index, `search.in_memory_index: false` reverts |
+| SQL indexed/scan query (`WHERE age > 50`, 10k rows) | **11.1ms / 98k allocs** (was 14.2ms / 148k allocs; pre-optimization on the same dependency set ~17.4ms) after a hand-rolled row decoder, qualified-key concat cache, and allocation-free range-index decode |
 | Redis GET/SET/INCR/LPUSH/SADD via real RESP wire protocol vs. real Redis 8.10.2 | **Not slower** (faster on GET/INCR/LPUSH); **pipelined SET throughput ~1.25x faster than Redis** (the previously-untested regime) — see caveats in the linked RESULTS.md |
 | HNSW vector search, 1k → 10k vectors | 227µs → 188µs (sub-linear scaling) |
 

@@ -8,7 +8,7 @@ import (
 func TestFullTextIndexQueryRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	kv := newMemKV()
-	idx := newFullTextIndex(kv)
+	idx := newFullTextIndex(kv, true)
 
 	docs := map[string]map[string]any{
 		"doc1": {"title": "The quick brown fox", "body": "jumps over the lazy dog"},

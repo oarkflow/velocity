@@ -95,7 +95,7 @@ func TestSortableEncoding_PreservesOrder(t *testing.T) {
 	// Round-trip decode check for strings, including embedded NULs.
 	for _, s := range strs {
 		enc := encodeSortableString(s)
-		got, consumed, ok := decodeSortableString(enc)
+		got, consumed, ok := decodeSortableString(string(enc))
 		if !ok {
 			t.Fatalf("decodeSortableString(encodeSortableString(%q)) failed to decode", s)
 		}

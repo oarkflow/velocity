@@ -71,7 +71,12 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	efConstruction := k.Config().Scoped("search").Int("hnsw_ef_construction", 200)
 	efSearch := k.Config().Scoped("search").Int("hnsw_ef_search", 50)
 
-	p.fulltext = newFullTextIndex(kv)
+	// In-memory postings index: see fullTextIndex's doc comment for the
+	// full coherence/memory tradeoff. Default true because it is what
+	// makes term queries constant-time instead of a per-number K-scan;
+	// search.in_memory_index=false disables it entirely.
+	inMemory := k.Config().Scoped("search").Bool("in_memory_index", true)
+	p.fulltext = newFullTextIndex(kv, inMemory)
 	p.vector = newVectorIndex(kv, hnswConfig{
 		Dimension:      dim,
 		M:              m,

@@ -107,7 +107,9 @@ func encodeSortableString(s string) []byte {
 // decodeSortableString reverses encodeSortableString, returning the
 // original string and the number of encoded bytes consumed (including the
 // terminator), so the caller can find where the trailing pk begins.
-func decodeSortableString(buf []byte) (s string, consumed int, ok bool) {
+// Takes a string so the (common) numeric-adjacent zero-alloc decode path
+// never materializes a []byte copy of the entry key.
+func decodeSortableString(buf string) (s string, consumed int, ok bool) {
 	var out []byte
 	i := 0
 	for i < len(buf) {
@@ -151,24 +153,38 @@ func rangeIdxEntryKey(table, col string, v any, pk string) (key string, ok bool)
 // primary-key string. ok is false for a malformed/unrecognized entry
 // (tolerated by callers exactly like a stale equality-index entry is —
 // see index.go's indexLookupPKs doc comment — not treated as corruption).
+//
+// The numeric branch (by far the most common: range-indexed numeric
+// columns) is allocation-free: the 8-byte IEEE encoding is rotated out of
+// the string bytes directly (no []byte conversion), and the primary key
+// is a substring of the caller's string. The string branch's only
+// allocation is the decoded value itself, which the caller needs anyway.
 func decodeRangeEntry(suffix string) (value any, pk string, ok bool) {
 	if len(suffix) < 1 {
 		return nil, "", false
 	}
-	tag := suffix[0]
-	rest := []byte(suffix[1:])
-	switch tag {
+	switch tag := suffix[0]; tag {
 	case rangeTagNumber:
-		if len(rest) < 8 {
+		if len(suffix) < 9 {
 			return nil, "", false
 		}
-		return decodeSortableFloat(rest[:8]), string(rest[8:]), true
+		bits := uint64(0)
+		for i := 1; i <= 8; i++ {
+			bits = bits<<8 | uint64(suffix[i])
+		}
+		if bits&(1<<63) != 0 {
+			bits ^= 1 << 63
+		} else {
+			bits = ^bits
+		}
+		return math.Float64frombits(bits), suffix[9:], true
 	case rangeTagString:
+		rest := suffix[1:]
 		s, n, decOK := decodeSortableString(rest)
 		if !decOK {
 			return nil, "", false
 		}
-		return s, string(rest[n:]), true
+		return s, rest[n:], true
 	default:
 		return nil, "", false
 	}
@@ -449,27 +465,49 @@ func boundFromOp(col string, op lexer.TokenType, value any, swapped bool) *range
 	return rb
 }
 
-// rangeLookupPKs walks every entry in table.col's range-index bucket
-// (see the package doc comment above for why this is a full bucket scan,
-// not a true seek), decoding each and keeping the primary keys whose
-// decoded value satisfies rb. Errors from a single malformed entry are
-// tolerated (skipped) exactly like a stale equality-index entry is.
+// rangeLookupPKs walks table.col's range-index bucket, decoding each
+// lightweight entry and keeping the primary keys whose decoded value
+// satisfies rb. Errors from a single malformed entry are tolerated
+// (skipped) exactly like a stale equality-index entry is.
+//
+// The STREAMING path yields keys in ascending (encoded value, pk) order —
+// the order-preserving encoding makes that identical to value order — so
+// the walk may STOP as soon as it passes the upper bound instead of
+// decoding the whole bucket: once a decoded entry of the SAME type as the
+// high bound (numeric-with-numeric, string-with-string) exceeds it, every
+// later same-type entry does too. Entries of the OTHER type can't satisfy
+// the bound at all — compareValues (values.go) only supports
+// number-to-number and string-to-string, so rb.matches false-fails them
+// no matter where they sit — which is what makes stopping inside one
+// type's run safe. The paged fallback path materializes each page into a
+// map whose iteration order is random even though the underlying scan is
+// sorted, so it must NEVER early-stop — it decodes all entries and only
+// filters, exactly as before.
 func rangeLookupPKs(ctx context.Context, kv api.KVService, table string, rb *rangeBound) ([]string, error) {
 	prefix := rangeIdxPrefix(table, rb.col)
 	var pks []string
-	collect := func(k string) {
-		suffix := strings.TrimPrefix(k, prefix)
-		v, pk, ok := decodeRangeEntry(suffix)
-		if !ok {
-			return
-		}
-		if rb.matches(v) {
-			pks = append(pks, pk)
-		}
-	}
 	if ss, ok := kv.(api.KVStreamScanner); ok {
 		err := ss.ScanKeysStream(ctx, prefix, func(k string) (bool, error) {
-			collect(k)
+			suffix := strings.TrimPrefix(k, prefix)
+			v, pk, ok := decodeRangeEntry(suffix)
+			if !ok {
+				return true, nil
+			}
+			if rb.highVal != nil && valueTag(v) == highBoundTag(rb) {
+				cmp, comparable := compareValues(v, rb.highVal)
+				if comparable {
+					if rb.highIncl {
+						if cmp > 0 {
+							return false, nil // past the bound in value order: end the walk
+						}
+					} else if cmp >= 0 {
+						return false, nil
+					}
+				}
+			}
+			if rb.matches(v) {
+				pks = append(pks, pk)
+			}
 			return true, nil
 		})
 		return pks, err
@@ -481,11 +519,45 @@ func rangeLookupPKs(ctx context.Context, kv api.KVService, table string, rb *ran
 			return nil, err
 		}
 		for k := range items {
-			collect(k)
+			suffix := strings.TrimPrefix(k, prefix)
+			v, pk, ok := decodeRangeEntry(suffix)
+			if !ok {
+				continue
+			}
+			if rb.matches(v) {
+				pks = append(pks, pk)
+			}
 		}
 		if next == "" {
 			return pks, nil
 		}
 		cursor = next
 	}
+}
+
+// valueTag returns the range-index tag byte that a decoded value had —
+// the mirror of rangeIdxEntryKey's encoding choice.
+func valueTag(v any) byte {
+	if _, isNum := numeric(v); isNum {
+		return rangeTagNumber
+	}
+	if _, isStr := v.(string); isStr {
+		return rangeTagString
+	}
+	return 0
+}
+
+// highBoundTag returns the tag byte of the bound's type, or 0 for a
+// bound whose type isn't range-indexable (no early stop then).
+func highBoundTag(rb *rangeBound) byte {
+	if rb.highVal == nil {
+		return 0
+	}
+	if _, bok := numeric(rb.highVal); bok {
+		return rangeTagNumber
+	}
+	if _, sok := rb.highVal.(string); sok {
+		return rangeTagString
+	}
+	return 0
 }

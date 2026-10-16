@@ -235,8 +235,8 @@ func execInsert(ctx context.Context, kv api.KVService, stmt *ast.InsertStmt, arg
 func scanTable(ctx context.Context, kv api.KVService, table string, fn func(key string, row api.Row) (bool, error)) error {
 	if ss, ok := kv.(api.KVStreamScanner); ok {
 		return ss.ScanStream(ctx, rowPrefix(table), func(k string, v []byte) (bool, error) {
-			var row api.Row
-			if err := json.Unmarshal(v, &row); err != nil {
+			row, err := decodeRowJSON(v)
+			if err != nil {
 				return false, fmt.Errorf("sql: corrupt row at %q: %w", k, err)
 			}
 			return fn(k, row)
@@ -249,8 +249,8 @@ func scanTable(ctx context.Context, kv api.KVService, table string, fn func(key 
 			return err
 		}
 		for k, v := range items {
-			var row api.Row
-			if err := json.Unmarshal(v, &row); err != nil {
+			row, err := decodeRowJSON(v)
+			if err != nil {
 				return fmt.Errorf("sql: corrupt row at %q: %w", k, err)
 			}
 			keepGoing, err := fn(k, row)
@@ -401,9 +401,9 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 				if !found {
 					return nil, nil
 				}
-				var row api.Row
-				if err := json.Unmarshal(data, &row); err != nil {
-					return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", v, err)
+				row, err4 := decodeRowJSON(data)
+				if err4 != nil {
+					return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", pk, err4)
 				}
 				return []api.Row{projectColumns(stmt.Columns, row)}, nil
 			}
@@ -430,6 +430,7 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 					if simple.Alias != nil {
 						alias = simple.Alias.Unquoted
 					}
+					qc := newQualifiedKeyCache(table, alias, schema)
 					candidates := make([]api.Row, 0, len(pks))
 					for _, pk := range pks {
 						data, found2, err4 := kv.Get(ctx, rowKey(table, pk))
@@ -439,11 +440,11 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 						if !found2 {
 							continue // stale index entry (e.g. a concurrent delete) — tolerated, not corruption
 						}
-						var row api.Row
-						if err4 := json.Unmarshal(data, &row); err4 != nil {
+						row, err4 := decodeRowJSON(data)
+						if err4 != nil {
 							return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", pk, err4)
 						}
-						candidates = append(candidates, qualifyRow(row, table, alias))
+						candidates = append(candidates, qualifyRowCached(row, table, alias, qc))
 					}
 					return finishSelect(ctx, kv, stmt, args, outer, candidates)
 				}
@@ -472,6 +473,7 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 					if simple.Alias != nil {
 						alias = simple.Alias.Unquoted
 					}
+					qc := newQualifiedKeyCache(table, alias, schema)
 					candidates := make([]api.Row, 0, len(pks))
 					for _, pk := range pks {
 						data, found2, err4 := kv.Get(ctx, rowKey(table, pk))
@@ -481,11 +483,11 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 						if !found2 {
 							continue // stale index entry (e.g. a concurrent delete) — tolerated, not corruption
 						}
-						var row api.Row
-						if err4 := json.Unmarshal(data, &row); err4 != nil {
+						row, err4 := decodeRowJSON(data)
+						if err4 != nil {
 							return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", pk, err4)
 						}
-						candidates = append(candidates, qualifyRow(row, table, alias))
+						candidates = append(candidates, qualifyRowCached(row, table, alias, qc))
 					}
 					addRangeRowsFetched(int64(len(candidates)))
 					return finishSelect(ctx, kv, stmt, args, outer, candidates)
