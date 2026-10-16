@@ -113,7 +113,27 @@ func (p *Plugin) Init(ctx context.Context, k api.Kernel) error {
 	return nil
 }
 
-func (p *Plugin) Start(ctx context.Context) error { return nil }
+// Start kicks off the background warmup of the in-memory postings when
+// they're enabled. ensureWarmed is already idempotent and query-safe
+// (a query arriving mid-warmup takes the write lock and waits for the
+// scan to finish), so the background scan changes no semantics: it only
+// moves the one-time O(corpus) walk out of the first post-restart query
+// into boot — that first query used to pay the whole warmup while its
+// caller waited.
+//
+// Best effort by design: the scan runs detached (context.WithoutCancel
+// on the boot context so a boot-scoped cancellation can't strand the
+// index permanently unwarmed), and an error just leaves warmed=false —
+// the next query retries ensureWarmed synchronously and surfaces the
+// error exactly as if no background warmup had happened.
+func (p *Plugin) Start(ctx context.Context) error {
+	if p.fulltext != nil && p.fulltext.inMemory {
+		go func() {
+			_ = p.fulltext.ensureWarmed(context.WithoutCancel(ctx))
+		}()
+	}
+	return nil
+}
 
 func (p *Plugin) Stop(ctx context.Context) error {
 	p.health = api.Health{Status: "down", Detail: "stopped"}

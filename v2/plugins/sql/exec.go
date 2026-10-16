@@ -19,6 +19,130 @@ type undoFn func(ctx context.Context) error
 
 func noopUndo(context.Context) error { return nil }
 
+// stmtUnqualifiable reports whether a SELECT statement's own evaluation
+// can be completed correctly against BARE-ONLY rows — i.e. whether
+// skipping the per-row qualified-key copies ("table.col"/"alias.col",
+// built by qualifyRow/qualifyRowCached) can never change a result. Both
+// conditions must hold:
+//
+//  1. No subquery construct anywhere in the statement (scalar subqueries,
+//     EXISTS, IN (SELECT ...)). rows produced for THIS statement become
+//     the outer binder context of every nested query evaluation, and
+//     resolve() (eval.go) checks a qualified reference against
+//     row[qualified] BEFORE falling through to the outer row's bare
+//     fallback — an unqualified outer row would let a same-named bare
+//     column of the INNER row shadow the reference incorrectly. With no
+//     subquery at all, no evaluation ever enters that precedence chain.
+//  2. outer == nil at the call site (single-table non-join top-level
+//     SELECT) — the caller enforces this separately, since this walker
+//     only sees this statement's own AST.
+//
+// When both hold, resolve() evaluates a qualified reference "t.col"
+// exactly like the bare "col" of the same row (row[qualified] is absent,
+// there is no outer, so the bare fallback supplies the same value), and a
+// bare reference never saw the qualified keys in the first place. JOINs
+// always qualify regardless (bare names collide across tables BY DESIGN).
+// The walker's default for an unspecified node type is true (qualify), so
+// a parser feature this engine's evaluator doesn't fully enumerate can
+// only cost a missed skip, never a wrong result.
+func stmtUnqualifiable(stmt *ast.SelectStmt) bool {
+	if stmt == nil {
+		return false
+	}
+	if stmt.Distinct { // dedup path keys rows — unaffected, but keep it conservative and cheap
+		return false
+	}
+	if stmt.SetOp != nil || stmt.With != nil {
+		return false
+	}
+	for k := range stmt.Columns {
+		if stmt.Columns[k].Star {
+			continue
+		}
+		if exprMayBeCorrelated(stmt.Columns[k].Expr) {
+			return false
+		}
+	}
+	for _, e := range stmt.DistinctOn {
+		if exprMayBeCorrelated(e) {
+			return false
+		}
+	}
+	if exprMayBeCorrelated(stmt.Where) || exprMayBeCorrelated(stmt.Having) {
+		return false
+	}
+	for _, g := range stmt.GroupBy {
+		if exprMayBeCorrelated(g) {
+			return false
+		}
+	}
+	for _, o := range stmt.OrderBy {
+		if exprMayBeCorrelated(o.Expr) {
+			return false
+		}
+	}
+	return true
+}
+
+// exprMayBeCorrelated walks one expression: true when it contains any
+// subquery construct (the ONLY consumer of a produced row's qualified
+// keys — and of the outer row — in this engine's evaluator).
+func exprMayBeCorrelated(e ast.Expr) bool {
+	switch t := e.(type) {
+	case nil:
+		return false
+	case *ast.Ident, *ast.QualifiedIdent, *ast.Literal, *ast.NullLit, *ast.Param:
+		return false
+	case *ast.BinaryExpr:
+		return exprMayBeCorrelated(t.Left) || exprMayBeCorrelated(t.Right)
+	case *ast.UnaryExpr:
+		return exprMayBeCorrelated(t.Expr)
+	case *ast.IsNullExpr:
+		return exprMayBeCorrelated(t.Expr)
+	case *ast.LikeExpr:
+		return exprMayBeCorrelated(t.Expr) || exprMayBeCorrelated(t.Pattern) || exprMayBeCorrelated(t.Escape)
+	case *ast.BetweenExpr:
+		return exprMayBeCorrelated(t.Expr) || exprMayBeCorrelated(t.Lo) || exprMayBeCorrelated(t.Hi)
+	case *ast.InExpr:
+		if t.Subq != nil {
+			return true
+		}
+		for _, item := range t.List {
+			if exprMayBeCorrelated(item) {
+				return true
+			}
+		}
+		return false
+	case *ast.ExistsExpr, *ast.SubqueryExpr:
+		return true
+	case *ast.FuncCall:
+		for _, a := range t.Args {
+			if exprMayBeCorrelated(a) {
+				return true
+			}
+		}
+		// Filter/Over reference row-set semantics this walker doesn't
+		// model — anything set there forces the qualified path.
+		return t.Filter != nil || t.Over != nil
+	case *ast.CastExpr:
+		return exprMayBeCorrelated(t.Expr)
+	case *ast.CaseExpr:
+		if exprMayBeCorrelated(t.Operand) || exprMayBeCorrelated(t.Else) {
+			return true
+		}
+		for _, w := range t.Whens {
+			if exprMayBeCorrelated(w.Cond) || exprMayBeCorrelated(w.Result) {
+				return true
+			}
+		}
+		return false
+	case *ast.IntervalExpr:
+		return exprMayBeCorrelated(t.Expr)
+	default:
+		return true // unknown node type: never gamble on a bare-only row
+	}
+}
+
 func pkString(v any) (string, error) {
 	if v == nil {
 		return "", fmt.Errorf("sql: primary key value cannot be NULL")
@@ -331,16 +455,29 @@ func dedupRows(rows []api.Row) []api.Row {
 // "alias.col" duplicate keys that resolveFrom adds for JOIN queries —
 // those exist only to make qualified references in WHERE/ON/SELECT
 // unambiguous, not to appear twice in unqualified output.
+//
+// A row that carries no qualified keys at all (the decoded-map result of
+// the statement-unqualifiable fast paths) is returned AS the projection —
+// sharing it is safe because nothing downstream mutates result rows:
+// WHERE evaluation, ORDER BY comparison, LIMIT slicing, and the final
+// return are all read-only over these maps. The dot-scan itself is
+// allocation-free; the copy only happens for rows that actually have
+// qualified keys to drop.
 func projectColumns(cols []ast.SelectColumn, row api.Row) api.Row {
 	bareOnly := func(r api.Row) api.Row {
-		out := make(api.Row, len(r))
-		for k, v := range r {
+		for k := range r {
 			if strings.Contains(k, ".") {
-				continue
+				out := make(api.Row, len(r))
+				for k, v := range r {
+					if strings.Contains(k, ".") {
+						continue
+					}
+					out[k] = v
+				}
+				return out
 			}
-			out[k] = v
 		}
-		return out
+		return r
 	}
 	if len(cols) == 1 && cols[0].Star {
 		return bareOnly(row)
@@ -418,6 +555,12 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 	// only narrows which rows are fetched, it never substitutes for the
 	// real filter, so a bucket-key edge case (see index.go's doc comment)
 	// can only cost a missed fast-path, never a wrong result.
+	//
+	// The shared loop below: row-fetch reuses ONE GetInto buffer across
+	// all candidates (api.BufferKVService; decodeRowJSON copies every
+	// string it retains, so nothing aliases the recycled buffer), and
+	// rows skip the qualified-key materialization when they can never be
+	// correlated against (see stmtUnqualifiable).
 	if simple, ok := stmt.From[0].(*ast.SimpleTable); ok && stmt.Where != nil {
 		table := qualifiedName(simple.Name)
 		if schema, err := loadSchema(ctx, kv, table); err == nil {
@@ -430,21 +573,9 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 					if simple.Alias != nil {
 						alias = simple.Alias.Unquoted
 					}
-					qc := newQualifiedKeyCache(table, alias, schema)
-					candidates := make([]api.Row, 0, len(pks))
-					for _, pk := range pks {
-						data, found2, err4 := kv.Get(ctx, rowKey(table, pk))
-						if err4 != nil {
-							return nil, err4
-						}
-						if !found2 {
-							continue // stale index entry (e.g. a concurrent delete) — tolerated, not corruption
-						}
-						row, err4 := decodeRowJSON(data)
-						if err4 != nil {
-							return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", pk, err4)
-						}
-						candidates = append(candidates, qualifyRowCached(row, table, alias, qc))
+					candidates, err := fetchCandidateRows(ctx, kv, pks, table, rowPrefix(table), alias, schema, stmtUnqualifiable(stmt) && outer == nil)
+					if err != nil {
+						return nil, err
 					}
 					return finishSelect(ctx, kv, stmt, args, outer, candidates)
 				}
@@ -473,21 +604,9 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 					if simple.Alias != nil {
 						alias = simple.Alias.Unquoted
 					}
-					qc := newQualifiedKeyCache(table, alias, schema)
-					candidates := make([]api.Row, 0, len(pks))
-					for _, pk := range pks {
-						data, found2, err4 := kv.Get(ctx, rowKey(table, pk))
-						if err4 != nil {
-							return nil, err4
-						}
-						if !found2 {
-							continue // stale index entry (e.g. a concurrent delete) — tolerated, not corruption
-						}
-						row, err4 := decodeRowJSON(data)
-						if err4 != nil {
-							return nil, fmt.Errorf("sql: corrupt row for pk %v: %w", pk, err4)
-						}
-						candidates = append(candidates, qualifyRowCached(row, table, alias, qc))
+					candidates, err := fetchCandidateRows(ctx, kv, pks, table, rowPrefix(table), alias, schema, stmtUnqualifiable(stmt) && outer == nil)
+					if err != nil {
+						return nil, err
 					}
 					addRangeRowsFetched(int64(len(candidates)))
 					return finishSelect(ctx, kv, stmt, args, outer, candidates)
@@ -496,12 +615,66 @@ func selectRowsOne(ctx context.Context, kv api.KVService, stmt *ast.SelectStmt, 
 		}
 	}
 
-	fromRows, err := resolveFrom(ctx, kv, stmt.From[0], args)
+	unqual := stmtUnqualifiable(stmt) && outer == nil
+	fromRows, err := resolveFrom(ctx, kv, stmt.From[0], args, !unqual)
 	if err != nil {
 		return nil, err
 	}
 	incrFullTableScans()
 	return finishSelect(ctx, kv, stmt, args, outer, fromRows)
+}
+
+// fetchCandidateRows loads and decodes the rows behind a batch of primary
+// keys — the shared body of the equality- and range-index candidate paths.
+//
+// stats: a stale pk (index entry whose row was deleted by a write the
+// index didn't observe — e.g. a concurrent delete) is tolerated, not
+// corruption, exactly like the paths it replaces.
+//
+// Two allocation savings, both proven by the same parity tests the paths
+// had before: (1) when the KV service implements api.BufferKVService, one
+// grow-then-reuse buffer serves every GetInto of the batch — safe only
+// because decodeRowJSON copies every string it retains (its arena
+// semantics), which is what makes dangling-into-buffer rows impossible;
+// (2) when unqual is set, the decode map is used AS the candidate row —
+// the "table.col" references such a row can be resolved with are provably
+// uncorrelatable here (stmtUnqualifiable + outer == nil), so building the
+// qualified duplicate keys would double the map bytes per row for nothing
+// the evaluator can ever read.
+func fetchCandidateRows(ctx context.Context, kv api.KVService, pks []string, table, keyPrefix, alias string, schema *Schema, unqual bool) ([]api.Row, error) {
+	bufKV, isBuf := kv.(api.BufferKVService)
+	qc := newQualifiedKeyCache(table, alias, schema)
+	var buf []byte
+	candidates := make([]api.Row, 0, len(pks))
+	for _, pk := range pks {
+		var data []byte
+		var found bool
+		var err error
+		if isBuf {
+			var fetched []byte
+			fetched, found, err = bufKV.GetInto(ctx, keyPrefix+pk, buf)
+			buf = fetched[:0] // reuse whatever backing GetInto handed back
+			data = fetched
+		} else {
+			data, found, err = kv.Get(ctx, keyPrefix+pk)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue // stale index entry — tolerated, not corruption
+		}
+		row, err := decodeRowJSON(data)
+		if err != nil {
+			return nil, fmt.Errorf("sql: corrupt row for pk %s: %w", pk, err)
+		}
+		if unqual {
+			candidates = append(candidates, row)
+		} else {
+			candidates = append(candidates, qualifyRowCached(row, table, alias, qc))
+		}
+	}
+	return candidates, nil
 }
 
 // finishSelect applies WHERE filtering, GROUP BY/aggregation, ORDER BY,

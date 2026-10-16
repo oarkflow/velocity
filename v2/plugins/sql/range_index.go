@@ -110,28 +110,11 @@ func encodeSortableString(s string) []byte {
 // Takes a string so the (common) numeric-adjacent zero-alloc decode path
 // never materializes a []byte copy of the entry key.
 func decodeSortableString(buf string) (s string, consumed int, ok bool) {
-	var out []byte
-	i := 0
-	for i < len(buf) {
-		if buf[i] == 0x00 {
-			if i+1 >= len(buf) {
-				return "", 0, false
-			}
-			switch buf[i+1] {
-			case 0x00: // terminator
-				return string(out), i + 2, true
-			case 0x01: // escaped literal 0x00
-				out = append(out, 0x00)
-				i += 2
-				continue
-			default:
-				return "", 0, false
-			}
-		}
-		out = append(out, buf[i])
-		i++
+	out, n, ok := decodeSortableStringRaw([]byte(buf))
+	if !ok {
+		return "", 0, false
 	}
-	return "", 0, false // ran off the end without a terminator — malformed
+	return string(out), n, true
 }
 
 // rangeIdxEntryKey returns the full storage key for one range-index
@@ -168,16 +151,7 @@ func decodeRangeEntry(suffix string) (value any, pk string, ok bool) {
 		if len(suffix) < 9 {
 			return nil, "", false
 		}
-		bits := uint64(0)
-		for i := 1; i <= 8; i++ {
-			bits = bits<<8 | uint64(suffix[i])
-		}
-		if bits&(1<<63) != 0 {
-			bits ^= 1 << 63
-		} else {
-			bits = ^bits
-		}
-		return math.Float64frombits(bits), suffix[9:], true
+		return decodeSortableNumber(suffix[1:9]), suffix[9:], true
 	case rangeTagString:
 		rest := suffix[1:]
 		s, n, decOK := decodeSortableString(rest)
@@ -188,6 +162,142 @@ func decodeRangeEntry(suffix string) (value any, pk string, ok bool) {
 	default:
 		return nil, "", false
 	}
+}
+
+// decodeRangeEntryPrefix is decodeRangeEntry for a caller walking an
+// iterator's TRANSIENT key bytes (api.KVKeysIter): same decoding, but
+// everything is derived from the byte slice in place. The numeric branch
+// stays allocation-free; the primary key is converted to a string only
+// when the caller retains it (in the walk that means only for entries
+// whose value satisfies the bound — roughly half of a typical bucket), and
+// the string branch allocates only its decoded value, exactly as before.
+func decodeRangeEntryPrefix(suffix []byte) (value any, pk string, ok bool) {
+	if len(suffix) < 1 {
+		return nil, "", false
+	}
+	switch tag := suffix[0]; tag {
+	case rangeTagNumber:
+		if len(suffix) < 9 {
+			return nil, "", false
+		}
+		return decodeSortableNumberBytes(suffix[1:9]), string(suffix[9:]), true
+	case rangeTagString:
+		s, n, decOK := decodeSortableStringBytes(suffix[1:])
+		if !decOK {
+			return nil, "", false
+		}
+		return s, string(suffix[1+n:]), true
+	default:
+		return nil, "", false
+	}
+}
+
+// decodeSortableNumber reverses encodeSortableFloat's 8 bytes, shared by
+// the string-suffix and []byte variants of the range-entry decoder.
+func decodeSortableNumber(b string) float64 {
+	bits := uint64(0)
+	for i := 0; i < 8; i++ {
+		bits = bits<<8 | uint64(b[i])
+	}
+	if bits&(1<<63) != 0 {
+		bits ^= 1 << 63
+	} else {
+		bits = ^bits
+	}
+	return math.Float64frombits(bits)
+}
+
+// decodeSortableNumberBytes is decodeSortableNumber for eaten-off iterator
+// bytes.
+func decodeSortableNumberBytes(b []byte) float64 {
+	bits := binary.BigEndian.Uint64(b)
+	if bits&(1<<63) != 0 {
+		bits ^= 1 << 63
+	} else {
+		bits = ^bits
+	}
+	return math.Float64frombits(bits)
+}
+
+// decodeSortableStringBytes is decodeSortableString over transient bytes,
+// for the byte-key walk (no intermediate []byte→string copy of the raw
+// encoded text).
+func decodeSortableStringBytes(buf []byte) (s string, consumed int, ok bool) {
+	out, n, ok := decodeSortableStringRaw(buf)
+	if !ok {
+		return "", 0, false
+	}
+	return string(out), n, true
+}
+
+// decodeSortableStringRaw handles both decoders' real logic over a byte
+// sequence; it returns the accumulated decoded bytes (copied by the
+// caller into the final string) and the consumed length.
+func decodeSortableStringRaw(buf []byte) (out []byte, consumed int, ok bool) {
+	i := 0
+	for i < len(buf) {
+		if buf[i] == 0x00 {
+			if i+1 >= len(buf) {
+				return nil, 0, false
+			}
+			switch buf[i+1] {
+			case 0x00: // terminator
+				return out, i + 2, true
+			case 0x01: // escaped literal 0x00
+				out = append(out, 0x00)
+				i += 2
+				continue
+			default:
+				return nil, 0, false
+			}
+		}
+		out = append(out, buf[i])
+		i++
+	}
+	return nil, 0, false // ran off the end without a terminator — malformed
+}
+
+// rangeSeekStartKey computes the SeekFrom start key for a range walk with
+// a lower bound: EVERY entry whose key sorts strictly before this key has
+// a value that cannot satisfy the low bound, so skipping it is a pure
+// dead-work elimination, never a live-result loss.
+//
+// Correctness, case by case (see the encoding notes in the package doc
+// above — enc() is monotonic, so key order is value order within a tag):
+//
+//   - Numeric low bound: start = prefix + 'n' + enc(lowVal). Entries
+//     before it are numeric-tagged with enc < enc(lowVal) ⟹ value <
+//     lowVal ⟹ rb.matches() false-fails them (compareValues only accepts
+//     number-number here). An entry EXACTLY equal to the bound sorts at
+//     startkey + pk — inside the walk — so lowIncl=false filtering keeps
+//     exact semantics (the equality run is walked and dropped by
+//     matches(), never skipped).
+//   - String low bound (or a LIKE 'prefix%' bound): the start key is
+//     prefix + 's' followed by encodeSortableString(lowVal). Same argument
+//     over the memcomparable string encoding. Entries of the OTHER tag
+//     can't match the bound at all (they fail compareValues), and
+//     skipping them would be fine even if their keys sorted before the
+//     seek key — they sort inside the walk instead, and matches() drops
+//     them, so nothing is assumed.
+//
+// A high-bound-only walk (no low bound, no LIKE) returns "" — nothing can
+// be skipped ahead of time; the existing early-stop-on-high-bound handles
+// the other end. The paged fallback path never seeks (its random map
+// iteration order has no position to seek to).
+func rangeSeekStartKey(prefix string, rb *rangeBound) string {
+	if rb.isLike {
+		return prefix + string(rangeTagString) + string(encodeSortableString(rb.likePrefix))
+	}
+	if rb.lowVal == nil {
+		return ""
+	}
+	if f, ok := numeric(rb.lowVal); ok {
+		return prefix + string(rangeTagNumber) + string(encodeSortableFloat(f))
+	}
+	if s, ok := rb.lowVal.(string); ok {
+		return prefix + string(rangeTagString) + string(encodeSortableString(s))
+	}
+	return ""
 }
 
 // indexRowRange/unindexRowRange mirror indexRow/unindexRow (index.go) but
@@ -486,6 +596,43 @@ func boundFromOp(col string, op lexer.TokenType, value any, swapped bool) *range
 func rangeLookupPKs(ctx context.Context, kv api.KVService, table string, rb *rangeBound) ([]string, error) {
 	prefix := rangeIdxPrefix(table, rb.col)
 	var pks []string
+	// Preferred walk: byte keys (no per-entry string conversion — only the
+	// retained pks are converted) and, when the bound has a lower edge,
+	// an in-backend seek that skips the below-bound prefix of the bucket
+	// entirely. Early-stop-on-high-bound semantics are unchanged: the
+	// byte walk is still ascending (RangedScanner's contract), so stopping
+	// inside a same-type run stays exactly as sound as on the string walk.
+	if kit, ok := kv.(api.KVKeysIter); ok {
+		walk := func(key []byte) (bool, error) {
+			v, pk, ok := decodeRangeEntryPrefix(key[len(prefix):])
+			if !ok {
+				return true, nil
+			}
+			if rb.highVal != nil && valueTag(v) == highBoundTag(rb) {
+				cmp, comparable := compareValues(v, rb.highVal)
+				if comparable {
+					if rb.highIncl {
+						if cmp > 0 {
+							return false, nil // past the bound in value order: end the walk
+						}
+					} else if cmp >= 0 {
+						return false, nil
+					}
+				}
+			}
+			if rb.matches(v) {
+				pks = append(pks, pk)
+			}
+			return true, nil
+		}
+		var err error
+		if seek := rangeSeekStartKey(prefix, rb); seek != "" {
+			err = kit.ScanKeysIterFrom(ctx, prefix, seek, walk)
+		} else {
+			err = kit.ScanKeysIter(ctx, prefix, walk)
+		}
+		return pks, err
+	}
 	if ss, ok := kv.(api.KVStreamScanner); ok {
 		err := ss.ScanKeysStream(ctx, prefix, func(k string) (bool, error) {
 			suffix := strings.TrimPrefix(k, prefix)

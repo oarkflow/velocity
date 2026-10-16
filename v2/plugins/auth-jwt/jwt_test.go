@@ -78,7 +78,14 @@ func TestAuthenticate_RejectsTamperedToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	tampered := tok[:len(tok)-1] + "x"
+	// Flip the last character to a DIFFERENT one: the naive
+	// tok[:len-1]+"x" is occasionally NOT a tamper at all — base64url's
+	// last character can already be 'x' (1 in 64 issues), which made this
+	// test intermittently "authenticate" its own forged token.
+	tampered := tok[:len(tok)-1] + "y"
+	if tok[len(tok)-1] == 'y' {
+		tampered = tok[:len(tok)-1] + "x"
+	}
 	if _, err := p.Authenticate(context.Background(), tampered); err == nil {
 		t.Fatal("expected tampered token to be rejected")
 	}

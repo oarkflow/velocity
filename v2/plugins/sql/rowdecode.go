@@ -3,6 +3,7 @@ package sql
 import (
 	"encoding/json"
 	"strconv"
+	"unsafe"
 
 	"github.com/oarkflow/velocity/v2/api"
 )
@@ -18,8 +19,18 @@ import (
 // types (strings, float64 numbers, bools, null), so a hand-tuned parser
 // covers the overwhelming majority with a fraction of the work:
 //
-//	one map (pre-sized from a first-pass key count) + one alloc per
-//	string value + one boxing alloc per number. bool/null are free.
+//	one pre-sized map + ONE shared backing buffer ("arena") for ALL the
+//	row's escape-free strings, so an N-string row costs one arena growth
+//	instead of N separate string allocations + one boxing alloc per
+//	number. bool/null are free.
+//
+// Strings returned from the arena share their bytes with it (via
+// unsafe.String). This is safe because the arena is append-only for the
+// lifetime of one decode: no byte is ever overwritten, and if the arena's
+// backing array grows mid-decode, strings created before the growth keep
+// referencing the (GC-held, still-correct) older array. After the decode
+// returns, the arena's final backing array stays alive exactly as long
+// as the strings that point into it.
 //
 // Anything not covered — top-level non-objects, arrays/objects nested in
 // a field, escapes inside strings — falls back to encoding/json on the
@@ -48,16 +59,27 @@ func decodeRowJSON(data []byte) (api.Row, error) {
 	}
 
 	// First pass sizes the map so it (almost) never re-grows during the
-	// parse pass. estimateKeyCount bails out conservatively when it meets
-	// something nested, giving a large-enough hint for flat rows.
+	// parse pass: estimateKeyCount counts every quoted string and returns
+	// "half of them + 1 bucket" — the +1 covers the common case where at
+	// least one value isn't a string (every non-string value lowers the
+	// "strings" count without being a map entry, so strings/2 would come
+	// out one bucket short for flat rows over exactly-schema columns).
+	// Over-sizing by one bucket is cheaper than a re-grow.
+	// estimateKeyCount bails out conservatively when it meets something
+	// nested, giving a large-enough hint for flat rows.
 	row := make(api.Row, estimateKeyCount(data, i))
+
+	// Append-only string arena backing every escape-free string in this
+	// row (keys and values) — see the package doc above for the sharing
+	// and growth semantics.
+	var arena []byte
 
 	for {
 		i = skipWS(data, i)
 		if i >= len(data) || data[i] != '"' {
 			return nil, rowJSONErr(data)
 		}
-		key, ni, ok := scanPlainString(data, i)
+		key, ni, ok := scanPlainStringInto(data, i, &arena)
 		if !ok {
 			// Escaped/complex key: fall back to encoding/json for the
 			// whole row (keys are engine-written column names; this is
@@ -83,7 +105,7 @@ func decodeRowJSON(data []byte) (api.Row, error) {
 			var end int
 			var ok bool
 			if c == '"' {
-				v, end, ok = scanAnyString(data, i)
+				v, end, ok = scanAnyStringInto(data, i, &arena)
 			} else {
 				v, end, ok = scanJSONScalar(data, i)
 			}
@@ -136,8 +158,12 @@ func rowJSONErr(data []byte) error {
 // estimateKeyCount is a conservative pre-size hint for the row's map:
 // counts quoted strings (keys AND string values both count) and stops at
 // the first nested container or the object's closing brace, dividing by
-// two because roughly half the strings are values. Exactness is not
-// required — the only goal is avoiding map re-growth allocations.
+// two because roughly half the strings are keys. One extra bucket is
+// added because a flat row's key count strictly exceeds "strings/2"
+// whenever at least one value isn't a string (every such value drops the
+// divisor's numerator but not its entries) — the +1 avoids the common
+// one-key-short re-grow. Exactness is not required — the only goal is
+// avoiding map re-growth allocations.
 func estimateKeyCount(data []byte, start int) int {
 	count, quote := 0, false
 	for i := start; i < len(data); i++ {
@@ -155,10 +181,10 @@ func estimateKeyCount(data []byte, start int) int {
 		case '"':
 			quote = true
 		case '{', '[', '}':
-			return count / 2
+			return count/2 + 1
 		}
 	}
-	return count / 2
+	return count/2 + 1
 }
 
 func skipWS(data []byte, i int) int {
@@ -173,37 +199,84 @@ func skipWS(data []byte, i int) int {
 	return i
 }
 
-// scanPlainString decodes the escape-free string starting at data[i]
-// ('"' required). ok=false covers malformed strings, unterminated
-// strings, raw control bytes, and — crucially — ANY escape, so the
-// caller can fall back per the decodeRowJSON contract.
-func scanPlainString(data []byte, i int) (s string, ni int, ok bool) {
-	if i >= len(data) || data[i] != '"' {
+// scanPlainStringInto is scanPlainString for the row-decode arena: the
+// string bytes are appended to *arena and the returned string shares that
+// backing (see decodeRowJSON's doc for the growth/sharing semantics).
+// ok=false covers malformed strings, unterminated strings, raw control
+// bytes, and ANY escape — and in every false case NOTHING is appended, so
+// a failed scan leaves the arena untouched for the fallback path.
+func scanPlainStringInto(data []byte, i int, arena *[]byte) (s string, ni int, ok bool) {
+	end, hasEnd := plainStringEnd(data, i)
+	if !hasEnd {
 		return "", i, false
+	}
+	n := end - i - 1
+	if n == 0 {
+		return "", end + 1, true
+	}
+	start := len(*arena)
+	*arena = append(*arena, data[i+1:end]...)
+	return unsafe.String(&(*arena)[start], n), end + 1, true
+}
+
+// plainStringEnd returns the index of the closing quote of an escape-free
+// string starting at data[i] (which must be '"'), or ok=false for
+// malformed/unterminated strings, raw control bytes, and — crucially —
+// ANY escape, so the caller can fall back per the decodeRowJSON contract.
+func plainStringEnd(data []byte, i int) (end int, ok bool) {
+	if i >= len(data) || data[i] != '"' {
+		return i, false
 	}
 	j := i + 1
 	for j < len(data) {
 		c := data[j]
 		switch {
 		case c == '\\':
-			return "", j, false
+			return j, false
 		case c == '"':
-			return string(data[i+1 : j]), j + 1, true
+			return j, true
 		case c < 0x20:
-			return "", j, false // raw control char is invalid JSON
+			return j, false // raw control char is invalid JSON
 		default:
 			j++
 		}
 	}
-	return "", j, false // unterminated
+	return j, false // unterminated
 }
 
-// scanAnyString decodes a string value starting at data[i]: escape-free
-// strings take the fast path (one alloc for the result); strings with
-// escapes are scanned for their (valid) end and decoded with
-// encoding/json on that exact range, so unicode/surrogate semantics are
-// identical. ok=false means the range isn't a valid string at all (the
-// caller regenerates encoding/json's own error).
+// scanPlainString decodes the escape-free string starting at data[i]
+// ('"' required) with one allocation for the result.
+func scanPlainString(data []byte, i int) (s string, ni int, ok bool) {
+	end, hasEnd := plainStringEnd(data, i)
+	if !hasEnd {
+		return "", i, false
+	}
+	return string(data[i+1 : end]), end + 1, true
+}
+
+// scanAnyStringInto decodes a string value starting at data[i] into the
+// row decode arena: escape-free strings take the shared-backing fast
+// path; strings with escapes are scanned for their (valid) end and
+// decoded with encoding/json on that exact range, so unicode/surrogate
+// semantics are identical. ok=false means the range isn't a valid string
+// at all (the caller regenerates encoding/json's own error).
+func scanAnyStringInto(data []byte, i int, arena *[]byte) (s string, ni int, ok bool) {
+	if s, ni, ok = scanPlainStringInto(data, i, arena); ok {
+		return s, ni, true
+	}
+	end, hasEnd := scanStringEnd(data, i)
+	if !hasEnd {
+		return "", i, false
+	}
+	var decoded string
+	if err := json.Unmarshal(data[i:end], &decoded); err != nil {
+		return "", i, false // e.g. invalid escape — caller errors via rowJSONErr
+	}
+	return decoded, end, true
+}
+
+// scanAnyString is scanAnyStringInto with a fresh allocation per string,
+// for callers outside the row-decode arena path.
 func scanAnyString(data []byte, i int) (s string, ni int, ok bool) {
 	if s, ni, ok = scanPlainString(data, i); ok {
 		return s, ni, true

@@ -9,6 +9,7 @@
 package kv
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -584,6 +585,81 @@ func (p *Plugin) ScanKeysStream(ctx context.Context, prefix string, fn func(key 
 
 	for it.Next() {
 		keepGoing, err := fn(string(it.Key()))
+		if err != nil {
+			return err
+		}
+		if !keepGoing {
+			return nil
+		}
+	}
+	return it.Err()
+}
+
+// ScanKeysIter implements api.KVKeysIter: ScanKeysStream's callback gets
+// the storage iterator's native []byte key instead of a converted string,
+// so a caller that examines every key but retains a subset (range-index
+// lookups) allocates only for the retained ones. The key slice is
+// transient — valid only until the next callback — so anything retained
+// must be copied. Values are never touched, exactly like ScanKeysStream.
+func (p *Plugin) ScanKeysIter(ctx context.Context, prefix string, fn func(key []byte) (bool, error)) error {
+	it, err := p.storageFor(ctx).Scan(ctx, []byte(prefix))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+
+	for it.Next() {
+		keepGoing, err := fn(it.Key())
+		if err != nil {
+			return err
+		}
+		if !keepGoing {
+			return nil
+		}
+	}
+	return it.Err()
+}
+
+// ScanKeysIterFrom implements api.KVKeysIter's seek variant: entries whose
+// key sorts strictly before startKey are never delivered. When the storage
+// backend is an api.RangedScanner the skip happens INSIDE the backend
+// (binary seek — a lower-bounded index walk no longer scans the skipped
+// half of the bucket at all); otherwise it degrades to scanning from the
+// start and comparing, which is always correct and merely costs what the
+// non-seekable backend would have cost anyway. ErrRangeUnsupported from a
+// wrapper (e.g. tenantScope over a plain backend) is treated the same way,
+// the same fallback Plugin.Scan applies for its pagination.
+func (p *Plugin) ScanKeysIterFrom(ctx context.Context, prefix, startKey string, fn func(key []byte) (bool, error)) error {
+	seek := []byte(startKey)
+	st := p.storageFor(ctx)
+	var it api.Iterator
+	if rs, ok := st.(api.RangedScanner); ok {
+		i, err := rs.ScanFrom(ctx, []byte(prefix), seek, 0)
+		switch {
+		case err == nil:
+			it = i
+		case errors.Is(err, api.ErrRangeUnsupported):
+			// A wrapper whose own backend isn't seekable — fall back to a
+			// full scan and skip forward from startKey ourselves.
+		default:
+			return err
+		}
+	}
+	if it == nil {
+		i, err := st.Scan(ctx, []byte(prefix))
+		if err != nil {
+			return err
+		}
+		it = i
+	}
+	defer it.Close()
+
+	for it.Next() {
+		k := it.Key()
+		if len(seek) > 0 && bytes.Compare(k, seek) < 0 {
+			continue // not-skipped-by-backend fallback path
+		}
+		keepGoing, err := fn(k)
 		if err != nil {
 			return err
 		}

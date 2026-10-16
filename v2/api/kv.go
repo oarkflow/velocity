@@ -25,6 +25,35 @@ type KVService interface {
 	Scan(ctx context.Context, prefix string, limit int, cursor string) (items map[string][]byte, nextCursor string, err error)
 }
 
+// KVKeysIter is an OPTIONAL capability of a KVService (query via type
+// assertion, like KVStreamScanner): the keys-only half of StreamScanner
+// delivered as the storage iterator's native []byte rather than a
+// converted string, and optionally starting at a seek key.
+//
+// Why both exist: index lookups whose payload lives in the KEY (the SQL
+// engine's range index) examine every key under a prefix but retain only
+// the subset that satisfies the query range — today every walked key costs
+// one string conversion allocation, ~5k-10k per query on a 10k-entry
+// bucket. The []byte variant lets such a caller decode straight from the
+// iterator's transient bytes and convert only retained keys. The seek
+// variant (ScanKeysIterFrom) lets a range query with a lower bound skip
+// the prefix of the bucket below the bound entirely.
+//
+// fn receives the key bytes in ascending order. The slice is transient:
+// it is valid only until the next fn call or the scan's end, so callers
+// must copy (e.g. string(k)) if they retain anything past the callback.
+// Returning false from fn stops the walk cleanly.
+type KVKeysIter interface {
+	// ScanKeysIter walks every key under prefix in ascending order.
+	ScanKeysIter(ctx context.Context, prefix string, fn func(key []byte) (bool, error)) error
+	// ScanKeysIterFrom behaves identically to ScanKeysIter, except entries
+	// whose key sorts strictly BEFORE startKey are skipped. When startKey
+	// is empty it is exactly ScanKeysIter. Backends without a seek
+	// primitive degrade to scanning from the beginning and skipping, so a
+	// caller can safely use the two methods as one coherent contract.
+	ScanKeysIterFrom(ctx context.Context, prefix, startKey string, fn func(key []byte) (bool, error)) error
+}
+
 // BufferKVService is an optional capability of a KVService (query via type
 // assertion, like KVStreamScanner): a Get that decodes into a caller-owned
 // buffer.

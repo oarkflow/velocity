@@ -1,6 +1,7 @@
 package search
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,21 +43,34 @@ import (
 // search.in_memory_index=false to always fall back to KV scans (zero
 // extra memory, identical results, the pre-optimization cost profile).
 //
-// Phrase handling is deliberately NOT cached: every candidate document's
-// lowercased text is still fetched from KV per key. Caching all doc
-// texts would multiply memory by the average document size to speed up
-// the one query shape (phrase-only and phrase-with-terms) that is
-// already the rarer one.
+// Phrase handling keeps per-document text reads out of RAM (unlike the
+// term postings, full doc texts are never cached wholesale), but the
+// phrase stage is not free per query either: it filters the candidate
+// keys' texts through KV. Two measures keep that cost bounded, both with
+// the same correctness contract (they can only skip WORK, never change a
+// result):
+//
+//   - Large candidate sets stream the text index in ONE scan and filter
+//     membership in memory, instead of doing one sequential Get per
+//     candidate (O(candidates) round-trips through the KV stack vs one
+//     pass over the corpus text).
+//   - Small, repeated phrase queries hit a FINITE phrase-result cache:
+//     the doc key set a phrase matched, capped at a few entries and
+//     INVALIDATED ON EVERY Index/Remove — stale results are impossible
+//     in the usual query-heavy/write-light pattern, at the cost of a
+//     hit-rate that drops to zero while any writing is going on. No
+//     document is cached — only the (doc -> contained phrase) mapping.
 //
 // Coherence scope, stated plainly: this cache mirrors "search/ft/idx/*"
 // as written through THIS index instance — Index/Remove are the only
 // writers this plugin itself ever uses, and they update cache and KV in
-// lock-step. A writer that reaches around the search plugin and mutates
-// postings keys directly under "search/ft/idx/" (nobody in-tree does)
-// sees its changes on disk but not in RAM until the next process
-// restart's warmup re-scan. That is the classic in-memory-index
-// tradeoff (the same reason Lucene/RocksDB require a reader re-open to
-// see external changes); it is documented here rather than hidden.
+// lock-step (phrase entries are dropped wholesale on every mutation). A
+// writer that reaches around the search plugin and mutates postings keys
+// directly under "search/ft/idx/" (nobody in-tree does) sees its changes
+// on disk but not in RAM until the next process restart's warmup re-scan.
+// That is the classic in-memory-index tradeoff (the same reason
+// Lucene/RocksDB require a reader re-open to see external changes); it is
+// documented here rather than hidden.
 type fullTextIndex struct {
 	kv api.KVService
 
@@ -85,7 +99,37 @@ type fullTextIndex struct {
 	// the KV snapshot warmup built or replayed from here right after);
 	// see cacheAdd/cacheRemove.
 	pendingUpdates []ftPosting
+
+	// phraseMu guards the finite phrase-result cache (phraseCache +
+	// phraseOrder for FIFO eviction). Deliberately a SEPARATE lock, not
+	// rwMu: phrase lookups happen while NO postings lock is held (Query
+	// releases rwMu before applyPhrases), and the only writer of these
+	// entries is the invalidation path, which always runs under rwMu's
+	// write lock — so the lock order is fixed at rwMu -> phraseMu, never
+	// the reverse, and the two locks' spans never overlap in a way that
+	// could cycle. Entries map a queried phrase to the doc keys whose
+	// text contained it at validation time; every Index/Remove wipes the
+	// whole map (cheap, and correct — see invalidatePhrasesLocked).
+	phraseMu    sync.Mutex
+	phraseCache map[string]map[string]struct{}
+	phraseOrder []string // insertion order for FIFO eviction
 }
+
+// Bounds for the phrase-result cache: maxPhraseCacheEntries is the
+// distinct-phrase ceiling (FIFO eviction beyond it); maxPhraseCachedDocs
+// refuses to cache phrase results over very wide doc sets, where the
+// memory of a cached set starts to approach the corpus itself.
+const (
+	maxPhraseCacheEntries = 32
+	maxPhraseCachedDocs   = 8192
+
+	// phraseStreamThreshold: candidate sets above this size route the
+	// phrase filter through ONE ScanStream over the text index instead
+	// of len(keys) sequential Gets. Above ~64 candidates the single pass
+	// wins on latency in practice (and always wins on fairness: one
+	// scan, not thousands of small reads).
+	phraseStreamThreshold = 64
+)
 
 func newFullTextIndex(kv api.KVService, inMemory bool) *fullTextIndex {
 	return &fullTextIndex{
@@ -199,6 +243,10 @@ func (f *fullTextIndex) cacheAdd(updates []ftPosting) {
 }
 
 func (f *fullTextIndex) applyAddLocked(updates []ftPosting) {
+	// Any applied mutation can change a document's text membership, so
+	// cached phrase results are dropped wholesale (see invalidatePhrases
+	// for why this is always-correct rather than just usually).
+	f.invalidatePhrases()
 	for _, u := range updates {
 		m := f.postings[u.term]
 		if m == nil {
@@ -252,7 +300,13 @@ func (f *fullTextIndex) cacheRemove(terms []string, key string) {
 
 // applyRemoveLocked drops postings in place (readers are excluded by the
 // write lock), deleting a term key entirely when its last posting goes.
+// Stale phrase cache entries for a removed doc can't leak into results on
+// their own (candidates are re-derived from live state per query), but the
+// invalidation also covers the re-index case where the SAME doc's text
+// changed — so remove invalidates too, keeping the rule one sentence:
+// "any applied mutation wipes phrase results".
 func (f *fullTextIndex) applyRemoveLocked(updates []ftPosting) {
+	f.invalidatePhrases()
 	for _, u := range updates {
 		m := f.postings[u.term]
 		if _, present := m[u.key]; !present {
@@ -269,6 +323,9 @@ func (f *fullTextIndex) applyRemoveLocked(updates []ftPosting) {
 // ensureWarmed while it holds the write lock, after its rebuild. tf == 0
 // marks a removal queued by cacheRemove; tf > 0 an Index posting.
 func (f *fullTextIndex) applyPendingLocked() {
+	// Replayed pre-warmup Index/Remove batches are real mutations of the
+	// text layer — same invalidation rule as applyAddLocked above.
+	f.invalidatePhrases()
 	for _, u := range f.pendingUpdates {
 		m := f.postings[u.term]
 		present := m != nil
@@ -529,28 +586,163 @@ func (f *fullTextIndex) intersectCached(plan fullTextPlan) map[string]float64 {
 }
 
 // applyPhrases runs the phrase-substring filter over accumulated scores,
-// shared by both the cached and the scan path. Fetching each candidate's
-// text stays a per-key KV read by design: caching every document's full
-// text would multiply memory by the average document size to speed up
-// the one query shape (phrase-only) that is already documented as rare.
+// shared by both the cached and the scan path. Three routes, choosing by
+// cost profile with identical results (all re-derive membership from the
+// CURRENT text of every candidate key, so no route can skew the outcome):
+//
+//   - in-memory mode with a cached result for this exact phrase: the doc
+//     set is intersected with the candidate scores in RAM. The cache is
+//     wiped by every applyAdd/Remove/Pending mutation, so an entry can
+//     only exist between two consecutive writes — see the package doc's
+//     phrase-coherence paragraph.
+//   - large candidate sets: ONE ScanStream over ftTextPfx filters all
+//     candidates' texts in a single pass (transient value bytes —
+//     nothing is retained, so reuse is safe), replacing O(candidates)
+//     sequential Gets.
+//   - small candidate sets (and any KV without streaming): the original
+//     one Get per candidate loop, unchanged.
 func (f *fullTextIndex) applyPhrases(ctx context.Context, plan fullTextPlan, keys map[string]float64) (map[string]float64, error) {
 	for _, phrase := range plan.phrases {
 		if len(keys) == 0 {
 			break
 		}
-		matched := make(map[string]float64)
-		for key := range keys {
-			text, found, err := f.kv.Get(ctx, ftTextPfx+key)
+		if f.inMemory {
+			if docs, ok := f.phraseHit(phrase); ok {
+				keys = phraseIntersect(keys, docs)
+				continue
+			}
+		}
+		var matched map[string]float64
+		if len(keys) > phraseStreamThreshold {
+			if ss, ok := f.kv.(api.KVStreamScanner); ok {
+				m, err := f.phraseMatchByStream(ctx, ss, phrase, keys)
+				if err != nil {
+					return nil, err
+				}
+				matched = m
+			} else {
+				m, err := f.phraseMatchByGets(ctx, phrase, keys)
+				if err != nil {
+					return nil, err
+				}
+				matched = m
+			}
+		} else {
+			m, err := f.phraseMatchByGets(ctx, phrase, keys)
 			if err != nil {
 				return nil, err
 			}
-			if found && strings.Contains(string(text), phrase) {
-				matched[key] = keys[key] + 1
-			}
+			matched = m
+		}
+		if f.inMemory && len(matched) <= maxPhraseCachedDocs {
+			f.phrasePut(phrase, matched)
 		}
 		keys = matched
 	}
 	return keys, nil
+}
+
+// phraseMatchByGets is the original per-candidate Get loop: score of a
+// surviving candidate advances by one per phrase, exactly like every
+// other route.
+func (f *fullTextIndex) phraseMatchByGets(ctx context.Context, phrase string, keys map[string]float64) (map[string]float64, error) {
+	matched := make(map[string]float64)
+	for key := range keys {
+		text, found, err := f.kv.Get(ctx, ftTextPfx+key)
+		if err != nil {
+			return nil, err
+		}
+		if found && strings.Contains(string(text), phrase) {
+			matched[key] = keys[key] + 1
+		}
+	}
+	return matched, nil
+}
+
+// phraseMatchByStream walks the whole text index once. Only the
+// candidate keys are tested, so docs indexed after the candidate set was
+// built can neither join nor get dropped; a doc re-indexed concurrently
+// is seen with either its old or new text — the same racing-get
+// semantics the per-key route always had.
+func (f *fullTextIndex) phraseMatchByStream(ctx context.Context, ss api.KVStreamScanner, phrase string, keys map[string]float64) (map[string]float64, error) {
+	needle := []byte(phrase)
+	matched := make(map[string]float64)
+	err := ss.ScanStream(ctx, ftTextPfx, func(k string, text []byte) (bool, error) {
+		key := strings.TrimPrefix(k, ftTextPfx)
+		if _, cand := keys[key]; cand && bytes.Contains(text, needle) {
+			matched[key] = keys[key] + 1
+		}
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return matched, nil
+}
+
+// phraseIntersect applies a cached phrase's doc set to the candidate
+// scores: same "+1 per phrase" advance as the KV-read routes.
+func phraseIntersect(keys map[string]float64, docs map[string]struct{}) map[string]float64 {
+	out := make(map[string]float64, len(docs))
+	for k, score := range keys {
+		if _, ok := docs[k]; ok {
+			out[k] = score + 1
+		}
+	}
+	return out
+}
+
+// phraseHit reads the phrase-result cache. Entries are immutable once
+// stored (phrasePut replaces wholesale, never mutates in place), so the
+// returned map is safe for concurrent readers.
+func (f *fullTextIndex) phraseHit(phrase string) (map[string]struct{}, bool) {
+	f.phraseMu.Lock()
+	defer f.phraseMu.Unlock()
+	docs, ok := f.phraseCache[phrase]
+	return docs, ok
+}
+
+// phrasePut stores one phrase's doc-set result, FIFO-evicting beyond the
+// entry bound. Called only when a fresh result was just computed under
+// no postings lock; the wipe-invalidation may have raced in the
+// meantime, which is irrelevant — a NEWER result overwrites or the entry
+// stays only until the next invalidation.
+func (f *fullTextIndex) phrasePut(phrase string, matched map[string]float64) {
+	docs := make(map[string]struct{}, len(matched))
+	for k := range matched {
+		docs[k] = struct{}{}
+	}
+	f.phraseMu.Lock()
+	defer f.phraseMu.Unlock()
+	if f.phraseCache == nil {
+		f.phraseCache = make(map[string]map[string]struct{}, maxPhraseCacheEntries)
+	}
+	if _, exists := f.phraseCache[phrase]; !exists {
+		f.phraseOrder = append(f.phraseOrder, phrase)
+	}
+	f.phraseCache[phrase] = docs
+	for len(f.phraseOrder) > maxPhraseCacheEntries {
+		evict := f.phraseOrder[0]
+		f.phraseOrder = f.phraseOrder[1:]
+		delete(f.phraseCache, evict)
+	}
+}
+
+// invalidatePhrases wipes the phrase-result cache. Called from the
+// applyAdd/Remove/Pending mutation appliers, which always run under
+// rwMu's write lock — the fixed lock order documented on phraseMu.
+//
+// Why wipe EVERYTHING instead of tracking per-doc impact: raising the
+// cost of a write by phrase-set bookkeeping defeats the point of the
+// cache (query-heavy/write-light workloads are exactly where it wins),
+// and a coarse wipe can only cost hits, never correctness — a phrase
+// either re-matches fresh on the next query or stops being served from
+// the cache until it is, which is precisely the invalidation semantic.
+func (f *fullTextIndex) invalidatePhrases() {
+	f.phraseMu.Lock()
+	defer f.phraseMu.Unlock()
+	f.phraseCache = nil
+	f.phraseOrder = nil
 }
 
 // finalizeHits turns a scored key set into the sorted, possibly truncated

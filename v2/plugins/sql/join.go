@@ -21,7 +21,17 @@ import (
 // and once under "table.col"/"alias.col" for unambiguous qualified
 // access — see columnRef/resolve in eval.go for how a reference picks
 // between the two.
-func resolveFrom(ctx context.Context, kv api.KVService, ref ast.TableRef, args []any) ([]api.Row, error) {
+//
+// qualify decides whether the per-row qualified keys are built at all. It
+// MUST stay true for every JOIN side (bare names collide across tables by
+// design; the qualified names are what make "a.col = b.col" _ON clauses
+// resolve to the right table's column) and for everything nested — it is
+// false only when the caller has proven via stmtUnqualifiable that no
+// evaluation reachable from these rows can consume a qualified key or an
+// outer row (single-table non-join SELECT, no subquery anywhere, plus
+// outer == nil), in which case skipping them changes no result while
+// saving 50%+ of the per-row map work on scan-heavy queries.
+func resolveFrom(ctx context.Context, kv api.KVService, ref ast.TableRef, args []any, qualify bool) ([]api.Row, error) {
 	switch t := ref.(type) {
 	case *ast.SimpleTable:
 		table := qualifiedName(t.Name)
@@ -31,7 +41,11 @@ func resolveFrom(ctx context.Context, kv api.KVService, ref ast.TableRef, args [
 		}
 		var rows []api.Row
 		err := scanTable(ctx, kv, table, func(_ string, row api.Row) (bool, error) {
-			rows = append(rows, qualifyRow(row, table, alias))
+			if qualify {
+				rows = append(rows, qualifyRow(row, table, alias))
+			} else {
+				rows = append(rows, row)
+			}
 			return true, nil
 		})
 		if err != nil {
@@ -43,11 +57,11 @@ func resolveFrom(ctx context.Context, kv api.KVService, ref ast.TableRef, args [
 		if t.Kind != ast.InnerJoin && t.Kind != ast.LeftJoin {
 			return nil, fmt.Errorf("sql: only INNER JOIN and LEFT JOIN are supported in this pass")
 		}
-		left, err := resolveFrom(ctx, kv, t.Left, args)
+		left, err := resolveFrom(ctx, kv, t.Left, args, true)
 		if err != nil {
 			return nil, err
 		}
-		right, err := resolveFrom(ctx, kv, t.Right, args)
+		right, err := resolveFrom(ctx, kv, t.Right, args, true)
 		if err != nil {
 			return nil, err
 		}
